@@ -1,0 +1,18 @@
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+pydantic==2.14.1
+pydantic-settings==2.16.2
+python-multipart==0.0.32
+anyio==4.15.1
+boto3==1.42.0
+psycopg[binary]==3.3.2
+numpy>=2.1
+opencv-python-headless>=4.10
+shapely>=2.0
+trimesh>=4.5
+pillow>=11
+pytest>=8.0
+# OCR: macOS Vision via pyobjc (no PaddleOCR wheel on Python 3.14). Elsewhere install one of
+# paddleocr, rapidocr, or pytesseract + the tesseract binary. With none, scale must be entered manually.
+pyobjc-framework-Vision>=10; sys_platform == "darwin"

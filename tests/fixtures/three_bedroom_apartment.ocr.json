@@ -1,0 +1,191 @@
+[
+ {
+  "text": "3 Bedroom Apartment Floor Plan",
+  "x": 154.5,
+  "y": 65.7,
+  "width": 603.0,
+  "height": 36.5,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "W",
+  "x": 153.5,
+  "y": 66.0,
+  "width": 18.3,
+  "height": 31.4,
+  "score": 0.3,
+  "rotated": true
+ },
+ {
+  "text": "Patio/ Deck",
+  "x": 401.2,
+  "y": 225.6,
+  "width": 138.2,
+  "height": 22.7,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Bedroom",
+  "x": 143.8,
+  "y": 234.4,
+  "width": 111.8,
+  "height": 20.6,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "13'x 12'",
+  "x": 143.6,
+  "y": 263.2,
+  "width": 94.7,
+  "height": 20.7,
+  "score": 0.5,
+  "rotated": false
+ },
+ {
+  "text": "Bedroom",
+  "x": 604.9,
+  "y": 265.9,
+  "width": 113.1,
+  "height": 21.6,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Closet",
+  "x": 279.2,
+  "y": 271.1,
+  "width": 18.1,
+  "height": 62.8,
+  "score": 1.0,
+  "rotated": true
+ },
+ {
+  "text": "13'x 12'",
+  "x": 607.3,
+  "y": 294.4,
+  "width": 95.2,
+  "height": 22.1,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Living room",
+  "x": 376.5,
+  "y": 379.7,
+  "width": 141.1,
+  "height": 24.7,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Closet",
+  "x": 669.4,
+  "y": 384.6,
+  "width": 54.5,
+  "height": 14.5,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "16'x 13'",
+  "x": 375.4,
+  "y": 407.3,
+  "width": 95.4,
+  "height": 22.1,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Bath/",
+  "x": 119.4,
+  "y": 463.2,
+  "width": 62.6,
+  "height": 22.2,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Bath",
+  "x": 677.1,
+  "y": 496.2,
+  "width": 54.1,
+  "height": 22.0,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "@@",
+  "x": 419.1,
+  "y": 583.2,
+  "width": 45.8,
+  "height": 18.1,
+  "score": 0.3,
+  "rotated": false
+ },
+ {
+  "text": "00",
+  "x": 433.0,
+  "y": 603.2,
+  "width": 19.4,
+  "height": 5.7,
+  "score": 0.3,
+  "rotated": false
+ },
+ {
+  "text": "Bedroom",
+  "x": 603.4,
+  "y": 616.2,
+  "width": 117.5,
+  "height": 20.9,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Dining",
+  "x": 213.9,
+  "y": 616.8,
+  "width": 74.4,
+  "height": 24.2,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "Kitchen",
+  "x": 408.1,
+  "y": 631.5,
+  "width": 87.8,
+  "height": 21.7,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "14'x 10'",
+  "x": 608.8,
+  "y": 644.9,
+  "width": 92.5,
+  "height": 21.2,
+  "score": 1.0,
+  "rotated": false
+ },
+ {
+  "text": "12 6 x 10\"",
+  "x": 213.4,
+  "y": 646.0,
+  "width": 134.4,
+  "height": 19.9,
+  "score": 0.3,
+  "rotated": false
+ },
+ {
+  "text": "00",
+  "x": 390.2,
+  "y": 676.3,
+  "width": 48.9,
+  "height": 27.5,
+  "score": 0.3,
+  "rotated": false
+ }
+]
