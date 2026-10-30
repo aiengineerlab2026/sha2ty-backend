@@ -58,10 +58,10 @@ class LoginBody(BaseModel):
 @router.post("/login")
 async def login(body: LoginBody) -> dict[str, object]:
     settings = get_settings()
-    ok_user = hmac.compare_digest(body.username.strip().encode(), settings.admin_username.encode())
+    ok_user = hmac.compare_digest(body.username.strip().lower().encode(), settings.admin_username.strip().lower().encode())  # emails ignore case
     ok_pass = hmac.compare_digest(body.password.encode(), settings.admin_password.get_secret_value().encode())
     if not (ok_user and ok_pass):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong username or password.")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password.")
     token, expires = issue_token(settings)
     return {"token": token, "expires_at": expires}
 
