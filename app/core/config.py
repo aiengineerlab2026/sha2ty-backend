@@ -24,15 +24,22 @@ class Settings(BaseSettings):
     # Match: OpenAI image editing with two reference images (POST /v1/images/edits).
     openai_image_model: str = "gpt-image-2"
     openai_image_size: str = "1536x1024"  # landscape room photo
-    openai_image_quality: str = "high"  # low | medium | high (cost and time grow with it)
+    openai_image_quality: str = "low"  # low | medium | high (cost and time grow with it)
     openai_image_input_fidelity: str = ""  # "high" keeps reference details on models that support it (gpt-image-1.x); gpt-image-2 rejects it
     openai_image_timeout_seconds: float = 300.0
-    openai_image_expected_seconds: float = 75.0  # typical time per image, for the progress percentage
+    openai_image_expected_seconds: float = 30.0  # typical time per image, for the progress percentage
 
     supabase_url: str = ""
     supabase_anon_key: SecretStr = SecretStr("")
     supabase_service_role_key: SecretStr = SecretStr("")
     database_url: SecretStr = SecretStr("")
+
+    # Admin console (vendor approval). Change both in production; the session secret defaults to the
+    # service role key so tokens can't be forged without it.
+    admin_username: str = "admin"
+    admin_password: SecretStr = SecretStr("admin")
+    admin_session_secret: SecretStr = SecretStr("")
+    admin_session_hours: float = 12.0
 
     supabase_s3_endpoint: str = ""
     supabase_s3_region: str = "eu-west-2"

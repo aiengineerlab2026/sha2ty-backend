@@ -25,9 +25,10 @@ class PlanStore:
 
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None) -> dict[str, Any]:
         params = [
-            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,source_image_url,vendor_id,status,vendors(id,name,logo_url),model_variants(image_url,sort_order)",
+            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,source_image_url,vendor_id,status,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "glb_url=not.is.null",
+            "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
             f"limit={limit}",
             f"offset={offset}",
@@ -43,6 +44,10 @@ class PlanStore:
         # database says are missing and serve the rest (prices stay when only `shape` is missing).
         optional = ["price", "price_unit", "category", "shape", "length2_m"]
         while response.status_code == 400:
+            if "vendors.status=eq.approved" in params and "status" in response.text:
+                params.remove("vendors.status=eq.approved")  # approval migration not applied yet
+                response = await self.client.get(f"{self.base}/models?{'&'.join(params)}", headers=self._headers())
+                continue
             missing = [c for c in optional if f"models.{c}" in response.text or f"'{c}'" in response.text]
             if not missing:
                 break

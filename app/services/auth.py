@@ -55,6 +55,19 @@ async def create_confirmed_user(
     return user_id
 
 
+async def create_pending_vendor(row: dict[str, object], settings: Settings, client: httpx.AsyncClient) -> None:
+    """Insert the vendors row awaiting approval. Without the approval migration, retry the base columns."""
+    url = f"{settings.supabase_url.rstrip('/')}/rest/v1/vendors"
+    try:
+        response = await client.post(url, headers=service_headers(settings), json={**row, "status": "pending"})
+        if response.status_code == 400 and "column" in response.text:
+            response = await client.post(url, headers=service_headers(settings), json={k: row[k] for k in ("id", "name", "location")})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not create the vendor profile.") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not create the vendor profile.")
+
+
 class AuthError(Exception):
     pass
 
