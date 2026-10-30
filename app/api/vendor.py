@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.astra_service import AstraError, AstraService
-from app.services.auth import create_confirmed_user, user_id_from_bearer
+from app.services.auth import create_confirmed_user, create_pending_vendor, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
 from app.services.cdn import Cdn, CdnError
@@ -70,26 +70,44 @@ def get_astra(request: Request) -> AstraService:
 class RegisterBody(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
-    name: str = Field(min_length=1, max_length=120)  # company / studio name
-    location: str = Field(min_length=1, max_length=120)
+    # "customer" shops and plans; "vendor" sells and needs an admin's approval first.
+    kind: Literal["vendor", "customer"] = "vendor"
+    name: str = Field(default="", max_length=120)  # company / studio name (vendors)
+    location: str = Field(default="", max_length=200)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
     full_name: str = Field(default="", max_length=120)  # the person signing up; kept in auth metadata
 
 
 class RegisterResponse(BaseModel):
     user_id: str
+    status: Literal["active", "pending"]
 
 
 @router.post("/register", response_model=RegisterResponse)
 async def register_vendor(body: RegisterBody, request: Request) -> RegisterResponse:
     settings = get_settings()
+    vendor = body.kind == "vendor"
+    if vendor and (not body.name.strip() or not body.location.strip()):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Company name and location are required.")
+    email = body.email.strip().lower()
+    client = request.app.state.auth_http
     user_id = await create_confirmed_user(
-        body.email.strip().lower(),
+        email,
         body.password,
-        {"name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip()},
+        {"role": body.kind, "name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip()},
         settings,
-        request.app.state.auth_http,
+        client,
     )
-    return RegisterResponse(user_id=user_id)
+    if vendor:
+        # The vendor row is written here (service role) so its status starts as pending; vendors
+        # cannot set their own status (see supabase/vendor_approval.sql).
+        await create_pending_vendor(
+            {"id": user_id, "name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip(), "email": email, "lat": body.lat, "lng": body.lng},
+            settings,
+            client,
+        )
+    return RegisterResponse(user_id=user_id, status="pending" if vendor else "active")
 
 
 async def current_user(

@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
 from app.api.match import router as match_router
 from app.api.plans import router as plans_router
 from app.api.vendor import router as vendor_router
@@ -66,6 +67,7 @@ app.add_middleware(
 app.include_router(vendor_router)
 app.include_router(plans_router)
 app.include_router(match_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
