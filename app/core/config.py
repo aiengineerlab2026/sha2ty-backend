@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # Admin console (vendor approval). Change both in production; the session secret defaults to the
     # service role key so tokens can't be forged without it.
-    admin_username: str = "admin"
+    admin_username: str = "admin@admin.com"  # the admin signs in with this email
     admin_password: SecretStr = SecretStr("admin")
     admin_session_secret: SecretStr = SecretStr("")
     admin_session_hours: float = 12.0

@@ -22,8 +22,8 @@ def test_tokens_are_signed_and_expire():
 def test_login_and_protected_routes(monkeypatch):
     monkeypatch.setattr(admin, "get_settings", settings)
     client = TestClient(app)
-    assert client.post("/api/admin/login", json={"username": "admin", "password": "nope"}).status_code == 401
-    ok = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    assert client.post("/api/admin/login", json={"username": "admin@admin.com", "password": "nope"}).status_code == 401
+    ok = client.post("/api/admin/login", json={"username": "Admin@Admin.com", "password": "admin"})
     assert ok.status_code == 200 and ok.json()["token"]
     assert client.get("/api/admin/vendors").status_code == 401  # no token
     assert client.post("/api/admin/vendors/not-a-uuid/status", json={"status": "approved"}, headers={"X-Admin-Token": ok.json()["token"]}).status_code == 422
