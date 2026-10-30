@@ -23,16 +23,17 @@ class PlanStore:
             headers.update(extra)
         return headers
 
-    async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None) -> dict[str, Any]:
+    async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
             "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,source_image_url,vendor_id,status,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
             "status=eq.ready",
-            "glb_url=not.is.null",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
             f"limit={limit}",
             f"offset={offset}",
         ]
+        if require_3d:  # the plan builder places 3D models; the shop also lists photo-only ones
+            params.append("glb_url=not.is.null")
         if vendor_id:
             params.append(f"vendor_id=eq.{vendor_id}")
         if model_id:

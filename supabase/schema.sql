@@ -19,7 +19,7 @@ create table if not exists public.models (
   width_m numeric,
   height_m numeric,
   depth_m numeric,
-  source text not null check (source in ('photo', 'upload')),
+  source text not null check (source in ('photo', 'upload', 'none')),  -- none: photos only, no 3D
   provider text check (provider in ('meshy', 'astra')),
   status text not null default 'draft' check (status in ('draft', 'generating', 'ready', 'failed')),
   glb_url text,
