@@ -94,8 +94,9 @@ async def list_models(
     limit: int = 40,
     offset: int = 0,
     id: UUID | None = None,
+    require_3d: bool = True,
 ) -> dict[str, Any]:
-    return await store(request).catalog(q, vendor_id, min(limit, 100), max(offset, 0), str(id) if id else None)
+    return await store(request).catalog(q, vendor_id, min(limit, 100), max(offset, 0), str(id) if id else None, require_3d)
 
 
 @router.post("/from-dimensions")
