@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    generation_limit: int = 30  # Meshy calls and GPT Astra calls allowed per vendor account (each)
     meshy_api_key: SecretStr = SecretStr("")
     meshy_base_url: str = "https://api.meshy.ai/openapi/v1"
     meshy_request_timeout_seconds: float = 120.0

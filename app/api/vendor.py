@@ -16,6 +16,7 @@ from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services.meshy_service import MeshyError, MeshyService
+from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 
@@ -27,6 +28,7 @@ class GenerateAccepted(BaseModel):
     task_id: str
     provider: Provider
     status: str = "PENDING"
+    remaining: int | None = None  # tries left for this provider after this call
 
 
 class GenerateReady(BaseModel):
@@ -34,6 +36,7 @@ class GenerateReady(BaseModel):
     provider: Provider
     status: Literal["SUCCEEDED"] = "SUCCEEDED"
     glb_url: str
+    remaining: int | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -117,6 +120,27 @@ async def current_user(
     return await user_id_from_bearer(authorization, get_settings(), request.app.state.auth_http)
 
 
+class QuotaResponse(BaseModel):
+    limit: int
+    remaining: dict[str, int]
+
+
+@router.get("/generation-quota", response_model=QuotaResponse)
+async def generation_quota(request: Request, user_id: Annotated[str, Depends(current_user)]) -> QuotaResponse:
+    settings = get_settings()
+    used = await generation_usage(user_id, settings, request.app.state.auth_http)
+    return QuotaResponse(limit=settings.generation_limit, remaining={p: max(settings.generation_limit - n, 0) for p, n in used.items()})
+
+
+async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
+    """Reserve one generation try; 429 when the vendor has used them all. Returns tries left."""
+    used = await use_generation(user_id, provider, 1, settings, request.app.state.auth_http)
+    if used is None:
+        name = "GPT Astra" if provider == "astra" else "Meshy"
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"You have used all {settings.generation_limit} {name} generations for this account.")
+    return settings.generation_limit - used
+
+
 @router.post("/generate")
 async def generate_model(
     request: Request,
@@ -155,17 +179,19 @@ async def generate_model(
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
         if not raw:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
+        remaining = await take_try(request, user_id, "astra", settings)
         try:
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
-        except AstraError as exc:
+        except (AstraError, CdnError) as exc:
+            # ponytail: a failed call gives the try back; refunds are best-effort, not transactional.
+            await use_generation(user_id, "astra", -1, settings, request.app.state.auth_http)
             raise HTTPException(exc.status_code, exc.message) from exc
-        except CdnError as exc:
-            raise HTTPException(exc.status_code, exc.message) from exc
-        return GenerateReady(task_id=object_id, provider="astra", glb_url=url)
+        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining)
 
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
+    remaining = await take_try(request, user_id, "meshy", settings)
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),
@@ -175,9 +201,10 @@ async def generate_model(
             texture_prompt=meshy_texture_prompt(category, title),
         )
     except MeshyError as exc:
+        await use_generation(user_id, "meshy", -1, settings, request.app.state.auth_http)  # Meshy refused: give the try back
         raise HTTPException(exc.status_code, exc.message) from exc
     request.app.state.pending_cdn[task_id] = {"user_id": user_id, "model_id": object_id}
-    return GenerateAccepted(task_id=task_id, provider="meshy")
+    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
