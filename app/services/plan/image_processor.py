@@ -5,7 +5,7 @@ Pipeline (each stage writes a debug image):
   2. Structural walls by thickness, H/V/diagonal segments          → 01..07, 20_walls
   3. Verified openings (door arcs, window lines, exterior gaps)    → 21_openings
   4. Free-space rooms + open-plan zones, topology checks           → 30_sealed, 31_rooms
-  5. Scale from printed dimensions (robust median)                 → 40_final
+  5. Scale: printed dimensions, else doors / furniture / heuristic → 40_final (scale_estimator.py)
 The correction UI edits the pixel-space state (walls/openings/labels/zone lines/scale) and sends it
 back to `plan_from_state`, which re-runs steps 4–5 on the edited walls, so preview and 3D agree.
 """
@@ -23,6 +23,7 @@ from PIL import Image
 from app.services.plan.dimension_ocr import calibrate, measurements_from_boxes, parse_dimension, room_labels, run_ocr
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, geometry_from_plan
 from app.services.plan.room_segmenter import RoomLabel, segment
+from app.services.plan.scale_estimator import door_references, estimate_scale, furniture_references
 from app.services.plan.wall_detector import Opening, WallSegment, detect_walls
 
 MAX_SIDE = 2400  # larger scans are downscaled for speed; `image_scale` maps back to the upload
@@ -106,20 +107,24 @@ def plan_from_state(
     straight = _decode_mask(state.get("straight_lines"), shape)
     seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
 
-    scale = calibrate(seg.zones)
+    if image is not None and "scale_refs" not in state:
+        # Furniture needs the drawing, so it is measured once on upload and carried in the state.
+        state = {**state, "scale_refs": furniture_references(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), seg.zones)}
+    refs = door_references(openings) + [dict(r) for r in state.get("scale_refs") or []]
+    scale = estimate_scale(calibrate(seg.zones), refs, thickness)
     if meters_per_pixel and meters_per_pixel > 0:
         scale["detected_meters_per_pixel"] = scale.get("meters_per_pixel")
         scale["meters_per_pixel"] = float(meters_per_pixel)
         scale["source"] = "user"
+        scale["estimated"] = False
     elif state.get("manual_extent_m") and seg.footprint:
         w_m, d_m = state["manual_extent_m"]
         xs = [p[0] for p in seg.footprint]
         ys = [p[1] for p in seg.footprint]
         scale["meters_per_pixel"] = min(w_m / max(max(xs) - min(xs), 1), d_m / max(max(ys) - min(ys), 1))
         scale["source"] = "overall size"
+        scale["estimated"] = False
         scale_confirmed = True
-    else:
-        scale["source"] = "printed dimensions" if scale["meters_per_pixel"] else "none"
     scale["confirmed"] = bool(scale_confirmed)
     mpp = scale["meters_per_pixel"]
     if mpp:
@@ -145,7 +150,7 @@ def plan_from_state(
             height=wall_height, default_thickness=wall_thickness,
         )
     )
-    payload["scale_confidence"] = scale["confidence"] if scale["source"] == "printed dimensions" else (1.0 if scale_confirmed else 0.0)
+    payload["scale_confidence"] = 1.0 if scale_confirmed else scale["confidence"]
     payload["meters_per_pixel"] = mpp
 
     if debug_images is not None and image is not None:
@@ -168,10 +173,9 @@ def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: 
             errors.append(f"{room['name'] or room['id']}: {problem}.")
         if room["uncertain"]:
             warnings.append(f"{room['name']}: may combine two rooms; check for a missing wall.")
-    if not scale.get("meters_per_pixel"):
-        errors.append("Scale is unknown. Enter the scale or a known room size, then confirm it.")
-    elif not scale.get("confirmed") and (scale.get("confidence", 0) < 0.6 or not scale.get("uniform", True)):
-        errors.append("Scale is not reliable enough. Check it against a printed dimension and confirm it.")
+    # Scale never blocks: an estimated one is labelled approximate and can be corrected afterwards.
+    if scale.get("estimated") and not scale.get("confirmed"):
+        warnings.append("Dimensions automatically estimated from your floor plan. Measurements are approximate.")
     # Unexplained crossings: two wall bodies crossing away from their ends (a junction is fine).
     for i, a in enumerate(walls):
         for b in walls[i + 1 :]:

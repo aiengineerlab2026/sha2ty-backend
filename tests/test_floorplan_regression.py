@@ -217,3 +217,20 @@ def test_live_ocr_reads_printed_dimensions():
     dims = sorted(l.dims_text.replace(" ", "") for l in labels if l.dims_text)
     assert len(dims) == 5, dims
     assert sum(l.kind == "bedroom" for l in labels) == 3
+
+
+TRUE_PX_PER_FT = sum(PX_PER_FT_RANGE) / 2
+ESTIMATE_TOLERANCE = 0.15  # doors / furniture are standard sizes, not measurements
+
+
+@pytest.mark.parametrize("keep", [lambda b: not any(ch.isdigit() for ch in b.text), lambda b: False], ids=["no-dimensions", "no-ocr"])
+def test_scale_is_estimated_without_printed_dimensions(keep, monkeypatch):
+    monkeypatch.setattr(image_processor, "run_ocr", lambda img: ([b for b in recorded_ocr(img)[0] if keep(b)], []))
+    payload = image_processor.plan_from_image(IMAGE.read_bytes())
+    scale = payload["scale"]
+    assert scale["estimated"] and "doors" in scale["source"]
+    assert abs(scale["px_per_ft"] / TRUE_PX_PER_FT - 1) < ESTIMATE_TOLERANCE
+    assert scale["confidence"] < 0.8  # never claims printed-dimension certainty
+    assert payload["validation"]["ok"], payload["validation"]["errors"]
+    assert "Dimensions automatically estimated from your floor plan. Measurements are approximate." in payload["warnings"]
+    assert len(payload["rooms"]) >= 5 and build_room_glb(payload)

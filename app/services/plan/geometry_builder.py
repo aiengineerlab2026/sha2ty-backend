@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 import trimesh
 
-DEFAULT_HEIGHT = 3.0
+DEFAULT_HEIGHT = 2.7
 DEFAULT_THICKNESS = 0.15
 
 

@@ -56,6 +56,7 @@ class CorrectionBody(BaseModel):
     straight_lines: str | None = None
     drawing_unit: str | None = None
     image_scale: float = 1.0
+    scale_refs: list[dict[str, Any]] = Field(default_factory=list)  # furniture references from the upload
     meters_per_pixel: float | None = Field(default=None, gt=0)
     scale_confirmed: bool = False
     height: float = Field(default=DEFAULT_HEIGHT, gt=0, le=20)

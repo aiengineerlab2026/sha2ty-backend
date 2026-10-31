@@ -536,7 +536,6 @@ def calibrate(zones: list[dict]) -> dict:
         )
     result = {"meters_per_pixel": None, "confidence": 0.0, "candidates": candidates, "inliers": [], "warnings": [], "uniform": True}
     if not candidates:
-        result["warnings"].append("No printed room dimension could be matched to a detected room. Confirm the scale manually.")
         return result
 
     values = np.array([[c["mpp_x"], c["mpp_y"]] for c in candidates])
@@ -547,7 +546,7 @@ def calibrate(zones: list[dict]) -> dict:
     for i, c in enumerate(candidates):
         c["inlier"] = i in inlier_rows
     if not inlier_rows:
-        result["warnings"].append("Printed dimensions disagree with each other and with the drawing. Calibrate the scale manually.")
+        result["warnings"].append("Printed dimensions disagree with each other and with the drawing; the scale is estimated instead.")
         return result
     inl = values[inlier_rows]
     mpp = float(np.median(inl))
@@ -558,7 +557,7 @@ def calibrate(zones: list[dict]) -> dict:
     if abs(mx - my) / mpp > 0.06:
         result["uniform"] = False
         result["warnings"].append(
-            f"Horizontal and vertical scales differ by {abs(mx - my) / mpp:.0%}. The image may be stretched; confirm the scale before generating 3D."
+            f"Horizontal and vertical scales differ by {abs(mx - my) / mpp:.0%}. The image may be stretched."
         )
     rejected = [c["name"] for i, c in enumerate(candidates) if i not in inlier_rows]
     if rejected:
@@ -571,5 +570,5 @@ def calibrate(zones: list[dict]) -> dict:
         conf = min(conf, 0.5)
     result["confidence"] = round(max(conf, 0.0), 2)
     if n == 1:
-        result["warnings"].append("Scale comes from a single printed dimension. Confirm it.")
+        result["warnings"].append("Scale comes from a single printed dimension.")
     return result
