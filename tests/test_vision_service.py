@@ -78,7 +78,7 @@ def test_failed_vision_call_returns_none(tmp_path, monkeypatch):
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(503))) as client:
-            return await product_details.extract_product_details(b"photo", "image/png", "table", "", settings(tmp_path), client, "gpt-4o-mini")
+            return await product_details.extract_product_details(b"photo", "image/png", "table", "", settings(tmp_path), client, "gpt-6-astra")
 
     assert asyncio.run(go()) is None
 
@@ -133,11 +133,11 @@ def test_admin_choice_is_read_and_saved_in_the_database(monkeypatch):
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(supabase)) as client:
             first = await vision.current_model(s, client)  # no row yet: the default
-            await vision.set_model(s, client, "gpt-4o-mini")
+            await vision.set_model(s, client, "gpt-6-astra")
             vision._cached = None  # as on another API host after the cache expires
             return first, await vision.current_model(s, client)
 
-    assert asyncio.run(go()) == ("gemini-3.5-flash", "gpt-4o-mini")
+    assert asyncio.run(go()) == ("gemini-3.5-flash", "gpt-6-astra")
     with pytest.raises(vision.VisionSettingError):
         asyncio.run(vision.set_model(s, httpx.AsyncClient(), "claude-vision"))
 
@@ -170,9 +170,9 @@ def test_admin_vision_endpoints(monkeypatch):
     token = admin.issue_token(admin.get_settings())[0]
     assert client.get("/api/admin/vision").status_code == 401
     got = client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()
-    assert got["model"] == "gemini-3.5-flash" and {o["id"] for o in got["options"]} == {"gemini-3.5-flash", "gpt-4o-mini"}
-    assert client.put("/api/admin/vision", json={"model": "gpt-4o-mini"}, headers={"X-Admin-Token": token}).json() == {"model": "gpt-4o-mini"}
-    assert client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()["model"] == "gpt-4o-mini"
+    assert got["model"] == "gemini-3.5-flash" and {o["id"] for o in got["options"]} == {"gemini-3.5-flash", "gpt-6-astra"}
+    assert client.put("/api/admin/vision", json={"model": "gpt-6-astra"}, headers={"X-Admin-Token": token}).json() == {"model": "gpt-6-astra"}
+    assert client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()["model"] == "gpt-6-astra"
     assert client.put("/api/admin/vision", json={"model": "other"}, headers={"X-Admin-Token": token}).status_code == 422
 
 
@@ -237,8 +237,8 @@ def test_same_floor_plan_is_read_once_from_the_database(tmp_path):
     assert len(calls) == 1 and not first.cached and second.cached and len(second.rooms) == len(first.rooms)
     assert [r["kind"] for r in rows.values()] == ["floor_plan"]
     # another model is another answer: the cache key includes it
-    other = asyncio.run(analyze_plan(b"plan", "image/png", (100, 50), db_settings(tmp_path / "host-c", "gpt-4o-mini"),
-                                     httpx.AsyncClient(transport=httpx.MockTransport(lambda r: provider_reply("gpt-4o-mini", good))), "gpt-4o-mini", db=db))
+    other = asyncio.run(analyze_plan(b"plan", "image/png", (100, 50), db_settings(tmp_path / "host-c", "gpt-6-astra"),
+                                     httpx.AsyncClient(transport=httpx.MockTransport(lambda r: provider_reply("gpt-6-astra", good))), "gpt-6-astra", db=db))
     assert not other.cached and len(rows) == 2
 
 
