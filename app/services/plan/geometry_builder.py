@@ -10,7 +10,7 @@ import numpy as np
 import trimesh
 from shapely.geometry import Point, Polygon
 
-DEFAULT_HEIGHT = 2.8
+DEFAULT_HEIGHT = 3.0
 SLAB = 0.05  # floor slab depth (m), below the room floors
 RAILING_HEIGHT = 1.0  # balcony parapet
 RAILING_THICKNESS = 0.05

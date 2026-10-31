@@ -156,7 +156,7 @@ def test_convert_to_3d_falls_back_to_opencv_and_returns_glb_and_dxf(monkeypatch,
         plan = json.loads(response.text.splitlines()[-1])["plan"]
         glb, dxf = client.get(plan["glb_url"]), client.get(plan["dxf_url"])
         assert client.get("/api/plans/files/..%2F..%2Fsecret.glb").status_code == 404
-    assert plan["validation"]["ok"] and plan["height"] == 2.8  # default wall height
+    assert plan["validation"]["ok"] and plan["height"] == 3.0  # default wall height
     assert {z["name"] for z in plan["zones"]} == {"Kitchen", "Living Room", "Hall", "Bathroom", "Bedroom", "Balcony"}
     assert all(z["dimension_source"] == "measured" and z["area_m2"] > 0 for z in plan["zones"])  # no printed sizes on this plan
     scene = trimesh.load(io.BytesIO(glb.content), file_type="glb")
