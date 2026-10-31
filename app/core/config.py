@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # gemini-* → Google Gemini (GEMINI_API_KEY), otherwise OpenAI Responses (OPENAI_API_KEY).
     plan_vision_model: str = "gemini-3.5-flash"
     gemini_api_key: SecretStr = SecretStr("")
-    openai_plan_timeout_seconds: float = 120.0
+    openai_plan_timeout_seconds: float = 240.0  # GPT-6 Astra can take 1–2 minutes on a full plan
     openai_plan_expected_seconds: float = 25.0  # typical answer time, for the progress percentage
     # Match: OpenAI image editing with two reference images (POST /v1/images/edits).
     openai_image_model: str = "gpt-image-2"
