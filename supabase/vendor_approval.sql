@@ -7,7 +7,7 @@ alter table public.vendors
   add column if not exists email text,
   add column if not exists lat double precision,
   add column if not exists lng double precision;
-alter table public.vendors alter column status set default 'pending';
+alter table public.vendors alter column status set default 'approved';  -- vendor_auto_approve.sql
 
 -- Vendors edit their own profile but can never set their own status (only the service role can).
 revoke insert, update on public.vendors from authenticated;
