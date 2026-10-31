@@ -23,6 +23,7 @@ from PIL import Image
 from app.services.plan.dimension_ocr import calibrate, measurements_from_boxes, parse_dimension, room_labels, run_ocr
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, geometry_from_plan
 from app.services.plan.room_segmenter import RoomLabel, segment
+from app.services.plan.plan_reader import reading_references
 from app.services.plan.scale_estimator import door_references, estimate_scale, furniture_references
 from app.services.plan.wall_detector import Opening, WallSegment, detect_walls
 
@@ -36,6 +37,7 @@ def plan_from_image(
     width_m: float | None = None,
     depth_m: float | None = None,
     debug: bool = False,
+    reading: dict | None = None,
 ) -> dict:
     original = _decode_image(image_bytes)
     image, image_scale = _working_copy(original)
@@ -62,6 +64,7 @@ def plan_from_image(
         "zone_lines": [],
         "drawing_unit": drawing_unit,
         "straight_lines": _encode_mask(walls.debug["07_straight_thin"]),
+        "plan_reading": reading,  # GPT's room list (plan_reader.py); None when it was not available
     }
     if width_m and depth_m and width_m > 0 and depth_m > 0:
         state["manual_extent_m"] = [width_m, depth_m]
@@ -109,7 +112,9 @@ def plan_from_state(
 
     if image is not None and "scale_refs" not in state:
         # Furniture needs the drawing, so it is measured once on upload and carried in the state.
-        state = {**state, "scale_refs": furniture_references(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), seg.zones)}
+        # GPT's reading is matched to the detected rooms here too, then travels the same way.
+        furniture = furniture_references(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), seg.zones)
+        state = {**state, "scale_refs": reading_references(state.get("plan_reading"), seg.zones, seg.footprint) + furniture}
     refs = door_references(openings) + [dict(r) for r in state.get("scale_refs") or []]
     scale = estimate_scale(calibrate(seg.zones), refs, thickness)
     if meters_per_pixel and meters_per_pixel > 0:

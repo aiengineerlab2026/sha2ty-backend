@@ -1,7 +1,7 @@
-"""Automatic scale for plans without (usable) printed dimensions. OpenCV only, no AI service.
+"""Plan scale from every reference available; never returns without one.
 
-Priority: printed dimensions (dimension_ocr.calibrate) → door openings → standard furniture →
-a labelled low-confidence heuristic (wall thickness). Every reference gives one metres-per-pixel
+Priority: printed dimensions (OCR, dimension_ocr.calibrate, and GPT's reading, plan_reader.py) →
+door openings → standard furniture → a labelled low-confidence heuristic (wall thickness). Every reference gives one metres-per-pixel
 candidate; outliers are dropped with a weighted median/MAD test and the weighted median of the
 rest is the scale. Doors outweigh furniture (architecture is drawn more consistently).
 """
@@ -90,26 +90,33 @@ def robust_scale(refs: list[dict]) -> tuple[float, list[dict]] | None:
 
 
 def estimate_scale(printed: dict, refs: list[dict], thickness_px: float) -> dict:
-    """Never returns without a scale. `printed` is calibrate()'s result; refs = doors + furniture."""
+    """`printed` is calibrate()'s result; refs = GPT reading + doors + furniture."""
     scale = {**printed, "references": [], "estimated": False}
-    if printed.get("meters_per_pixel") and printed.get("confidence", 0) >= PRINTED_MIN_CONFIDENCE:
+    strong_ocr = bool(printed.get("meters_per_pixel")) and printed.get("confidence", 0) >= PRINTED_MIN_CONFIDENCE
+    has_gpt = any(r["source"].startswith("gpt") for r in refs)
+    if strong_ocr and not has_gpt:
         scale["source"] = "printed dimensions"
         return scale
-    scale["estimated"] = True
-    scale["uniform"] = True  # one isotropic estimate; a stretched scan can't be told from references
-    if printed.get("meters_per_pixel"):  # too weak alone, still the strongest single reference
-        refs = [*refs, {"source": "printed", "label": "Printed room dimensions", "mpp": printed["meters_per_pixel"], "weight": 2.0}]
+    if not strong_ocr:
+        scale["uniform"] = True  # one isotropic estimate; a stretched scan can't be told from references
+    if printed.get("meters_per_pixel"):  # OCR'd printed sizes: the strongest single reference
+        refs = [*refs, {"source": "printed", "label": "Printed room dimensions (OCR)", "mpp": printed["meters_per_pixel"], "weight": 3.0 if strong_ocr else 2.0}]
     found = robust_scale(refs)
     if found:
         mpp, inliers = found
-        doors = sum(r["source"] == "door" for r in inliers)
-        printed_n = sum(r["source"] == "printed" for r in inliers)
-        furniture = len(inliers) - doors - printed_n
-        conf = 0.2 + 0.2 * printed_n + 0.08 * min(doors, 5) + 0.06 * min(furniture, 3) - (0.15 if len(inliers) == 1 else 0.0)
+        count = lambda *sources: sum(r["source"] in sources for r in inliers)  # noqa: E731
+        printed_n, gpt_printed, gpt_guess = count("printed"), count("gpt_printed"), count("gpt")
+        doors, furniture = count("door"), count("furniture")
+        strong = printed_n + gpt_printed
+        conf = 0.2 + 0.25 * min(strong, 3) + 0.08 * min(doors, 5) + 0.06 * min(furniture, 3) + 0.04 * min(gpt_guess, 3) - (0.15 if len(inliers) == 1 else 0.0)
         scale.update(
             meters_per_pixel=mpp,
-            confidence=round(min(max(conf, 0.15), 0.75), 2),  # below printed dimensions on purpose
-            source=" + ".join(s for s, n in (("printed dimensions", printed_n), ("doors", doors), ("furniture", furniture)) if n),
+            # Only written measurements (OCR or read by GPT) may approach certainty; estimates stay below.
+            confidence=round(min(max(conf, 0.15), 0.9 if strong else 0.75), 2),
+            estimated=not strong,
+            source=" + ".join(
+                s for s, n in (("printed dimensions", printed_n), ("GPT reading", gpt_printed + gpt_guess), ("doors", doors), ("furniture", furniture)) if n
+            ),
             references=refs,
         )
         if doors == 1 and not furniture:
@@ -118,6 +125,7 @@ def estimate_scale(printed: dict, refs: list[dict], thickness_px: float) -> dict
         scale.update(
             meters_per_pixel=HEURISTIC_WALL_M / max(thickness_px, 1.0),
             confidence=0.1,
+            estimated=True,
             source="heuristic",
             references=[{"source": "heuristic", "label": f"Walls assumed {HEURISTIC_WALL_M} m thick", "mpp": HEURISTIC_WALL_M / max(thickness_px, 1.0), "weight": 0.1, "inlier": True}],
         )

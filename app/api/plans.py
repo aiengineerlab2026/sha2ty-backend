@@ -15,6 +15,7 @@ from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, rectangular_room, room_extents
 from app.services.plan.image_processor import plan_from_image, plan_from_state
+from app.services.plan.plan_reader import read_plan
 from app.services.plan.placement import validate_placement
 from app.services.plan.plan_exporter import export_room_glb, step_unsupported_reason
 from app.services.plan_store import PlanStore
@@ -56,7 +57,8 @@ class CorrectionBody(BaseModel):
     straight_lines: str | None = None
     drawing_unit: str | None = None
     image_scale: float = 1.0
-    scale_refs: list[dict[str, Any]] = Field(default_factory=list)  # furniture references from the upload
+    scale_refs: list[dict[str, Any]] = Field(default_factory=list)  # GPT + furniture references from the upload
+    plan_reading: dict[str, Any] | None = None
     meters_per_pixel: float | None = Field(default=None, gt=0)
     scale_confirmed: bool = False
     height: float = Field(default=DEFAULT_HEIGHT, gt=0, le=20)
@@ -110,6 +112,7 @@ async def from_dimensions(body: DimensionsBody) -> dict[str, Any]:
 
 @router.post("/from-image")
 async def from_image(
+    request: Request,
     image: Annotated[UploadFile, File()],
     height: Annotated[float, Form()] = DEFAULT_HEIGHT,
     wall_thickness: Annotated[float, Form()] = DEFAULT_THICKNESS,
@@ -123,6 +126,8 @@ async def from_image(
     mime = (image.content_type or "").split(";")[0].strip().lower()
     if mime not in ALLOWED:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a PNG or JPG floor plan.")
+    # GPT reads the plan's rooms and measurements first; the conversion then weighs them as scale references.
+    reading = await read_plan(raw, mime, get_settings(), request.app.state.openai_http)
     try:
         payload = await run_in_threadpool(
             partial(
@@ -133,6 +138,7 @@ async def from_image(
                 width_m=width,
                 depth_m=depth,
                 debug=str(debug).lower() in {"1", "true", "yes"},
+                reading=reading,
             )
         )
     except ValueError as exc:
