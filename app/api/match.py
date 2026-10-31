@@ -161,7 +161,8 @@ async def create_match(
             model.get("title") or "product",
             model_cm(model.get("width_m"), modelWidth, "width"),
             model_cm(model.get("height_m"), modelHeight, "height"),
-            model_cm(model.get("depth_m"), modelDepth, "depth"),
+            # Depth is optional: the room-size estimate uses the width when it is unknown.
+            float(model["depth_m"]) * 100 if model.get("depth_m") else (im.to_cm(modelDepth, unit) if modelDepth else None),
         )
         if other_cm:
             item = im.Item(matchType, *other_cm)

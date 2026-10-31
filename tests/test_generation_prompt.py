@@ -21,3 +21,16 @@ def test_astra_prompt_still_asks_for_a_glb():
 def test_wardrobe_and_wall_art_prompts():
     assert "wardrobe" in meshy_texture_prompt("wardrobe")
     assert "framed picture" in astra_prompt("wall_art", "Sunset print")
+
+
+def test_prompts_focus_on_the_product_and_ignore_its_surroundings():
+    for prompt in (meshy_texture_prompt("furniture", "Oslo sofa"), astra_prompt("furniture", "Oslo sofa")):
+        assert "one object of this type" in prompt and "any other furniture or objects" in prompt and "plants" in prompt
+        assert "chairs at it" not in prompt
+
+
+def test_a_table_keeps_its_chairs_and_nothing_else():
+    for prompt in (meshy_texture_prompt("table", "Oak dining set"), astra_prompt("table", "Oak dining set")):
+        assert "the table and the chairs at it, nothing else" in prompt
+        assert "any other furniture or objects" in prompt and "tableware" in prompt
+    assert len(meshy_texture_prompt("table", "x" * 80)) <= MESHY_TEXTURE_PROMPT_MAX

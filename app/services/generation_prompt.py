@@ -1,7 +1,8 @@
 """What to extract from a vendor photo, by catalogue category, for Meshy and Astra.
 
-Both prompts name the one object to model (so a sofa photo with a lamp and a rug yields only the
-sofa) and insist on the photo's own colours and materials (no recolouring or stylising).
+Both prompts name the one object to model and tell the generator to ignore everything around it
+(a sofa photo with a lamp, a rug and a plant yields only the sofa). A table keeps the chairs set at it
+and nothing else. Colours and materials are the photo's own (no recolouring or stylising).
 """
 
 from __future__ import annotations
@@ -9,8 +10,9 @@ from __future__ import annotations
 # Category → what the object is (kept in sync with frontend lib/plan/categories.ts).
 OBJECTS: dict[str, str] = {
     "furniture": "a single piece of furniture (such as a sofa, bed, armchair, chair or storage unit)",
-    "table": "a single table (such as a dining, coffee or side table, or a desk)",
+    "table": "a single table (such as a dining, coffee or side table, or a desk) with the chairs set at it, if the photo shows them",
     "wardrobe": "a single wardrobe or closet (cabinet with doors, including its handles and legs or plinth)",
+    "door": "a single door: the door leaf with its frame, handle and hinges, standing upright as fitted in a doorway",
     "wall_art": "a single framed picture, painting, print or mirror for hanging on a wall, including its frame",
     "tv": "a TV or audio-visual unit (screen, TV stand or sound system), including its stand or base if shown",
     "lighting": "a floor or table lamp, including its shade, stem and base",
@@ -27,9 +29,20 @@ def object_description(category: str | None, title: str | None = None) -> str:
     return f"{what}{f' — the product “{name[:80]}”' if name else ''}"
 
 
-def colour_rule(what: str) -> str:
+def focus_rule(what: str, category: str | None = None) -> str:
+    """Only the product: everything around it in the photo is scenery, not part of the model."""
+    around = "the background, floor, walls, rugs, people, plants, decoration and any other furniture or objects"
+    if (category or "").strip() == "table":
+        return (
+            f"Model only {what}: the table and the chairs at it, nothing else. "
+            f"Ignore {around}, and anything standing on the table (tableware, vases, books)."
+        )
+    return f"Model only {what}: one object of this type. Ignore {around} in the photo, even where they touch it."
+
+
+def colour_rule(what: str, category: str | None = None) -> str:
     return (
-        f"Model only {what}. Ignore the background, floor, walls, people and any other objects in the photo. "
+        f"{focus_rule(what, category)} "
         "Reproduce the exact colours, patterns and materials visible in the photo: do not recolour, "
         "stylise, brighten or add colours that are not in the photo."
     )
@@ -72,7 +85,7 @@ def size_text(details) -> str:
 def meshy_texture_prompt(category: str | None, title: str | None = None, details=None) -> str:
     """Meshy image-to-3D `texture_prompt`: guides texturing; the geometry comes from the photo."""
     what = _what(category, title, details)
-    text = f"{colour_rule(what)} {details_text(details)}".strip()
+    text = f"{colour_rule(what, category)} {details_text(details)}".strip()
     if len(text) <= MESHY_TEXTURE_PROMPT_MAX:
         return text
     cut = text[:MESHY_TEXTURE_PROMPT_MAX]
@@ -83,7 +96,7 @@ def astra_prompt(category: str | None, title: str | None = None, details=None) -
     what = _what(category, title, details)
     hidden = f" The photo does not show {details.hidden}: keep those parts simple and plausible." if details and details.hidden else ""
     return (
-        f"Create a 3D model of {what} shown in the photo. {colour_rule(what)} {details_text(details)} {size_text(details)}{hidden} "
+        f"Create a 3D model of {what} shown in the photo. {colour_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
         "Keep its real proportions, standing upright as it does in a room. "
         "In the code interpreter, write a valid binary glTF file to /mnt/data/model.glb "
         "(magic bytes glTF), with the colours as materials or vertex colours. Use pygltflib, trimesh, or write "

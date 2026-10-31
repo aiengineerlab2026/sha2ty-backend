@@ -313,13 +313,14 @@ async def extract_carpet_image(
     image: Annotated[UploadFile, File()],
     width_m: Annotated[float | None, Form(gt=0, le=50)] = None,
     length_m: Annotated[float | None, Form(gt=0, le=50)] = None,
+    noun: Annotated[str, Form()] = "carpet",
 ) -> Response:
-    """Photo of a carpet → PNG of just the carpet, straightened top-down at its real aspect ratio."""
+    """Photo of a carpet, door, or window → PNG of just that item at its real aspect ratio."""
     data = await image.read(MAX_CARPET_PHOTO + 1)
     if len(data) > MAX_CARPET_PHOTO:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Photo is larger than 15 MB.")
     try:
-        png = await run_in_threadpool(extract_carpet, data, width_m, length_m)
+        png = await run_in_threadpool(extract_carpet, data, width_m, length_m, noun)
     except CarpetNotFound as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return Response(content=png, media_type="image/png")
