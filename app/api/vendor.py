@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -9,8 +10,13 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
+from app.core.events import bus
+from app.domain.errors import DomainError
+from app.domain.events import GenerationFailed, GenerationStarted, UserRegistered
+from app.domain.generation import Provider, QuotaExhausted, remaining as tries_left
+from app.domain.vendor import Vendor
 from app.services.astra_service import AstraError, AstraService
-from app.services.auth import create_confirmed_user, create_vendor, user_id_from_bearer
+from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
 from app.services.cdn import Cdn, CdnError
@@ -21,7 +27,6 @@ from app.services.quota import generation_usage, use_generation
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
-Provider = Literal["meshy", "astra"]
 
 
 class GenerateAccepted(BaseModel):
@@ -90,10 +95,15 @@ class RegisterResponse(BaseModel):
 @router.post("/register", response_model=RegisterResponse)
 async def register_vendor(body: RegisterBody, request: Request) -> RegisterResponse:
     settings = get_settings()
-    vendor = body.kind == "vendor"
-    if vendor and (not body.name.strip() or not body.location.strip()):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Company name and location are required.")
     email = body.email.strip().lower()
+    try:
+        profile = (
+            Vendor.register("", body.name, body.location, full_name=body.full_name.strip(), email=email, lat=body.lat, lng=body.lng)
+            if body.kind == "vendor"
+            else None
+        )
+    except DomainError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     client = request.app.state.auth_http
     user_id = await create_confirmed_user(
         email,
@@ -102,14 +112,8 @@ async def register_vendor(body: RegisterBody, request: Request) -> RegisterRespo
         settings,
         client,
     )
-    if vendor:
-        # The vendor row is written here (service role); vendors cannot set their own status
-        # (see supabase/vendor_approval.sql), so only the admin can suspend them later.
-        await create_vendor(
-            {"id": user_id, "name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip(), "email": email, "lat": body.lat, "lng": body.lng},
-            settings,
-            client,
-        )
+    # Handlers create the vendor profile (app/handlers.py).
+    await bus.publish(UserRegistered(user_id, body.kind, profile and replace(profile, id=user_id)), request.app.state)
     return RegisterResponse(user_id=user_id, status="active")
 
 
@@ -129,16 +133,17 @@ class QuotaResponse(BaseModel):
 async def generation_quota(request: Request, user_id: Annotated[str, Depends(current_user)]) -> QuotaResponse:
     settings = get_settings()
     used = await generation_usage(user_id, settings, request.app.state.auth_http)
-    return QuotaResponse(limit=settings.generation_limit, remaining={p: max(settings.generation_limit - n, 0) for p, n in used.items()})
+    return QuotaResponse(limit=settings.generation_limit, remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()})
 
 
 async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
     """Reserve one generation try; 429 when the vendor has used them all. Returns tries left."""
     used = await use_generation(user_id, provider, 1, settings, request.app.state.auth_http)
     if used is None:
-        name = "GPT Astra" if provider == "astra" else "Meshy"
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"You have used all {settings.generation_limit} {name} generations for this account.")
-    return settings.generation_limit - used
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(QuotaExhausted(provider, settings.generation_limit)))
+    left = tries_left(settings.generation_limit, used)
+    await bus.publish(GenerationStarted(user_id, provider, left), request.app.state)
+    return left
 
 
 @router.post("/generate")
@@ -184,8 +189,7 @@ async def generate_model(
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
         except (AstraError, CdnError) as exc:
-            # ponytail: a failed call gives the try back; refunds are best-effort, not transactional.
-            await use_generation(user_id, "astra", -1, settings, request.app.state.auth_http)
+            await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
         return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining)
 
@@ -201,7 +205,7 @@ async def generate_model(
             texture_prompt=meshy_texture_prompt(category, title),
         )
     except MeshyError as exc:
-        await use_generation(user_id, "meshy", -1, settings, request.app.state.auth_http)  # Meshy refused: give the try back
+        await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
     request.app.state.pending_cdn[task_id] = {"user_id": user_id, "model_id": object_id}
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining)

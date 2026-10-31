@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 import httpx
@@ -17,6 +17,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.core.config import Settings, get_settings
+from app.core.events import bus
+from app.domain.events import VendorStatusChanged
+from app.domain.vendor import VendorStatus
 from app.services.auth import service_headers
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -81,7 +84,7 @@ async def list_vendors(request: Request) -> dict[str, object]:
 
 
 class StatusBody(BaseModel):
-    status: Literal["approved", "rejected", "pending"]
+    status: VendorStatus
 
 
 @router.post("/vendors/{vendor_id}/status", dependencies=[Depends(require_admin)])
@@ -96,4 +99,5 @@ async def set_status(vendor_id: UUID, body: StatusBody, request: Request) -> dic
     rows = response.json() if response.status_code < 400 else None
     if not rows:
         raise HTTPException(status.HTTP_404_NOT_FOUND if response.status_code < 400 else status.HTTP_502_BAD_GATEWAY, "Vendor not found.")
+    await bus.publish(VendorStatusChanged(str(vendor_id), body.status), request.app.state)
     return {"vendor": rows[0]}
