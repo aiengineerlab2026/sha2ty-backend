@@ -146,7 +146,7 @@ def test_convert_to_3d_falls_back_to_opencv_and_returns_glb_and_dxf(monkeypatch,
     from app.api import plans
     from app.main import app
 
-    async def unavailable(*_args):
+    async def unavailable(*_args, **_kwargs):
         return None  # no key, no credits, timeout: the model never blocks a conversion
 
     monkeypatch.setattr(plans, "analyze_plan", unavailable)
@@ -262,7 +262,7 @@ def test_upload_streams_progress_then_the_full_plan(monkeypatch):
 
     analysis = PlanAnalysis.model_validate_json((FIXTURES / "open_plan_apartment.analysis.json").read_text())
 
-    async def fake_analyze(*_args):
+    async def fake_analyze(*_args, **_kwargs):
         return analysis
 
     monkeypatch.setattr(plans, "analyze_plan", fake_analyze)
@@ -377,7 +377,7 @@ def test_a_plan_with_problems_is_still_built_and_exported(monkeypatch, tmp_path)
     from app.main import app
     from app.services.plan import wall_detector
 
-    async def unavailable(*_args):
+    async def unavailable(*_args, **_kwargs):
         return None
 
     def no_exterior(*_args):

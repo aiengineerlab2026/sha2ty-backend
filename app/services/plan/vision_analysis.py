@@ -53,11 +53,22 @@ def cache_key(image: bytes, model: str) -> str:
     return hashlib.sha256(image + model.encode() + SCHEMA_VERSION.encode() + PROMPT.encode()).hexdigest()
 
 
-async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings: Settings, client: httpx.AsyncClient, model: str | None = None) -> PlanAnalysis | None:
+async def analyze_plan(
+    image: bytes, mime: str, size: tuple[int, int], settings: Settings, client: httpx.AsyncClient,
+    model: str | None = None, db: httpx.AsyncClient | None = None,
+) -> PlanAnalysis | None:
+    """`client` talks to the model provider; `db` (no provider key in its headers) to the cache table."""
     model = model or settings.plan_vision_model  # the API passes the admin's choice (vision.current_model)
     if not vision.configured(settings, model):
         return None
     key = cache_key(image, model)
+    stored = await vision.cache_get(settings, db, key)
+    if stored:
+        try:
+            logger.info("Plan analysis from the cache (%s): no model call", model)
+            return PlanAnalysis.model_validate(stored).model_copy(update={"cached": True})
+        except ValidationError:
+            pass  # an older shape: ask again and overwrite
     path = Path(settings.storage_dir) / "plan-analysis" / f"{key}.json"
     if path.exists():
         try:
@@ -77,6 +88,7 @@ async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings:
     if plan is None:
         return None
     analysis = PlanAnalysis(**plan.model_dump(), image=ImageSize(width=size[0], height=size[1]), model=model, schema_version=SCHEMA_VERSION, issues=issues)
+    await vision.cache_put(settings, db, key, "floor_plan", model, analysis.model_dump(mode="json"))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(analysis.model_dump_json())

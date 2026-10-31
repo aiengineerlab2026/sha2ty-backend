@@ -86,7 +86,7 @@ def test_failed_vision_call_returns_none(tmp_path, monkeypatch):
 def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
     calls = {}
 
-    async def fake_details(image, mime, category, title, _settings, _client, model):
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None):
         calls["details"] = (model, category)
         return product_details.clean(ProductDetails.model_validate(SOFA))
 
@@ -174,3 +174,79 @@ def test_admin_vision_endpoints(monkeypatch):
     assert client.put("/api/admin/vision", json={"model": "gpt-4o-mini"}, headers={"X-Admin-Token": token}).json() == {"model": "gpt-4o-mini"}
     assert client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()["model"] == "gpt-4o-mini"
     assert client.put("/api/admin/vision", json={"model": "other"}, headers={"X-Admin-Token": token}).status_code == 422
+
+
+def fake_db():
+    """A stand-in for the Supabase vision_cache table."""
+    rows: dict[str, dict] = {}
+
+    def handler(request):
+        assert "vision_cache" in request.url.path and request.headers["apikey"] == "service"
+        if request.method == "POST":
+            body = json.loads(request.content)
+            rows[body["key"]] = body
+            return httpx.Response(201)
+        key = request.url.params["key"].removeprefix("eq.")
+        return httpx.Response(200, json=[{"result": rows[key]["result"]}] if key in rows else [])
+
+    return rows, httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def db_settings(tmp_path, model="gemini-3.5-flash") -> Settings:
+    return Settings(gemini_api_key="gem-test", openai_api_key="sk-test", plan_vision_model=model, storage_dir=tmp_path,
+                    supabase_url="https://db.test", supabase_service_role_key="service")
+
+
+@pytest.mark.parametrize("model", list(vision.MODELS))
+def test_same_product_photo_is_read_once_from_the_database(tmp_path, model):
+    calls = []
+    rows, db = fake_db()
+
+    def provider(request):
+        calls.append(request)
+        return provider_reply(model, SOFA)
+
+    async def go(storage):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            return await product_details.extract_product_details(b"photo", "image/png", "furniture", "Oslo sofa", db_settings(storage, model), client, model, db=db)
+
+    first = asyncio.run(go(tmp_path / "host-a"))
+    second = asyncio.run(go(tmp_path / "host-b"))  # another API host: empty disk, same database
+    assert len(calls) == 1 and second.object_type == first.object_type
+    assert [r["kind"] for r in rows.values()] == ["product"] and next(iter(rows.values()))["model"] == model
+
+
+def test_same_floor_plan_is_read_once_from_the_database(tmp_path):
+    from app.services.plan.vision_analysis import analyze_plan
+
+    answer = json.loads(open("tests/fixtures/open_plan_apartment.analysis.json").read())
+    good = {k: answer[k] for k in ("rooms", "walls", "doors", "windows", "furniture", "scale_references", "warnings")}
+    calls = []
+    rows, db = fake_db()
+
+    def provider(request):
+        calls.append(request)
+        return provider_reply("gemini-3.5-flash", good)
+
+    async def go(storage):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            return await analyze_plan(b"plan", "image/png", (100, 50), db_settings(storage), client, "gemini-3.5-flash", db=db)
+
+    first = asyncio.run(go(tmp_path / "host-a"))
+    second = asyncio.run(go(tmp_path / "host-b"))
+    assert len(calls) == 1 and not first.cached and second.cached and len(second.rooms) == len(first.rooms)
+    assert [r["kind"] for r in rows.values()] == ["floor_plan"]
+    # another model is another answer: the cache key includes it
+    other = asyncio.run(analyze_plan(b"plan", "image/png", (100, 50), db_settings(tmp_path / "host-c", "gpt-4o-mini"),
+                                     httpx.AsyncClient(transport=httpx.MockTransport(lambda r: provider_reply("gpt-4o-mini", good))), "gpt-4o-mini", db=db))
+    assert not other.cached and len(rows) == 2
+
+
+def test_missing_cache_table_never_blocks_the_model(tmp_path):
+    db = httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(404, json={"message": "relation does not exist"})))
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: provider_reply("gemini-3.5-flash", SOFA))) as client:
+            return await product_details.extract_product_details(b"photo", "image/png", "furniture", "", db_settings(tmp_path), client, "gemini-3.5-flash", db=db)
+
+    assert asyncio.run(go()).object_type == "three-seat sofa"

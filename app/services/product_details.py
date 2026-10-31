@@ -41,12 +41,22 @@ def _key(image: bytes, model: str, what: str) -> str:
 
 
 async def extract_product_details(
-    image: bytes, mime: str, category: str | None, title: str | None, settings: Settings, client: httpx.AsyncClient, model: str
+    image: bytes, mime: str, category: str | None, title: str | None, settings: Settings, client: httpx.AsyncClient, model: str,
+    db: httpx.AsyncClient | None = None,
 ) -> ProductDetails | None:
+    """`client` talks to the model provider; `db` (no provider key in its headers) to the cache table."""
     if not vision.configured(settings, model):
         return None
     what = object_description(category, title)
-    path = Path(settings.storage_dir) / "product-details" / f"{_key(image, model, what)}.json"
+    key = _key(image, model, what)
+    stored = await vision.cache_get(settings, db, key)
+    if stored:
+        try:
+            logger.info("Product details from the cache (%s): no model call", model)
+            return ProductDetails.model_validate(stored)
+        except ValidationError:
+            pass  # an older shape: ask again and overwrite
+    path = Path(settings.storage_dir) / "product-details" / f"{key}.json"
     if path.exists():
         try:
             return ProductDetails.model_validate_json(path.read_text())
@@ -65,6 +75,7 @@ async def extract_product_details(
         logger.warning("Product details returned invalid JSON: %s", str(exc)[:300])
         return None
     details.model = model
+    await vision.cache_put(settings, db, key, "product", model, details.model_dump(mode="json"))
     logger.info("Product details (%s): %s, %s × %s × %s m (%s), %d parts", model, details.object_type,
                 details.width_m, details.depth_m, details.height_m, details.dimension_source, len(details.components))
     try:

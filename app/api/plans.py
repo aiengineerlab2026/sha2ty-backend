@@ -190,7 +190,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         """
         yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
         model = await vision.current_model(settings, request.app.state.auth_http) if use_vision else ""
-        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, vision.client_for(request.app.state, model), model) if use_vision else asyncio.sleep(0))
+        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http) if use_vision else asyncio.sleep(0))
         started = loop.time()
         while not task.done():
             await asyncio.wait({task}, timeout=1.0)

@@ -189,7 +189,7 @@ async def generate_model(
         if not photo:
             return None  # an image URL only: Meshy fetches it, nothing to read here
         model = await vision.current_model(settings, request.app.state.auth_http)
-        return await extract_product_details(photo, mime, category, title, settings, vision.client_for(request.app.state, model), model)
+        return await extract_product_details(photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http)
 
     if provider == "astra":
         if not settings.astra_configured:
