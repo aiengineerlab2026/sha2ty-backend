@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.astra_service import AstraError, AstraService
-from app.services.auth import create_confirmed_user, create_pending_vendor, user_id_from_bearer
+from app.services.auth import create_confirmed_user, create_vendor, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
 from app.services.cdn import Cdn, CdnError
@@ -73,7 +73,7 @@ def get_astra(request: Request) -> AstraService:
 class RegisterBody(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
-    # "customer" shops and plans; "vendor" sells and needs an admin's approval first.
+    # "customer" shops and plans; "vendor" sells (approved on signup; the admin can still suspend).
     kind: Literal["vendor", "customer"] = "vendor"
     name: str = Field(default="", max_length=120)  # company / studio name (vendors)
     location: str = Field(default="", max_length=200)
@@ -84,7 +84,7 @@ class RegisterBody(BaseModel):
 
 class RegisterResponse(BaseModel):
     user_id: str
-    status: Literal["active", "pending"]
+    status: Literal["active"]
 
 
 @router.post("/register", response_model=RegisterResponse)
@@ -103,14 +103,14 @@ async def register_vendor(body: RegisterBody, request: Request) -> RegisterRespo
         client,
     )
     if vendor:
-        # The vendor row is written here (service role) so its status starts as pending; vendors
-        # cannot set their own status (see supabase/vendor_approval.sql).
-        await create_pending_vendor(
+        # The vendor row is written here (service role); vendors cannot set their own status
+        # (see supabase/vendor_approval.sql), so only the admin can suspend them later.
+        await create_vendor(
             {"id": user_id, "name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip(), "email": email, "lat": body.lat, "lng": body.lng},
             settings,
             client,
         )
-    return RegisterResponse(user_id=user_id, status="pending" if vendor else "active")
+    return RegisterResponse(user_id=user_id, status="active")
 
 
 async def current_user(

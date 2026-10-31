@@ -55,11 +55,11 @@ async def create_confirmed_user(
     return user_id
 
 
-async def create_pending_vendor(row: dict[str, object], settings: Settings, client: httpx.AsyncClient) -> None:
-    """Insert the vendors row awaiting approval. Without the approval migration, retry the base columns."""
+async def create_vendor(row: dict[str, object], settings: Settings, client: httpx.AsyncClient) -> None:
+    """Insert the vendors row, approved straight away. Without the approval migration, retry the base columns."""
     url = f"{settings.supabase_url.rstrip('/')}/rest/v1/vendors"
     try:
-        response = await client.post(url, headers=service_headers(settings), json={**row, "status": "pending"})
+        response = await client.post(url, headers=service_headers(settings), json={**row, "status": "approved"})
         if response.status_code == 400 and "column" in response.text:
             response = await client.post(url, headers=service_headers(settings), json={k: row[k] for k in ("id", "name", "location")})
     except httpx.HTTPError as exc:
