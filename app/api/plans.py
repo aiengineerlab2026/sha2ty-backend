@@ -226,7 +226,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}
         logger.info("Plan 3D extents %.2f × %.2f × %.2f m, %d walls, %d floors, %d fixtures", w, d, h, len(payload["walls"]), len(payload["zones"]), len(payload.get("fixtures") or []))
-        if exports and payload["walls"] and payload["validation"]["ok"]:  # never a download of a wrong model
+        if exports and payload["walls"]:  # also with validation problems: they are listed with the model
             payload.update(await run_in_threadpool(_write_exports, raw, payload))
         yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
 

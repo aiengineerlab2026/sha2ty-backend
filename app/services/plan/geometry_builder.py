@@ -72,6 +72,11 @@ def geometry_from_plan(
     window gaps already exist; doors get a lintel, windows a sill and a lintel. Floors are the room
     polygons plus a strip under every doorway. Origin = top-left of the footprint and all rooms."""
     base = {"unit": "meters", "source": "image", "height": height, "wall_thickness": default_thickness}
+    if not footprint_px and walls_px:
+        # Envelope never closed (validation reports it): still build the walls, framed by their extent.
+        xs = [p[0] for w in walls_px for p in (w["start"], w["end"])]
+        ys = [p[1] for w in walls_px for p in (w["start"], w["end"])]
+        footprint_px = [[min(xs), min(ys)], [max(xs), min(ys)], [max(xs), max(ys)], [min(xs), max(ys)]]
     if not meters_per_pixel or not footprint_px:
         return {**base, "rooms": [], "zones": [], "walls": [], "openings": [], "doors": [], "windows": [], "floors": [], "exterior": [], "fixtures": []}
     # Origin: top-left of everything built, so a balcony outside the footprint never goes negative

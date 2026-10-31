@@ -108,7 +108,8 @@ def plan_from_image(
             vision = run({**state, "geometry_source": "vision"}, debug_images=vision_debug)
             logger.info("OpenCV found %d rooms (agreement %.0f%%, ok=%s); vision layout: %d rooms, ok=%s",
                         len(payload["rooms_px"]), agreement * 100, payload["validation"]["ok"], len(vision["rooms_px"]), vision["validation"]["ok"])
-            if vision["validation"]["ok"] or not payload["validation"]["ok"]:
+            # Both with problems: the one that found more spaces is the better start (it is built anyway).
+            if vision["validation"]["ok"] or (not payload["validation"]["ok"] and len(vision["zones_px"]) > len(payload["zones_px"])):
                 payload = {**vision, "geometry_source": "vision", "opencv_agreement": round(agreement, 2)}
                 debug_images.update(vision_debug)
     on_stage("Generating 3D", 93)

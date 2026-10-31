@@ -366,3 +366,30 @@ def test_gemini_request_uses_its_own_key_and_format(tmp_path):
     body = json.loads(request.content)
     assert body["generationConfig"]["responseMimeType"] == "application/json"
     assert body["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "image/png"
+
+
+def test_a_plan_with_problems_is_still_built_and_exported(monkeypatch, tmp_path):
+    """The envelope never closes (every exterior wall gap left open): validation reports it, the walls
+    are still built in 3D and the GLB/DXF are still written."""
+    from fastapi.testclient import TestClient
+
+    from app.api import plans
+    from app.main import app
+    from app.services.plan import wall_detector
+
+    async def unavailable(*_args):
+        return None
+
+    def no_exterior(*_args):
+        return False  # unclear exterior gaps stay open → "Exterior wall is open"
+
+    monkeypatch.setattr(plans, "analyze_plan", unavailable)
+    monkeypatch.setattr(wall_detector, "_exterior_side", no_exterior)
+    monkeypatch.setattr(image_processor, "run_ocr", lambda _i: (list(GREY_OCR), []))
+    monkeypatch.setattr(plans, "get_settings", lambda: get_settings().model_copy(update={"storage_dir": tmp_path}))
+    with TestClient(app) as client:
+        response = client.post("/api/plans/convert-to-3d", files={"image": ("plan.jpg", GREY.read_bytes(), "image/jpeg")})
+        plan = json.loads(response.text.splitlines()[-1])["plan"]
+        assert client.get(plan["glb_url"]).status_code == 200 and client.get(plan["dxf_url"]).status_code == 200
+    assert not plan["validation"]["ok"] and plan["validation"]["errors"]  # the problems are reported…
+    assert len(plan["walls"]) >= 10 and plan["exterior"]  # …and the model is built anyway
