@@ -170,7 +170,7 @@ def test_admin_vision_endpoints(monkeypatch):
     token = admin.issue_token(admin.get_settings())[0]
     assert client.get("/api/admin/vision").status_code == 401
     got = client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()
-    assert got["model"] == "gemini-3.1-pro-preview" and {o["id"] for o in got["options"]} == {"gemini-3.1-pro-preview", "gpt-6-astra"}
+    assert got["model"] == "gemini-3.1-pro-preview" and {o["id"] for o in got["options"]} == {"gemini-3.1-pro-preview", "gpt-6-astra", "gpt-6.1-sol"}
     assert client.put("/api/admin/vision", json={"model": "gpt-6-astra"}, headers={"X-Admin-Token": token}).json() == {"model": "gpt-6-astra"}
     assert client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()["model"] == "gpt-6-astra"
     assert client.put("/api/admin/vision", json={"model": "other"}, headers={"X-Admin-Token": token}).status_code == 422

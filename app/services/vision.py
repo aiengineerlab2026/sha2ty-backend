@@ -20,7 +20,7 @@ from app.services.auth import service_headers
 
 logger = logging.getLogger(__name__)
 
-MODELS = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "gpt-6-astra": "GPT-6 Astra"}
+MODELS = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "gpt-6-astra": "GPT-6 Astra", "gpt-6.1-sol": "GPT-6.1 Sol"}
 RETRY_DELAY = 2.0  # seconds, doubled per attempt
 RETRIES = 1  # one extra attempt on 429 / 5xx / timeouts
 
