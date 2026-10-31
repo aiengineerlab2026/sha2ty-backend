@@ -1,0 +1,935 @@
+{
+ "rooms": [
+  {
+   "id": "room_living",
+   "name": "Living Room",
+   "type": "living",
+   "polygon": [
+    [
+     0.19,
+     0.35
+    ],
+    [
+     0.63,
+     0.35
+    ],
+    [
+     0.63,
+     0.56
+    ],
+    [
+     0.63,
+     0.95
+    ],
+    [
+     0.19,
+     0.95
+    ]
+   ],
+   "estimated_width_m": 4.5,
+   "estimated_length_m": 5.8,
+   "area_m2": 26.1,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_kitchen",
+    "room_dining",
+    "room_balcony",
+    "room_hall"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "room_kitchen",
+   "name": "Kitchen",
+   "type": "kitchen",
+   "polygon": [
+    [
+     0.41,
+     0.02
+    ],
+    [
+     0.63,
+     0.02
+    ],
+    [
+     0.63,
+     0.35
+    ],
+    [
+     0.41,
+     0.35
+    ]
+   ],
+   "estimated_width_m": 2.2,
+   "estimated_length_m": 3.2,
+   "area_m2": 7.0,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_living",
+    "room_dining"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "room_dining",
+   "name": "Dining Area",
+   "type": "dining",
+   "polygon": [
+    [
+     0.19,
+     0.02
+    ],
+    [
+     0.41,
+     0.02
+    ],
+    [
+     0.41,
+     0.35
+    ],
+    [
+     0.19,
+     0.35
+    ]
+   ],
+   "estimated_width_m": 2.2,
+   "estimated_length_m": 3.2,
+   "area_m2": 7.0,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_living",
+    "room_kitchen"
+   ],
+   "confidence": 0.9
+  },
+  {
+   "id": "room_bathroom",
+   "name": "Bathroom",
+   "type": "bathroom",
+   "polygon": [
+    [
+     0.63,
+     0.02
+    ],
+    [
+     0.79,
+     0.02
+    ],
+    [
+     0.79,
+     0.39
+    ],
+    [
+     0.63,
+     0.39
+    ]
+   ],
+   "estimated_width_m": 1.6,
+   "estimated_length_m": 3.6,
+   "area_m2": 5.8,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_hall"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "room_hall",
+   "name": "Hallway",
+   "type": "hall",
+   "polygon": [
+    [
+     0.63,
+     0.39
+    ],
+    [
+     0.93,
+     0.39
+    ],
+    [
+     0.93,
+     0.56
+    ],
+    [
+     0.63,
+     0.56
+    ]
+   ],
+   "estimated_width_m": 3.0,
+   "estimated_length_m": 1.6,
+   "area_m2": 4.8,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_living",
+    "room_bathroom",
+    "room_bedroom"
+   ],
+   "confidence": 0.9
+  },
+  {
+   "id": "room_bedroom",
+   "name": "Bedroom",
+   "type": "bedroom",
+   "polygon": [
+    [
+     0.63,
+     0.56
+    ],
+    [
+     0.93,
+     0.56
+    ],
+    [
+     0.93,
+     0.95
+    ],
+    [
+     0.63,
+     0.95
+    ]
+   ],
+   "estimated_width_m": 3.0,
+   "estimated_length_m": 3.8,
+   "area_m2": 11.4,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_hall"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "room_balcony",
+   "name": "Balcony",
+   "type": "balcony",
+   "polygon": [
+    [
+     0.02,
+     0.29
+    ],
+    [
+     0.19,
+     0.29
+    ],
+    [
+     0.19,
+     0.95
+    ],
+    [
+     0.02,
+     0.95
+    ]
+   ],
+   "estimated_width_m": 1.7,
+   "estimated_length_m": 6.4,
+   "area_m2": 10.9,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "room_living"
+   ],
+   "confidence": 0.95
+  }
+ ],
+ "walls": [
+  {
+   "id": "wall_north_1",
+   "start": [
+    0.19,
+    0.02
+   ],
+   "end": [
+    0.63,
+    0.02
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_dining",
+    "room_kitchen"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_north_2",
+   "start": [
+    0.63,
+    0.02
+   ],
+   "end": [
+    0.79,
+    0.02
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_bathroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_east_bath",
+   "start": [
+    0.79,
+    0.02
+   ],
+   "end": [
+    0.79,
+    0.22
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_bathroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_step_east",
+   "start": [
+    0.79,
+    0.22
+   ],
+   "end": [
+    0.93,
+    0.22
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [],
+   "confidence": 0.9
+  },
+  {
+   "id": "wall_east_hall_bed",
+   "start": [
+    0.93,
+    0.22
+   ],
+   "end": [
+    0.93,
+    0.95
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_hall",
+    "room_bedroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_south_main",
+   "start": [
+    0.19000000000000003,
+    0.9499999999999998
+   ],
+   "end": [
+    0.93,
+    0.95
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_living",
+    "room_bedroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_west_living_balcony",
+   "start": [
+    0.19,
+    0.02
+   ],
+   "end": [
+    0.19000000000000003,
+    0.9499999999999998
+   ],
+   "exterior": true,
+   "thickness_m": 0.2,
+   "rooms": [
+    "room_living",
+    "room_dining",
+    "room_balcony"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_balcony_north",
+   "start": [
+    0.02,
+    0.29
+   ],
+   "end": [
+    0.19,
+    0.29
+   ],
+   "exterior": true,
+   "thickness_m": 0.1,
+   "rooms": [
+    "room_balcony"
+   ],
+   "confidence": 0.9
+  },
+  {
+   "id": "wall_balcony_west",
+   "start": [
+    0.02,
+    0.29
+   ],
+   "end": [
+    0.02,
+    0.95
+   ],
+   "exterior": true,
+   "thickness_m": 0.1,
+   "rooms": [
+    "room_balcony"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_balcony_south",
+   "start": [
+    0.02,
+    0.95
+   ],
+   "end": [
+    0.19000000000000003,
+    0.9499999999999998
+   ],
+   "exterior": true,
+   "thickness_m": 0.1,
+   "rooms": [
+    "room_balcony"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_int_bath_west",
+   "start": [
+    0.63,
+    0.02
+   ],
+   "end": [
+    0.63,
+    0.39
+   ],
+   "exterior": false,
+   "thickness_m": 0.15,
+   "rooms": [
+    "room_kitchen",
+    "room_bathroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_int_bath_south",
+   "start": [
+    0.63,
+    0.39
+   ],
+   "end": [
+    0.79,
+    0.39
+   ],
+   "exterior": false,
+   "thickness_m": 0.15,
+   "rooms": [
+    "room_bathroom",
+    "room_hall"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_int_bed_north",
+   "start": [
+    0.63,
+    0.56
+   ],
+   "end": [
+    0.93,
+    0.56
+   ],
+   "exterior": false,
+   "thickness_m": 0.15,
+   "rooms": [
+    "room_hall",
+    "room_bedroom"
+   ],
+   "confidence": 0.95
+  },
+  {
+   "id": "wall_int_bed_west",
+   "start": [
+    0.63,
+    0.56
+   ],
+   "end": [
+    0.63,
+    0.95
+   ],
+   "exterior": false,
+   "thickness_m": 0.15,
+   "rooms": [
+    "room_living",
+    "room_bedroom"
+   ],
+   "confidence": 0.95
+  }
+ ],
+ "doors": [
+  {
+   "id": "door_balcony",
+   "start": [
+    0.19,
+    0.4
+   ],
+   "end": [
+    0.19,
+    0.56
+   ],
+   "width_m": 1.6,
+   "swing": "double",
+   "opens_into": "room_living",
+   "connects": [
+    "room_living",
+    "room_balcony"
+   ],
+   "wall_id": "wall_west_living_balcony",
+   "confidence": 0.95
+  },
+  {
+   "id": "door_bathroom",
+   "start": [
+    0.71,
+    0.39
+   ],
+   "end": [
+    0.78,
+    0.39
+   ],
+   "width_m": 0.8,
+   "swing": "right",
+   "opens_into": "room_bathroom",
+   "connects": [
+    "room_bathroom",
+    "room_hall"
+   ],
+   "wall_id": "wall_int_bath_south",
+   "confidence": 0.95
+  },
+  {
+   "id": "door_bedroom",
+   "start": [
+    0.66,
+    0.56
+   ],
+   "end": [
+    0.73,
+    0.56
+   ],
+   "width_m": 0.8,
+   "swing": "left",
+   "opens_into": "room_bedroom",
+   "connects": [
+    "room_bedroom",
+    "room_hall"
+   ],
+   "wall_id": "wall_int_bed_north",
+   "confidence": 0.95
+  },
+  {
+   "id": "door_main_entrance",
+   "start": [
+    0.93,
+    0.43
+   ],
+   "end": [
+    0.93,
+    0.52
+   ],
+   "width_m": 0.9,
+   "swing": "left",
+   "opens_into": "room_hall",
+   "connects": [
+    "room_hall",
+    "outside"
+   ],
+   "wall_id": "wall_east_hall_bed",
+   "confidence": 0.9
+  }
+ ],
+ "windows": [
+  {
+   "id": "window_living_top_left",
+   "start": [
+    0.19,
+    0.05
+   ],
+   "end": [
+    0.19,
+    0.28
+   ],
+   "width_m": 2.2,
+   "wall_id": "wall_west_living_balcony",
+   "room_id": "room_dining",
+   "confidence": 0.9
+  },
+  {
+   "id": "window_living_bottom_left",
+   "start": [
+    0.19,
+    0.68
+   ],
+   "end": [
+    0.19,
+    0.91
+   ],
+   "width_m": 2.2,
+   "wall_id": "wall_west_living_balcony",
+   "room_id": "room_living",
+   "confidence": 0.9
+  },
+  {
+   "id": "window_living_south",
+   "start": [
+    0.39,
+    0.95
+   ],
+   "end": [
+    0.57,
+    0.95
+   ],
+   "width_m": 1.8,
+   "wall_id": "wall_south_main",
+   "room_id": "room_living",
+   "confidence": 0.95
+  },
+  {
+   "id": "window_hall_east",
+   "start": [
+    0.93,
+    0.32
+   ],
+   "end": [
+    0.93,
+    0.38
+   ],
+   "width_m": 0.6,
+   "wall_id": "wall_east_hall_bed",
+   "room_id": "room_hall",
+   "confidence": 0.85
+  },
+  {
+   "id": "window_bedroom_east",
+   "start": [
+    0.93,
+    0.66
+   ],
+   "end": [
+    0.93,
+    0.82
+   ],
+   "width_m": 1.6,
+   "wall_id": "wall_east_hall_bed",
+   "room_id": "room_bedroom",
+   "confidence": 0.9
+  }
+ ],
+ "furniture": [
+  {
+   "id": "furn_dining_table",
+   "type": "dining_table",
+   "room_id": "room_dining",
+   "bbox": [
+    0.27,
+    0.12,
+    0.33,
+    0.34
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 1.0,
+   "depth_m": 2.2,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_sofa",
+   "type": "sofa",
+   "room_id": "room_living",
+   "bbox": [
+    0.33,
+    0.82,
+    0.51,
+    0.93
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.8,
+   "depth_m": 0.9,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_armchair",
+   "type": "chair",
+   "room_id": "room_living",
+   "bbox": [
+    0.26,
+    0.66,
+    0.33,
+    0.77
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 0.8,
+   "depth_m": 0.8,
+   "dimension_source": "inferred",
+   "confidence": 0.9
+  },
+  {
+   "id": "furn_stools",
+   "type": "chair",
+   "room_id": "room_living",
+   "bbox": [
+    0.36,
+    0.56,
+    0.48,
+    0.64
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.2,
+   "depth_m": 0.6,
+   "dimension_source": "inferred",
+   "confidence": 0.85
+  },
+  {
+   "id": "furn_coffee_table",
+   "type": "table",
+   "room_id": "room_living",
+   "bbox": [
+    0.36,
+    0.68,
+    0.47,
+    0.78
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.1,
+   "depth_m": 0.8,
+   "dimension_source": "inferred",
+   "confidence": 0.9
+  },
+  {
+   "id": "furn_kitchen_counter",
+   "type": "countertop",
+   "room_id": "room_kitchen",
+   "bbox": [
+    0.41,
+    0.02,
+    0.63,
+    0.39
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 2.2,
+   "depth_m": 0.6,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_stove",
+   "type": "stove",
+   "room_id": "room_kitchen",
+   "bbox": [
+    0.48,
+    0.02,
+    0.56,
+    0.09
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.8,
+   "depth_m": 0.6,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_sink_kitchen",
+   "type": "sink",
+   "room_id": "room_kitchen",
+   "bbox": [
+    0.59,
+    0.19,
+    0.63,
+    0.29
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 0.5,
+   "depth_m": 0.8,
+   "dimension_source": "inferred",
+   "confidence": 0.9
+  },
+  {
+   "id": "furn_bed",
+   "type": "bed",
+   "room_id": "room_bedroom",
+   "bbox": [
+    0.73,
+    0.65,
+    0.88,
+    0.93
+   ],
+   "orientation_deg": 180.0,
+   "width_m": 1.6,
+   "depth_m": 2.0,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_wardrobe",
+   "type": "wardrobe",
+   "room_id": "room_bedroom",
+   "bbox": [
+    0.63,
+    0.71,
+    0.68,
+    0.86
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 1.5,
+   "depth_m": 0.5,
+   "dimension_source": "inferred",
+   "confidence": 0.9
+  },
+  {
+   "id": "furn_shower",
+   "type": "shower",
+   "room_id": "room_bathroom",
+   "bbox": [
+    0.64,
+    0.02,
+    0.74,
+    0.14
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.0,
+   "depth_m": 1.0,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_toilet",
+   "type": "toilet",
+   "room_id": "room_bathroom",
+   "bbox": [
+    0.64,
+    0.18,
+    0.69,
+    0.23
+   ],
+   "orientation_deg": 270.0,
+   "width_m": 0.5,
+   "depth_m": 0.7,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_bathroom_sink",
+   "type": "sink",
+   "room_id": "room_bathroom",
+   "bbox": [
+    0.64,
+    0.26,
+    0.7,
+    0.37
+   ],
+   "orientation_deg": 270.0,
+   "width_m": 0.6,
+   "depth_m": 0.9,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "furn_balcony_set",
+   "type": "table",
+   "room_id": "room_balcony",
+   "bbox": [
+    0.03,
+    0.8,
+    0.17,
+    0.93
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.2,
+   "depth_m": 1.2,
+   "dimension_source": "inferred",
+   "confidence": 0.9
+  }
+ ],
+ "scale_references": [
+  {
+   "kind": "bed",
+   "element_id": "furn_bed",
+   "start": [
+    0.73,
+    0.65
+   ],
+   "end": [
+    0.73,
+    0.93
+   ],
+   "real_m": 2.0,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.9
+  },
+  {
+   "kind": "door",
+   "element_id": "door_bedroom",
+   "start": [
+    0.66,
+    0.56
+   ],
+   "end": [
+    0.73,
+    0.56
+   ],
+   "real_m": 0.8,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.9
+  },
+  {
+   "kind": "countertop",
+   "element_id": "furn_kitchen_counter",
+   "start": [
+    0.41,
+    0.02
+   ],
+   "end": [
+    0.41,
+    0.09
+   ],
+   "real_m": 0.6,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.9
+  }
+ ],
+ "warnings": [],
+ "image": {
+  "width": 735,
+  "height": 442
+ },
+ "scale": {
+  "pixels_per_meter": null,
+  "confidence": 0.0,
+  "source": "pending_estimation"
+ },
+ "model": "gemini-3.5-flash",
+ "schema_version": "plan-analysis-v2",
+ "cached": false,
+ "issues": []
+}

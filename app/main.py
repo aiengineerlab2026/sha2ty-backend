@@ -10,6 +10,7 @@ from app.api.admin import router as admin_router
 from app.api.match import router as match_router
 from app.api.plans import router as plans_router
 from app.api.vendor import router as vendor_router
+from app import handlers  # noqa: F401  subscribes the event handlers
 from app.core.config import get_settings
 from app.schemas.vendor import HealthResponse
 from app.services.astra_service import AstraService

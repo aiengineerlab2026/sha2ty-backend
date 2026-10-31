@@ -89,6 +89,20 @@ def segment(
         masks.append(mask)
 
     _enforce_topology(rooms, footprint_geom, wall_mask, masks, errors)
+    for mask in _outdoor_spaces(sealed, footprint_mask, floor_lines, labels, thickness):
+        poly = _mask_polygon(mask, simplify=1.0)
+        if poly is None:
+            continue
+        rooms.append({"geom": poly, "area_px": int(mask.sum()), "measure_px": _chords(mask), "outdoor": True})
+        masks.append(mask)
+        for o in openings:  # a window in the flat's outline giving onto the balcony is the balcony door
+            start, end = (o["start"], o["end"]) if isinstance(o, dict) else (o.start, o.end)
+            mid = Point((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            if _kind(o) == "window" and poly.distance(mid) <= thickness * 1.6 and footprint_geom is not None and footprint_geom.exterior.distance(mid) <= thickness * 1.6:
+                if isinstance(o, dict):
+                    o.update(kind="door", evidence="opens onto the balcony")
+                else:
+                    o.kind, o.evidence = "door", "opens onto the balcony"
 
     # Labels → rooms. Points outside every room (inside a wall, or outside) go to the nearest room.
     for room in rooms:
@@ -167,6 +181,30 @@ def _kind(o) -> str:
     return o["kind"] if isinstance(o, dict) else o.kind
 
 
+def _outdoor_spaces(sealed, footprint, floor_lines, labels: list[RoomLabel], thickness: float) -> list[np.ndarray]:
+    """Balconies/terraces: a labelled area outside the envelope, closed by thin railing lines and
+    touching the building. Open to the image edge or larger than the flat → not a balcony."""
+    outside = [l for l in labels if l.kind == "patio" and not footprint[int(l.y), int(l.x)]]
+    if not outside or floor_lines is None:
+        return []
+    railings = cv2.dilate((floor_lines[0] | floor_lines[1]).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    free = ~(sealed | railings | footprint)
+    count, cc = cv2.connectedComponents(free.astype(np.uint8), connectivity=4)
+    near_building = cv2.dilate(footprint.astype(np.uint8), np.ones((int(thickness * 3) | 1,) * 2, np.uint8)) > 0
+    out = []
+    for label in outside:
+        i = cc[int(label.y), int(label.x)]
+        if i == 0:
+            continue
+        mask = cc == i
+        border = mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any()
+        if border or mask.sum() > footprint.sum() or not (mask & near_building).any():
+            continue
+        # Railing strokes belong to the balcony floor: grow back over them, never into the flat.
+        out.append(cv2.dilate(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~footprint & ~sealed)
+    return out
+
+
 def _footprint(sealed: np.ndarray) -> np.ndarray:
     """Everything the exterior flood cannot reach, minus detached islands (title text, legends)."""
     canvas = np.pad((~sealed).astype(np.uint8), 1, constant_values=1)  # 1-px frame so the flood surrounds everything
@@ -187,7 +225,9 @@ def _envelope_leaks(sealed: np.ndarray, footprint: np.ndarray, thickness: float)
     kernel approximate the intended envelope; big free areas inside it but outside the footprint
     are rooms the exterior flood swallowed."""
     k = int(thickness * 12) | 1
-    hull = cv2.morphologyEx(sealed.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))) > 0
+    # Padded: near the image border, erosion treats outside-the-image as solid and fills the margin.
+    padded = np.pad(sealed.astype(np.uint8), k)
+    hull = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))[k:-k, k:-k] > 0
     hull = _footprint(hull)
     lost = hull & ~footprint & ~sealed
     count, _, stats, centroids = cv2.connectedComponentsWithStats(lost.astype(np.uint8), connectivity=4)
@@ -325,6 +365,7 @@ def _split_zones(geom: Polygon, labels: list[RoomLabel], straight, thickness: fl
 
     best = None
     minx, miny, maxx, maxy = geom.bounds
+    corners = [Point(c) for c in geom.exterior.coords]
     for i, a in enumerate(labels):
         for b in labels[i + 1 :]:
             for axis in ("x", "y"):
@@ -339,7 +380,7 @@ def _split_zones(geom: Polygon, labels: list[RoomLabel], straight, thickness: fl
                     length = cut.length
                     if length <= 0:
                         continue
-                    support = _line_support(cut, straight, axis)
+                    support = max(_line_support(cut, straight, axis), _corner_support(cut, corners, thickness))
                     score = length * (1 - 0.6 * support)
                     if best is None or score < best[0]:
                         best = (score, axis, c, support)
@@ -356,6 +397,14 @@ def _split_zones(geom: Polygon, labels: list[RoomLabel], straight, thickness: fl
         for piece, piece_labels, piece_source, piece_support in _split_zones(part, inside, straight, thickness, []):
             out.append((piece, piece_labels, piece_source if len(inside) > 1 else source, piece_support if len(inside) > 1 else support))
     return out
+
+
+def _corner_support(cut, corners: list[Point], thickness: float) -> float:
+    """1 when the cut runs corner to corner of the outline: where a wall stops, the room boundary carries on."""
+    if cut.geom_type != "LineString":
+        return 0.0
+    ends = [Point(cut.coords[0]), Point(cut.coords[-1])]
+    return 1.0 if all(min(e.distance(c) for c in corners) <= thickness for e in ends) else 0.0
 
 
 def _line_support(cut, straight, axis: str) -> float:
@@ -415,7 +464,8 @@ def _fallback_kind(room: dict, thickness: float) -> str:
 
 
 def _fallback_name(room: dict, thickness: float) -> str:
-    return "Closet" if _fallback_kind(room, thickness) == "closet" else "Room"
+    # Never a named room type without a label: a mis-sized region once came out as one big "Closet".
+    return "Room"
 
 
 def _polygons(geom) -> list[Polygon]:

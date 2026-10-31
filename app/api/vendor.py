@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -9,19 +11,27 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
+from app.core.events import bus
+from app.domain.errors import DomainError
+from app.domain.events import GenerationFailed, GenerationStarted, UserRegistered
+from app.domain.generation import Provider, QuotaExhausted, remaining as tries_left
+from app.domain.vendor import Vendor
 from app.services.astra_service import AstraError, AstraService
-from app.services.auth import create_confirmed_user, create_vendor, user_id_from_bearer
+from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
+from app.schemas.product_details import ProductDetails
+from app.services import vision
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
+from app.services.product_details import extract_product_details
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services.meshy_service import MeshyError, MeshyService
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
+GLB_CACHE_VERSION = "vendor-glb-v1"
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
-Provider = Literal["meshy", "astra"]
 
 
 class GenerateAccepted(BaseModel):
@@ -29,6 +39,7 @@ class GenerateAccepted(BaseModel):
     provider: Provider
     status: str = "PENDING"
     remaining: int | None = None  # tries left for this provider after this call
+    details: ProductDetails | None = None  # the vision model's reading of the photo (sizes are estimates)
 
 
 class GenerateReady(BaseModel):
@@ -37,6 +48,7 @@ class GenerateReady(BaseModel):
     status: Literal["SUCCEEDED"] = "SUCCEEDED"
     glb_url: str
     remaining: int | None = None
+    details: ProductDetails | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -90,10 +102,15 @@ class RegisterResponse(BaseModel):
 @router.post("/register", response_model=RegisterResponse)
 async def register_vendor(body: RegisterBody, request: Request) -> RegisterResponse:
     settings = get_settings()
-    vendor = body.kind == "vendor"
-    if vendor and (not body.name.strip() or not body.location.strip()):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Company name and location are required.")
     email = body.email.strip().lower()
+    try:
+        profile = (
+            Vendor.register("", body.name, body.location, full_name=body.full_name.strip(), email=email, lat=body.lat, lng=body.lng)
+            if body.kind == "vendor"
+            else None
+        )
+    except DomainError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     client = request.app.state.auth_http
     user_id = await create_confirmed_user(
         email,
@@ -102,14 +119,8 @@ async def register_vendor(body: RegisterBody, request: Request) -> RegisterRespo
         settings,
         client,
     )
-    if vendor:
-        # The vendor row is written here (service role); vendors cannot set their own status
-        # (see supabase/vendor_approval.sql), so only the admin can suspend them later.
-        await create_vendor(
-            {"id": user_id, "name": body.name.strip(), "location": body.location.strip(), "full_name": body.full_name.strip(), "email": email, "lat": body.lat, "lng": body.lng},
-            settings,
-            client,
-        )
+    # Handlers create the vendor profile (app/handlers.py).
+    await bus.publish(UserRegistered(user_id, body.kind, profile and replace(profile, id=user_id)), request.app.state)
     return RegisterResponse(user_id=user_id, status="active")
 
 
@@ -129,16 +140,22 @@ class QuotaResponse(BaseModel):
 async def generation_quota(request: Request, user_id: Annotated[str, Depends(current_user)]) -> QuotaResponse:
     settings = get_settings()
     used = await generation_usage(user_id, settings, request.app.state.auth_http)
-    return QuotaResponse(limit=settings.generation_limit, remaining={p: max(settings.generation_limit - n, 0) for p, n in used.items()})
+    return QuotaResponse(limit=settings.generation_limit, remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()})
+
+
+def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool) -> str:
+    """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
+    return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
 
 async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
     """Reserve one generation try; 429 when the vendor has used them all. Returns tries left."""
     used = await use_generation(user_id, provider, 1, settings, request.app.state.auth_http)
     if used is None:
-        name = "GPT Astra" if provider == "astra" else "Meshy"
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"You have used all {settings.generation_limit} {name} generations for this account.")
-    return settings.generation_limit - used
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(QuotaExhausted(provider, settings.generation_limit)))
+    left = tries_left(settings.generation_limit, used)
+    await bus.publish(GenerationStarted(user_id, provider, left), request.app.state)
+    return left
 
 
 @router.post("/generate")
@@ -173,6 +190,26 @@ async def generate_model(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Upload a photo or provide image_url.")
     object_id = model_id or uuid4().hex
     textured = should_texture.strip().lower() not in {"0", "false", "no"}
+    db = request.app.state.auth_http
+    # The same photo, vendor and options → the model generated before (model_cache): no vision call,
+    # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
+    cache_key = glb_cache_key(raw, user_id, provider, category, title, textured) if raw else None
+    hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
+    if hit and hit.get("glb_url"):
+        details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
+        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details)
+
+    async def remember(url: str, details: ProductDetails | None) -> None:
+        if cache_key:
+            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None}
+            await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
+
+    async def read_photo(photo: bytes) -> ProductDetails | None:
+        """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation."""
+        if not photo:
+            return None  # an image URL only: Meshy fetches it, nothing to read here
+        model = await vision.current_model(settings, request.app.state.auth_http)
+        return await extract_product_details(photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http)
 
     if provider == "astra":
         if not settings.astra_configured:
@@ -181,30 +218,35 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
         remaining = await take_try(request, user_id, "astra", settings)
         try:
-            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title))
+            details = await read_photo(raw)
+            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+            await remember(url, details)
         except (AstraError, CdnError) as exc:
-            # ponytail: a failed call gives the try back; refunds are best-effort, not transactional.
-            await use_generation(user_id, "astra", -1, settings, request.app.state.auth_http)
+            await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
-        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining)
+        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining, details=details)
 
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
+    details = await read_photo(raw)
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),
             image=None if public_url else raw,
             mime_type=mime,
             image_url=public_url,
-            texture_prompt=meshy_texture_prompt(category, title),
+            texture_prompt=meshy_texture_prompt(category, title, details),
         )
     except MeshyError as exc:
-        await use_generation(user_id, "meshy", -1, settings, request.app.state.auth_http)  # Meshy refused: give the try back
+        await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    request.app.state.pending_cdn[task_id] = {"user_id": user_id, "model_id": object_id}
-    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining)
+    request.app.state.pending_cdn[task_id] = {
+        "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
+        "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
+    }
+    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -255,6 +297,9 @@ async def get_task(
         url = cdn.upload(f"{owner}/{object_id}.glb", dest.read_bytes(), "model/gltf-binary")
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
+    if pending.get("cache_key"):
+        result = {"glb_url": url, "model_id": object_id, "details": pending.get("details")}
+        await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
     request.app.state.pending_cdn.pop(task_id, None)
     return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url)
 
@@ -268,13 +313,14 @@ async def extract_carpet_image(
     image: Annotated[UploadFile, File()],
     width_m: Annotated[float | None, Form(gt=0, le=50)] = None,
     length_m: Annotated[float | None, Form(gt=0, le=50)] = None,
+    noun: Annotated[str, Form()] = "carpet",
 ) -> Response:
-    """Photo of a carpet → PNG of just the carpet, straightened top-down at its real aspect ratio."""
+    """Photo of a carpet, door, or window → PNG of just that item at its real aspect ratio."""
     data = await image.read(MAX_CARPET_PHOTO + 1)
     if len(data) > MAX_CARPET_PHOTO:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Photo is larger than 15 MB.")
     try:
-        png = await run_in_threadpool(extract_carpet, data, width_m, length_m)
+        png = await run_in_threadpool(extract_carpet, data, width_m, length_m, noun)
     except CarpetNotFound as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return Response(content=png, media_type="image/png")

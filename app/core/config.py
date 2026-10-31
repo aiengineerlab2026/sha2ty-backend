@@ -22,6 +22,16 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"
+    # Floor plans: GPT reads room names and measurements before the OpenCV conversion ("" turns it off).
+    # Default vision model (floor plans, vendor photos) until the admin picks one (services/vision.py):
+    # gemini-* → Google Gemini (GEMINI_API_KEY), otherwise OpenAI Responses (OPENAI_API_KEY).
+    plan_vision_model: str = "gemini-3.1-pro-preview"
+    gemini_api_key: SecretStr = SecretStr("")
+    openai_plan_timeout_seconds: float = 240.0  # GPT-6 Astra can take 1–2 minutes on a full plan
+    # Floor plans: the same upload reuses its vision answer and its finished 3D plan (model_cache);
+    # off = every upload is read and converted again. Vendor photos are always cached.
+    plan_vision_cache: bool = True
+    openai_plan_expected_seconds: float = 25.0  # typical answer time, for the progress percentage
     # Match: OpenAI image editing with two reference images (POST /v1/images/edits).
     openai_image_model: str = "gpt-image-2"
     openai_image_size: str = "1536x1024"  # landscape room photo

@@ -14,7 +14,14 @@ class CarpetNotFound(ValueError):
     pass
 
 
-def extract_carpet(data: bytes, width_m: float | None = None, length_m: float | None = None) -> bytes:
+def extract_carpet(
+    data: bytes,
+    width_m: float | None = None,
+    length_m: float | None = None,
+    noun: str = "carpet",
+) -> bytes:
+    item = noun if noun in ("carpet", "door", "window") else "carpet"
+    view = "from above" if item == "carpet" else "front-on"
     image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise CarpetNotFound("The file is not a readable image.")
@@ -25,10 +32,10 @@ def extract_carpet(data: bytes, width_m: float | None = None, length_m: float | 
     mask = _segment(small)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        raise CarpetNotFound("Could not find a carpet in the photo. Use a photo where the carpet fills most of the frame.")
+        raise CarpetNotFound(f"Could not find a {item} in the photo. Use a photo where the {item} fills most of the frame.")
     carpet = max(contours, key=cv2.contourArea)
     if cv2.contourArea(carpet) < 0.05 * mask.size:
-        raise CarpetNotFound("The carpet is too small in the photo. Take it from closer, from above.")
+        raise CarpetNotFound(f"The {item} is too small in the photo. Take it from closer, {view}.")
 
     quad = _quad(carpet) / k  # back to full-resolution pixels
     full_mask = np.zeros((h, w), np.uint8)
@@ -41,7 +48,7 @@ def extract_carpet(data: bytes, width_m: float | None = None, length_m: float | 
     alpha = cv2.warpPerspective(full_mask, m, (out_w, out_h), flags=cv2.INTER_LINEAR)
     ok, png = cv2.imencode(".png", np.dstack([rgb, alpha]))
     if not ok:
-        raise CarpetNotFound("Could not encode the extracted carpet.")
+        raise CarpetNotFound(f"Could not encode the extracted {item}.")
     return png.tobytes()
 
 

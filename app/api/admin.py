@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 import httpx
@@ -17,6 +17,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.core.config import Settings, get_settings
+from app.core.events import bus
+from app.domain.events import VendorStatusChanged
+from app.domain.vendor import VendorStatus
+from app.services import vision
 from app.services.auth import service_headers
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -81,7 +85,7 @@ async def list_vendors(request: Request) -> dict[str, object]:
 
 
 class StatusBody(BaseModel):
-    status: Literal["approved", "rejected", "pending"]
+    status: VendorStatus
 
 
 @router.post("/vendors/{vendor_id}/status", dependencies=[Depends(require_admin)])
@@ -96,4 +100,34 @@ async def set_status(vendor_id: UUID, body: StatusBody, request: Request) -> dic
     rows = response.json() if response.status_code < 400 else None
     if not rows:
         raise HTTPException(status.HTTP_404_NOT_FOUND if response.status_code < 400 else status.HTTP_502_BAD_GATEWAY, "Vendor not found.")
+    await bus.publish(VendorStatusChanged(str(vendor_id), body.status), request.app.state)
     return {"vendor": rows[0]}
+
+
+class VisionBody(BaseModel):
+    model: str
+
+
+@router.get("/vision", dependencies=[Depends(require_admin)])
+async def get_vision(request: Request) -> dict[str, object]:
+    """The model that reads floor plans and vendor product photos, and which ones have an API key."""
+    settings = get_settings()
+    return {
+        "model": await vision.current_model(settings, request.app.state.auth_http),
+        "options": [{"id": m, "label": label, "configured": vision.configured(settings, m)} for m, label in vision.MODELS.items()],
+    }
+
+
+@router.put("/vision", dependencies=[Depends(require_admin)])
+async def put_vision(body: VisionBody, request: Request) -> dict[str, object]:
+    settings = get_settings()
+    if body.model not in vision.MODELS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Choose one of: {', '.join(vision.MODELS)}.")
+    if not vision.configured(settings, body.model):
+        key = "GEMINI_API_KEY" if vision.is_gemini(body.model) else "OPENAI_API_KEY"
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{vision.MODELS[body.model]} needs {key} on the server.")
+    try:
+        model = await vision.set_model(settings, request.app.state.auth_http, body.model)
+    except vision.VisionSettingError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"model": model}

@@ -1,11 +1,12 @@
 """Floor-plan image → validated 2D plan (pixel space) → metric 3D geometry.
 
 Pipeline (each stage writes a debug image):
+  0. Vision-LLM analysis (vision_analysis.py, done by the API before this): semantic guidance only
   1. OCR on the original image (names, printed dimensions)       → 10_ocr
   2. Structural walls by thickness, H/V/diagonal segments          → 01..07, 20_walls
   3. Verified openings (door arcs, window lines, exterior gaps)    → 21_openings
   4. Free-space rooms + open-plan zones, topology checks           → 30_sealed, 31_rooms
-  5. Scale from printed dimensions (robust median)                 → 40_final
+  5. Scale: printed dimensions, else doors / furniture / heuristic → 40_final (scale_estimator.py)
 The correction UI edits the pixel-space state (walls/openings/labels/zone lines/scale) and sends it
 back to `plan_from_state`, which re-runs steps 4–5 on the edited walls, so preview and 3D agree.
 """
@@ -13,18 +14,33 @@ back to `plan_from_state`, which re-runs steps 4–5 on the edited walls, so pre
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import logging
+from functools import partial
 from dataclasses import asdict
 
 import cv2
 import numpy as np
 from PIL import Image
+from shapely.geometry import Point, Polygon
 
 from app.services.plan.dimension_ocr import calibrate, measurements_from_boxes, parse_dimension, room_labels, run_ocr
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, geometry_from_plan
 from app.services.plan.room_segmenter import RoomLabel, segment
+from app.schemas.plan_analysis import PlanAnalysis
+from app.services.plan.analysis_guidance import (
+    door_references,
+    drop_furniture_walls,
+    labels_from_analysis,
+    object_references,
+    room_estimate_references,
+)
+from app.services.plan.scale_estimator import estimate_scale, furniture_references
+from app.services.plan.vision_geometry import draw_analysis, opencv_agreement, segment_from_analysis
 from app.services.plan.wall_detector import Opening, WallSegment, detect_walls
 
+logger = logging.getLogger(__name__)
 MAX_SIDE = 2400  # larger scans are downscaled for speed; `image_scale` maps back to the upload
 
 
@@ -35,6 +51,8 @@ def plan_from_image(
     width_m: float | None = None,
     depth_m: float | None = None,
     debug: bool = False,
+    analysis: PlanAnalysis | None = None,
+    on_stage=lambda _name, _percent: None,
 ) -> dict:
     original = _decode_image(image_bytes)
     image, image_scale = _working_copy(original)
@@ -42,11 +60,17 @@ def plan_from_image(
 
     boxes, ocr_notes = run_ocr(image)
     labels, drawing_unit = room_labels(boxes)
+    size = (int(image.shape[1]), int(image.shape[0]))
+    labels += labels_from_analysis(analysis, labels, size)  # the model names rooms OCR could not read
     measurements, ocr_warn = measurements_from_boxes(boxes)
     debug_images["10_ocr"] = _draw_ocr(image, boxes, labels)
 
+    on_stage("Extracting rooms", 72)
     text_boxes = [(b.x, b.y, b.width, b.height) for b in boxes]
     walls = detect_walls(image, text_boxes)
+    walls.walls, dropped = drop_furniture_walls(walls.walls, analysis, size)
+    if dropped:
+        walls.warnings.append(f"Ignored {dropped} furniture outline(s) that looked like walls.")
     debug_images.update(walls.debug)
     debug_images["20_walls"] = _draw_walls(image, walls.walls, [])
     debug_images["21_openings"] = _draw_walls(image, walls.walls, walls.openings)
@@ -61,17 +85,39 @@ def plan_from_image(
         "zone_lines": [],
         "drawing_unit": drawing_unit,
         "straight_lines": _encode_mask(walls.debug["07_straight_thin"]),
+        # The validated model output, kept with the plan for later editing (None without a vision model).
+        "analysis": analysis.model_dump() if analysis else None,
     }
     if width_m and depth_m and width_m > 0 and depth_m > 0:
         state["manual_extent_m"] = [width_m, depth_m]
 
-    payload = plan_from_state(
-        state,
-        wall_height=wall_height,
-        wall_thickness=wall_thickness,
-        extra_warnings=ocr_notes + ocr_warn + walls.warnings,
-        debug_images=debug_images,
-        image=image,
+    run = partial(plan_from_state, wall_height=wall_height, wall_thickness=wall_thickness, extra_warnings=ocr_notes + ocr_warn + walls.warnings, image=image)
+    on_stage("Estimating dimensions", 84)
+    payload = run(state, debug_images=debug_images)
+    payload["geometry_source"] = "opencv"
+    if analysis and analysis.rooms:
+        debug_images["25_vision_rooms"] = draw_analysis(image, analysis)
+        agreement = opencv_agreement(analysis, payload["zones_px"], size)
+        payload["opencv_agreement"] = round(agreement, 2)
+        # OpenCV geometry wins whenever it validates: the model's coordinates are approximate. Every
+        # room the model names is also a label, so a room OpenCV missed fails validation and only
+        # then is the model's layout refined on the detected walls instead.
+        if not payload["validation"]["ok"] or len(payload["rooms_px"]) <= 1:
+            vision_debug: dict = {}
+            vision = run({**state, "geometry_source": "vision"}, debug_images=vision_debug)
+            logger.info("OpenCV found %d rooms (agreement %.0f%%, ok=%s); vision layout: %d rooms, ok=%s",
+                        len(payload["rooms_px"]), agreement * 100, payload["validation"]["ok"], len(vision["rooms_px"]), vision["validation"]["ok"])
+            # Both with problems: the one that found more spaces is the better start (it is built anyway).
+            if vision["validation"]["ok"] or (not payload["validation"]["ok"] and len(vision["zones_px"]) > len(payload["zones_px"])):
+                payload = {**vision, "geometry_source": "vision", "opencv_agreement": round(agreement, 2)}
+                debug_images.update(vision_debug)
+    on_stage("Generating 3D", 93)
+    debug_images["22_refined_walls"] = _draw_walls(image, [_wall(w) for w in payload["walls_px"]], [_opening(o) for o in payload["openings_px"]])
+    logger.info(
+        "Plan: %s layout, %d rooms %s, scale %s px/m (%s, confidence %.2f), errors %s",
+        payload["geometry_source"], len(payload["rooms"]), [r["name"] for r in payload["rooms"]],
+        round(1 / payload["meters_per_pixel"], 1) if payload.get("meters_per_pixel") else None,
+        payload["scale"]["source"], payload["scale"]["confidence"], payload["validation"]["errors"],
     )
     payload["preview_image"] = _png_data_url(image)
     payload["ocr_measurements"] = [
@@ -80,9 +126,9 @@ def plan_from_image(
         for m in measurements
     ]
     payload["ocr_text"] = [{"text": b.text, "score": round(b.score, 2), "box": [round(b.x, 1), round(b.y, 1), round(b.width, 1), round(b.height, 1)]} for b in boxes]
-    _write_debug_dir(debug_images)
+    _write_debug_dir(debug_images, hashlib.sha256(image_bytes).hexdigest()[:12])
     if debug:
-        payload["debug_images"] = {k: _png_data_url(v, max_side=720) for k, v in debug_images.items() if k[:2] in ("00", "05", "10", "21", "30", "31", "40")}
+        payload["debug_images"] = {k: _png_data_url(v, max_side=720) for k, v in debug_images.items() if k[:2] in ("00", "05", "10", "21", "22", "25", "30", "31", "40")}
     return payload
 
 
@@ -103,30 +149,49 @@ def plan_from_state(
     walls = [_wall(w) for w in state["walls_px"]]
     openings = [_opening(o) for o in state.get("openings_px") or []]
     labels = [_label(l, state.get("drawing_unit")) for l in state.get("labels") or []]
-    straight = _decode_mask(state.get("straight_lines"), shape)
-    seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
-
-    scale = calibrate(seg.zones)
+    analysis = PlanAnalysis.model_validate(state["analysis"]) if state.get("analysis") else None
+    size = (int(size["width"]), int(size["height"]))
+    if state.get("geometry_source") == "vision" and analysis:
+        # The model's layout, refined on the detected walls/openings (vision_geometry.py).
+        seg, walls, openings, thickness = segment_from_analysis(analysis, size, walls, openings, thickness)
+        state = {
+            **state, "thickness_px": thickness,
+            "walls_px": [w.as_dict(i) for i, w in enumerate(walls)], "openings_px": [o.as_dict(i) for i, o in enumerate(openings)],
+        }
+    else:
+        straight = _decode_mask(state.get("straight_lines"), shape)
+        seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
+        state = {**state, "openings_px": [o.as_dict(i) for i, o in enumerate(openings)]}  # balcony windows became doors
+    if image is not None and "scale_refs" not in state:
+        # Object references and fixtures need the drawing: measured once on upload, carried in the state.
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        objects = object_references(analysis, gray, size)
+        if not any(r["source"] == "furniture" for r in objects):
+            objects += furniture_references(gray, seg.zones)  # no model, or it pointed at no furniture
+        state = {**state, "scale_refs": objects + room_estimate_references(analysis, seg.zones), "fixtures_px": []}  # structure only: no furniture boxes in the 3D model
+    # Doors are re-measured on every run: the correction view can edit openings.
+    refs = door_references(openings, analysis, size, thickness) + [dict(r) for r in state.get("scale_refs") or []]
+    scale = estimate_scale(calibrate(seg.zones), refs, thickness)
     if meters_per_pixel and meters_per_pixel > 0:
         scale["detected_meters_per_pixel"] = scale.get("meters_per_pixel")
         scale["meters_per_pixel"] = float(meters_per_pixel)
         scale["source"] = "user"
+        scale["estimated"] = False
     elif state.get("manual_extent_m") and seg.footprint:
         w_m, d_m = state["manual_extent_m"]
         xs = [p[0] for p in seg.footprint]
         ys = [p[1] for p in seg.footprint]
         scale["meters_per_pixel"] = min(w_m / max(max(xs) - min(xs), 1), d_m / max(max(ys) - min(ys), 1))
         scale["source"] = "overall size"
+        scale["estimated"] = False
         scale_confirmed = True
-    else:
-        scale["source"] = "printed dimensions" if scale["meters_per_pixel"] else "none"
     scale["confirmed"] = bool(scale_confirmed)
     mpp = scale["meters_per_pixel"]
     if mpp:
         scale["px_per_ft"] = round(0.3048 / mpp, 2)
 
     _check_zone_sizes(seg.zones, mpp)
-    validation = validate(seg, walls, openings, thickness, scale)
+    validation = validate(seg, walls, openings, thickness, scale, labels)
     _room_confidence(seg, validation)
 
     payload: dict = {
@@ -142,10 +207,12 @@ def plan_from_state(
     payload.update(
         geometry_from_plan(
             seg.rooms, seg.zones, state["walls_px"], state.get("openings_px") or [], seg.footprint, mpp or 0.0,
-            height=wall_height, default_thickness=wall_thickness,
+            height=wall_height, default_thickness=wall_thickness, fixtures_px=state.get("fixtures_px"),
         )
     )
-    payload["scale_confidence"] = scale["confidence"] if scale["source"] == "printed dimensions" else (1.0 if scale_confirmed else 0.0)
+    if payload.get("analysis") and mpp:
+        payload["analysis"] = {**payload["analysis"], "scale": {"pixels_per_meter": round(1 / mpp, 2), "confidence": scale["confidence"], "source": scale["source"]}}
+    payload["scale_confidence"] = 1.0 if scale_confirmed else scale["confidence"]
     payload["meters_per_pixel"] = mpp
 
     if debug_images is not None and image is not None:
@@ -155,10 +222,20 @@ def plan_from_state(
     return payload
 
 
-def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: float, scale: dict) -> dict:
+def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: float, scale: dict, labels: list[RoomLabel] | None = None) -> dict:
     """Blocking errors stop 3D generation; warnings are shown but do not block."""
     errors = list(seg.errors)
     warnings: list[str] = []
+    # A "wall" many times the drawing's stroke width is a filled area (grey room fill, furniture
+    # block) read as ink: extruded, it is a solid slab over the rooms.
+    for w in walls:
+        if w.thickness > max(4 * thickness, 25) and w.length > w.thickness:
+            errors.append(f"A {w.thickness:.0f} px thick wall at ({w.start[0]:.0f}, {w.start[1]:.0f}) is a filled area, not a wall.")
+    # Every room named on the plan must be an enclosed space of its own (or a zone of an open plan).
+    named = {z.get("label_index") for z in seg.zones}
+    for i, label in enumerate(labels or []):
+        if i not in named and not any(Polygon(z["polygon"]).buffer(thickness).contains(Point(label.x, label.y)) for z in seg.zones if len(z["polygon"]) >= 3):
+            errors.append(f"'{label.text}' is labelled on the plan but no enclosed space was found for it.")
     if not seg.footprint:
         errors.append("Exterior footprint is not closed. Add the missing exterior wall or mark the opening.")
     if not seg.rooms:
@@ -168,10 +245,9 @@ def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: 
             errors.append(f"{room['name'] or room['id']}: {problem}.")
         if room["uncertain"]:
             warnings.append(f"{room['name']}: may combine two rooms; check for a missing wall.")
-    if not scale.get("meters_per_pixel"):
-        errors.append("Scale is unknown. Enter the scale or a known room size, then confirm it.")
-    elif not scale.get("confirmed") and (scale.get("confidence", 0) < 0.6 or not scale.get("uniform", True)):
-        errors.append("Scale is not reliable enough. Check it against a printed dimension and confirm it.")
+    # Scale never blocks: an estimated one is labelled approximate and can be corrected afterwards.
+    if scale.get("estimated") and not scale.get("confirmed"):
+        warnings.append("Dimensions automatically estimated from your floor plan. Measurements are approximate.")
     # Unexplained crossings: two wall bodies crossing away from their ends (a junction is fine).
     for i, a in enumerate(walls):
         for b in walls[i + 1 :]:
@@ -306,6 +382,11 @@ def _decode_mask(data: str | None, shape) -> np.ndarray | None:
 # ── images ──────────────────────────────────────────────────────────────────────────────
 
 
+def preview_data_url(image_bytes: bytes) -> str:
+    """The "Original plan" thumbnail, rebuilt for a plan served from the cache (not stored with it)."""
+    return _png_data_url(_working_copy(_decode_image(image_bytes))[0])
+
+
 def _decode_image(image_bytes: bytes) -> np.ndarray:
     image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
@@ -380,14 +461,13 @@ def _pt(p) -> tuple[int, int]:
     return int(round(p[0])), int(round(p[1]))
 
 
-def _write_debug_dir(images: dict[str, np.ndarray]) -> None:
+def _write_debug_dir(images: dict[str, np.ndarray], key: str) -> None:
+    """storage/plan-debug/<image hash>/: one folder per upload, so a bad conversion can be inspected later."""
     try:
         from app.core.config import get_settings
 
-        path = get_settings().storage_dir / "plan-debug"
+        path = get_settings().storage_dir / "plan-debug" / key
         path.mkdir(parents=True, exist_ok=True)
-        for old in path.glob("*.jpg"):
-            old.unlink()  # earlier pipeline's stage images; names no longer match
         for name, img in images.items():
             cv2.imwrite(str(path / f"{name}.png"), img)
     except Exception:
