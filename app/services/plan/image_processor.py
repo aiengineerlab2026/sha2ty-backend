@@ -1,6 +1,7 @@
 """Floor-plan image → validated 2D plan (pixel space) → metric 3D geometry.
 
 Pipeline (each stage writes a debug image):
+  0. Vision-LLM analysis (vision_analysis.py, done by the API before this): semantic guidance only
   1. OCR on the original image (names, printed dimensions)       → 10_ocr
   2. Structural walls by thickness, H/V/diagonal segments          → 01..07, 20_walls
   3. Verified openings (door arcs, window lines, exterior gaps)    → 21_openings
@@ -13,7 +14,10 @@ back to `plan_from_state`, which re-runs steps 4–5 on the edited walls, so pre
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import logging
+from functools import partial
 from dataclasses import asdict
 
 import cv2
@@ -23,10 +27,20 @@ from PIL import Image
 from app.services.plan.dimension_ocr import calibrate, measurements_from_boxes, parse_dimension, room_labels, run_ocr
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, geometry_from_plan
 from app.services.plan.room_segmenter import RoomLabel, segment
-from app.services.plan.plan_reader import reading_references
-from app.services.plan.scale_estimator import door_references, estimate_scale, furniture_references
+from app.schemas.plan_analysis import PlanAnalysis
+from app.services.plan.analysis_guidance import (
+    door_references,
+    drop_furniture_walls,
+    fixtures_px,
+    labels_from_analysis,
+    object_references,
+    room_estimate_references,
+)
+from app.services.plan.scale_estimator import estimate_scale, furniture_references
+from app.services.plan.vision_geometry import draw_analysis, opencv_agreement, segment_from_analysis
 from app.services.plan.wall_detector import Opening, WallSegment, detect_walls
 
+logger = logging.getLogger(__name__)
 MAX_SIDE = 2400  # larger scans are downscaled for speed; `image_scale` maps back to the upload
 
 
@@ -37,7 +51,8 @@ def plan_from_image(
     width_m: float | None = None,
     depth_m: float | None = None,
     debug: bool = False,
-    reading: dict | None = None,
+    analysis: PlanAnalysis | None = None,
+    on_stage=lambda _name, _percent: None,
 ) -> dict:
     original = _decode_image(image_bytes)
     image, image_scale = _working_copy(original)
@@ -45,11 +60,17 @@ def plan_from_image(
 
     boxes, ocr_notes = run_ocr(image)
     labels, drawing_unit = room_labels(boxes)
+    size = (int(image.shape[1]), int(image.shape[0]))
+    labels += labels_from_analysis(analysis, labels, size)  # the model names rooms OCR could not read
     measurements, ocr_warn = measurements_from_boxes(boxes)
     debug_images["10_ocr"] = _draw_ocr(image, boxes, labels)
 
+    on_stage("Extracting rooms", 72)
     text_boxes = [(b.x, b.y, b.width, b.height) for b in boxes]
     walls = detect_walls(image, text_boxes)
+    walls.walls, dropped = drop_furniture_walls(walls.walls, analysis, size)
+    if dropped:
+        walls.warnings.append(f"Ignored {dropped} furniture outline(s) that looked like walls.")
     debug_images.update(walls.debug)
     debug_images["20_walls"] = _draw_walls(image, walls.walls, [])
     debug_images["21_openings"] = _draw_walls(image, walls.walls, walls.openings)
@@ -64,18 +85,37 @@ def plan_from_image(
         "zone_lines": [],
         "drawing_unit": drawing_unit,
         "straight_lines": _encode_mask(walls.debug["07_straight_thin"]),
-        "plan_reading": reading,  # GPT's room list (plan_reader.py); None when it was not available
+        # The validated model output, kept with the plan for later editing (None without a vision model).
+        "analysis": analysis.model_dump() if analysis else None,
     }
     if width_m and depth_m and width_m > 0 and depth_m > 0:
         state["manual_extent_m"] = [width_m, depth_m]
 
-    payload = plan_from_state(
-        state,
-        wall_height=wall_height,
-        wall_thickness=wall_thickness,
-        extra_warnings=ocr_notes + ocr_warn + walls.warnings,
-        debug_images=debug_images,
-        image=image,
+    run = partial(plan_from_state, wall_height=wall_height, wall_thickness=wall_thickness, extra_warnings=ocr_notes + ocr_warn + walls.warnings, image=image)
+    on_stage("Estimating dimensions", 84)
+    payload = run(state, debug_images=debug_images)
+    payload["geometry_source"] = "opencv"
+    if analysis and analysis.rooms:
+        debug_images["25_vision_rooms"] = draw_analysis(image, analysis)
+        agreement = opencv_agreement(analysis, payload["zones_px"], size)
+        payload["opencv_agreement"] = round(agreement, 2)
+        # OpenCV keeps the plan only when it found the rooms the model sees. Otherwise (thin or styled
+        # walls that never seal into rooms → one big region) the model's layout is refined instead.
+        if agreement < 0.7 or not payload["validation"]["ok"] or len(payload["rooms_px"]) <= 1:
+            vision_debug: dict = {}
+            vision = run({**state, "geometry_source": "vision"}, debug_images=vision_debug)
+            logger.info("OpenCV found %d rooms (agreement %.0f%%, ok=%s); vision layout: %d rooms, ok=%s",
+                        len(payload["rooms_px"]), agreement * 100, payload["validation"]["ok"], len(vision["rooms_px"]), vision["validation"]["ok"])
+            if vision["validation"]["ok"] or not payload["validation"]["ok"]:
+                payload = {**vision, "geometry_source": "vision", "opencv_agreement": round(agreement, 2)}
+                debug_images.update(vision_debug)
+    on_stage("Generating 3D", 93)
+    debug_images["22_refined_walls"] = _draw_walls(image, [_wall(w) for w in payload["walls_px"]], [_opening(o) for o in payload["openings_px"]])
+    logger.info(
+        "Plan: %s layout, %d rooms %s, scale %s px/m (%s, confidence %.2f), errors %s",
+        payload["geometry_source"], len(payload["rooms"]), [r["name"] for r in payload["rooms"]],
+        round(1 / payload["meters_per_pixel"], 1) if payload.get("meters_per_pixel") else None,
+        payload["scale"]["source"], payload["scale"]["confidence"], payload["validation"]["errors"],
     )
     payload["preview_image"] = _png_data_url(image)
     payload["ocr_measurements"] = [
@@ -84,9 +124,9 @@ def plan_from_image(
         for m in measurements
     ]
     payload["ocr_text"] = [{"text": b.text, "score": round(b.score, 2), "box": [round(b.x, 1), round(b.y, 1), round(b.width, 1), round(b.height, 1)]} for b in boxes]
-    _write_debug_dir(debug_images)
+    _write_debug_dir(debug_images, hashlib.sha256(image_bytes).hexdigest()[:12])
     if debug:
-        payload["debug_images"] = {k: _png_data_url(v, max_side=720) for k, v in debug_images.items() if k[:2] in ("00", "05", "10", "21", "30", "31", "40")}
+        payload["debug_images"] = {k: _png_data_url(v, max_side=720) for k, v in debug_images.items() if k[:2] in ("00", "05", "10", "21", "22", "25", "30", "31", "40")}
     return payload
 
 
@@ -107,15 +147,27 @@ def plan_from_state(
     walls = [_wall(w) for w in state["walls_px"]]
     openings = [_opening(o) for o in state.get("openings_px") or []]
     labels = [_label(l, state.get("drawing_unit")) for l in state.get("labels") or []]
-    straight = _decode_mask(state.get("straight_lines"), shape)
-    seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
-
+    analysis = PlanAnalysis.model_validate(state["analysis"]) if state.get("analysis") else None
+    size = (int(size["width"]), int(size["height"]))
+    if state.get("geometry_source") == "vision" and analysis:
+        # The model's layout, refined on the detected walls/openings (vision_geometry.py).
+        seg, walls, openings, thickness = segment_from_analysis(analysis, size, walls, openings, thickness)
+        state = {
+            **state, "thickness_px": thickness,
+            "walls_px": [w.as_dict(i) for i, w in enumerate(walls)], "openings_px": [o.as_dict(i) for i, o in enumerate(openings)],
+        }
+    else:
+        straight = _decode_mask(state.get("straight_lines"), shape)
+        seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
     if image is not None and "scale_refs" not in state:
-        # Furniture needs the drawing, so it is measured once on upload and carried in the state.
-        # GPT's reading is matched to the detected rooms here too, then travels the same way.
-        furniture = furniture_references(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), seg.zones)
-        state = {**state, "scale_refs": reading_references(state.get("plan_reading"), seg.zones, seg.footprint) + furniture}
-    refs = door_references(openings) + [dict(r) for r in state.get("scale_refs") or []]
+        # Object references and fixtures need the drawing: measured once on upload, carried in the state.
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        objects = object_references(analysis, gray, size)
+        if not any(r["source"] == "furniture" for r in objects):
+            objects += furniture_references(gray, seg.zones)  # no model, or it pointed at no furniture
+        state = {**state, "scale_refs": objects + room_estimate_references(analysis, seg.zones), "fixtures_px": fixtures_px(analysis, gray, size)}
+    # Doors are re-measured on every run: the correction view can edit openings.
+    refs = door_references(openings, analysis, size, thickness) + [dict(r) for r in state.get("scale_refs") or []]
     scale = estimate_scale(calibrate(seg.zones), refs, thickness)
     if meters_per_pixel and meters_per_pixel > 0:
         scale["detected_meters_per_pixel"] = scale.get("meters_per_pixel")
@@ -152,9 +204,11 @@ def plan_from_state(
     payload.update(
         geometry_from_plan(
             seg.rooms, seg.zones, state["walls_px"], state.get("openings_px") or [], seg.footprint, mpp or 0.0,
-            height=wall_height, default_thickness=wall_thickness,
+            height=wall_height, default_thickness=wall_thickness, fixtures_px=state.get("fixtures_px"),
         )
     )
+    if payload.get("analysis") and mpp:
+        payload["analysis"] = {**payload["analysis"], "scale": {"pixels_per_meter": round(1 / mpp, 2), "confidence": scale["confidence"], "source": scale["source"]}}
     payload["scale_confidence"] = 1.0 if scale_confirmed else scale["confidence"]
     payload["meters_per_pixel"] = mpp
 
@@ -389,14 +443,13 @@ def _pt(p) -> tuple[int, int]:
     return int(round(p[0])), int(round(p[1]))
 
 
-def _write_debug_dir(images: dict[str, np.ndarray]) -> None:
+def _write_debug_dir(images: dict[str, np.ndarray], key: str) -> None:
+    """storage/plan-debug/<image hash>/: one folder per upload, so a bad conversion can be inspected later."""
     try:
         from app.core.config import get_settings
 
-        path = get_settings().storage_dir / "plan-debug"
+        path = get_settings().storage_dir / "plan-debug" / key
         path.mkdir(parents=True, exist_ok=True)
-        for old in path.glob("*.jpg"):
-            old.unlink()  # earlier pipeline's stage images; names no longer match
         for name, img in images.items():
             cv2.imwrite(str(path / f"{name}.png"), img)
     except Exception:

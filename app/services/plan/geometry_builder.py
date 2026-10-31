@@ -62,15 +62,19 @@ def geometry_from_plan(
     meters_per_pixel: float,
     height: float = DEFAULT_HEIGHT,
     default_thickness: float = DEFAULT_THICKNESS,
+    fixtures_px: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Pixel-space plan → metres. Walls are the detected wall bodies (real thickness), so door and
     window gaps already exist; doors get a lintel, windows a sill and a lintel. Floors are the room
-    polygons plus a strip under every doorway. Origin = footprint's top-left corner."""
+    polygons plus a strip under every doorway. Origin = top-left of the footprint and all rooms."""
     base = {"unit": "meters", "source": "image", "height": height, "wall_thickness": default_thickness}
     if not meters_per_pixel or not footprint_px:
-        return {**base, "rooms": [], "zones": [], "walls": [], "openings": [], "doors": [], "windows": [], "floors": [], "exterior": []}
-    ox = min(p[0] for p in footprint_px)
-    oy = min(p[1] for p in footprint_px)
+        return {**base, "rooms": [], "zones": [], "walls": [], "openings": [], "doors": [], "windows": [], "floors": [], "exterior": [], "fixtures": []}
+    # Origin: top-left of everything built, so a balcony outside the footprint never goes negative
+    # (the viewer frames 0..width × 0..depth).
+    every = footprint_px + [p for r in rooms_px for p in r["polygon"]]
+    ox = min(p[0] for p in every)
+    oy = min(p[1] for p in every)
     s = meters_per_pixel
 
     def m(p):
@@ -151,6 +155,15 @@ def geometry_from_plan(
         "windows": windows,
         "floors": floors,
         "exterior": [m(p) for p in footprint_px],
+        # Furniture the vision model found, as simple boxes (never walls): position/size in metres.
+        "fixtures": [
+            {
+                "id": f["id"], "type": f["type"], "position": m(f["center"]),
+                "size": [round(f["size"][0] * s, 3), round(f["size"][1] * s, 3), f["height_m"]],
+                "rotation_deg": f["angle"], "confidence": f.get("confidence"), "dimension_source": "inferred",
+            }
+            for f in fixtures_px or []
+        ],
     }
 
 
@@ -205,37 +218,48 @@ WALL_EDGE = "#e2dccf"
 
 
 def build_room_glb(payload: dict[str, Any]) -> bytes:
-    """Floors and walls only — no labels, markers or text. Floors are coloured by room type
-    (per open-plan zone when available); each wall face takes the paint of the room it faces."""
+    """Floors, walls, door/window pieces and furniture boxes as separate, named meshes — no labels or
+    text. Names read like room_bedroom_1_floor, wall_bedroom_1_north, door_bedroom_1_lintel,
+    window_living_1_sill, furniture_bedroom_1_bed. Floors are coloured by room type (per open-plan zone
+    when available); each wall face takes the paint of the room it faces."""
     from shapely.geometry import Point, Polygon
 
     scene = trimesh.Scene()
     height = float(payload.get("height") or DEFAULT_HEIGHT)
     thickness = float(payload.get("wall_thickness") or DEFAULT_THICKNESS)
-    areas = []
+    taken: dict[str, int] = {}
+
+    def unique(name: str) -> str:
+        taken[name] = taken.get(name, 0) + 1
+        return name if taken[name] == 1 else f"{name}_{taken[name]}"
+
+    areas = []  # (area, shape, slug like "bedroom_1")
     for area in payload.get("zones") or payload.get("rooms") or []:
         poly = area.get("polygon") or []
         if len(poly) >= 3:
             shape = Polygon(poly)
-            areas.append((area, shape if shape.is_valid else shape.buffer(0)))
+            base = _slug(area.get("name") or area.get("kind") or "room")
+            index = sum(1 for a in areas if a[2].rsplit("_", 1)[0] == base) + 1
+            areas.append((area, shape if shape.is_valid else shape.buffer(0), f"{base}_{index}"))
 
-    for area, _ in areas:
+    for area, _, slug in areas:
         floor = _floor_mesh(area["polygon"])
         if floor is not None:
             # Vendor floor paint wins over the room finish (textures export as their average colour).
             paint = (payload.get("floor_paints") or {}).get(area["id"]) or {}
             _paint(floor, paint.get("color") or _finish(area.get("kind"))[0])
-            scene.add_geometry(floor, node_name=f"floor-{area['id']}")
+            scene.add_geometry(floor, node_name=unique(f"room_{slug}_floor"), geom_name=f"room_{slug}_floor")
     for i, strip in enumerate(payload.get("floors") or []):
         floor = _floor_mesh(strip)
         if floor is not None:
             _paint(floor, ROOM_FINISHES["hall"][0])
-            scene.add_geometry(floor, node_name=f"floor-door-{i}")
+            scene.add_geometry(floor, node_name=unique(f"door_threshold_{i + 1}"))
 
-    def kind_at(x: float, z: float) -> str | None:
+    def area_at(x: float, z: float):
         p = Point(x, z)
-        return next((a.get("kind") or "room" for a, shape in areas if shape.contains(p)), None)
+        return next((a for a in areas if a[1].contains(p)), None)
 
+    opening_kind = {o["id"]: o["kind"] for o in payload.get("openings") or []}
     for wall in payload.get("walls") or []:
         t = float(wall.get("thickness") or thickness)
         mesh = _wall_mesh(wall["start"], wall["end"], float(wall.get("height") or height), t, float(wall.get("elevation") or 0))
@@ -244,19 +268,51 @@ def build_room_glb(payload: dict[str, Any]) -> bytes:
         nx, nz = -(z1 - z0) / length, (x1 - x0) / length  # left of start→end, seen from above
         mx, mz = (x0 + x1) / 2, (z0 + z1) / 2
         reach = t / 2 + 0.08
-        left = kind_at(mx + nx * reach, mz + nz * reach)
-        right = kind_at(mx - nx * reach, mz - nz * reach)
+        left = area_at(mx + nx * reach, mz + nz * reach)
+        right = area_at(mx - nx * reach, mz - nz * reach)
         # Vendor paint on a face wins over the room finish (textures export as their average colour).
         paints = payload.get("wall_paints") or {}
-        left_color = (paints.get(f"{wall['id']}:L") or {}).get("color") or (_finish(left)[1] if left else FACADE)
-        right_color = (paints.get(f"{wall['id']}:R") or {}).get("color") or (_finish(right)[1] if right else FACADE)
+        left_color = (paints.get(f"{wall['id']}:L") or {}).get("color") or (_finish(left[0].get("kind"))[1] if left else FACADE)
+        right_color = (paints.get(f"{wall['id']}:R") or {}).get("color") or (_finish(right[0].get("kind"))[1] if right else FACADE)
         _paint_wall(mesh, (nx, nz), left_color, right_color)
-        scene.add_geometry(mesh, node_name=f"wall-{wall['id']}")
+        owner = left or right
+        slug = owner[2] if owner else "exterior"
+        opening_id, _, piece = str(wall["id"]).partition("-")
+        if piece in ("lintel", "sill") and opening_kind.get(opening_id) in ("door", "window"):
+            name = f"{opening_kind[opening_id]}_{slug}_{piece}"
+        else:
+            c = owner[1].centroid if owner else Point(mx, mz)
+            if abs(x1 - x0) >= abs(z1 - z0):
+                side = "north" if mz < c.y else "south"  # plan y grows downwards = south
+            else:
+                side = "west" if mx < c.x else "east"
+            name = f"wall_{slug}_{side}"
+        scene.add_geometry(mesh, node_name=unique(name), geom_name=unique(f"{name}_mesh"))
+    for f in payload.get("fixtures") or []:
+        w, d, h = f["size"]
+        if w <= 0 or d <= 0:
+            continue
+        box = trimesh.creation.box(extents=(w, h, d))
+        angle = np.radians(f.get("rotation_deg") or 0.0)
+        box.apply_transform(trimesh.transformations.rotation_matrix(-angle, (0, 1, 0)))
+        box.apply_translation((f["position"][0], h / 2, f["position"][1]))
+        _paint(box, FIXTURE_COLOR)
+        owner = area_at(*f["position"])
+        scene.add_geometry(box, node_name=unique(f"furniture_{owner[2] if owner else 'outside'}_{f['type']}"))
     if len(scene.geometry) == 0:
         raise ValueError("No room geometry to export.")
     buffer = io.BytesIO()
     scene.export(file_obj=buffer, file_type="glb")
     return buffer.getvalue()
+
+
+FIXTURE_COLOR = "#b9b4ab"
+
+
+def _slug(name: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "room"
 
 
 def _finish(kind: str | None) -> tuple[str, str]:

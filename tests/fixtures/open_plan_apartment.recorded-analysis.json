@@ -1,0 +1,1045 @@
+{
+ "rooms": [
+  {
+   "id": "kitchen",
+   "name": "Kitchen",
+   "type": "kitchen",
+   "polygon": [
+    [
+     0.205,
+     0.092
+    ],
+    [
+     0.645,
+     0.092
+    ],
+    [
+     0.645,
+     0.5
+    ],
+    [
+     0.4,
+     0.5
+    ],
+    [
+     0.4,
+     0.25
+    ],
+    [
+     0.205,
+     0.25
+    ]
+   ],
+   "estimated_width_m": 4.4,
+   "estimated_length_m": 2.45,
+   "area_m2": 7.86,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "dining",
+    "living",
+    "hall"
+   ],
+   "confidence": 0.94
+  },
+  {
+   "id": "dining",
+   "name": "Dining area",
+   "type": "dining",
+   "polygon": [
+    [
+     0.205,
+     0.25
+    ],
+    [
+     0.4,
+     0.25
+    ],
+    [
+     0.4,
+     0.5
+    ],
+    [
+     0.205,
+     0.5
+    ]
+   ],
+   "estimated_width_m": 1.95,
+   "estimated_length_m": 1.5,
+   "area_m2": 2.93,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "kitchen",
+    "living",
+    "balcony"
+   ],
+   "confidence": 0.89
+  },
+  {
+   "id": "living",
+   "name": "Living room",
+   "type": "living",
+   "polygon": [
+    [
+     0.205,
+     0.5
+    ],
+    [
+     0.65,
+     0.5
+    ],
+    [
+     0.65,
+     0.55
+    ],
+    [
+     0.645,
+     0.55
+    ],
+    [
+     0.645,
+     0.91
+    ],
+    [
+     0.205,
+     0.91
+    ]
+   ],
+   "estimated_width_m": 4.4,
+   "estimated_length_m": 2.46,
+   "area_m2": 10.82,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "kitchen",
+    "dining",
+    "hall",
+    "balcony"
+   ],
+   "confidence": 0.97
+  },
+  {
+   "id": "bathroom",
+   "name": "Bath",
+   "type": "bathroom",
+   "polygon": [
+    [
+     0.655,
+     0.092
+    ],
+    [
+     0.945,
+     0.092
+    ],
+    [
+     0.945,
+     0.378
+    ],
+    [
+     0.655,
+     0.378
+    ]
+   ],
+   "estimated_width_m": 2.9,
+   "estimated_length_m": 1.72,
+   "area_m2": 4.99,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "hall"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "hall",
+   "name": "Hall",
+   "type": "hall",
+   "polygon": [
+    [
+     0.65,
+     0.39
+    ],
+    [
+     0.945,
+     0.39
+    ],
+    [
+     0.945,
+     0.543
+    ],
+    [
+     0.65,
+     0.543
+    ]
+   ],
+   "estimated_width_m": 2.95,
+   "estimated_length_m": 0.92,
+   "area_m2": 2.71,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "bathroom",
+    "bedroom",
+    "kitchen",
+    "living"
+   ],
+   "confidence": 0.97
+  },
+  {
+   "id": "bedroom",
+   "name": "Bedroom",
+   "type": "bedroom",
+   "polygon": [
+    [
+     0.655,
+     0.557
+    ],
+    [
+     0.945,
+     0.557
+    ],
+    [
+     0.945,
+     0.91
+    ],
+    [
+     0.655,
+     0.91
+    ]
+   ],
+   "estimated_width_m": 2.9,
+   "estimated_length_m": 2.12,
+   "area_m2": 6.15,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "hall"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "balcony",
+   "name": "Balcony",
+   "type": "balcony",
+   "polygon": [
+    [
+     0.06,
+     0.267
+    ],
+    [
+     0.195,
+     0.267
+    ],
+    [
+     0.195,
+     0.733
+    ],
+    [
+     0.06,
+     0.733
+    ]
+   ],
+   "estimated_width_m": 1.35,
+   "estimated_length_m": 2.8,
+   "area_m2": 3.78,
+   "dimension_source": "inferred",
+   "dimension_text": null,
+   "connects_to": [
+    "dining",
+    "living"
+   ],
+   "confidence": 0.98
+  }
+ ],
+ "walls": [
+  {
+   "id": "wall_top_kitchen",
+   "start": [
+    0.2,
+    0.0833
+   ],
+   "end": [
+    0.65,
+    0.0833
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "kitchen"
+   ],
+   "confidence": 0.98
+  },
+  {
+   "id": "wall_top_bathroom",
+   "start": [
+    0.65,
+    0.0833
+   ],
+   "end": [
+    0.95,
+    0.0833
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "bathroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_left_upper",
+   "start": [
+    0.2,
+    0.0833
+   ],
+   "end": [
+    0.2,
+    0.3667
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "kitchen",
+    "dining"
+   ],
+   "confidence": 0.98
+  },
+  {
+   "id": "wall_left_lower",
+   "start": [
+    0.2,
+    0.6333
+   ],
+   "end": [
+    0.2,
+    0.9167
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "living"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_bottom_living",
+   "start": [
+    0.2,
+    0.9167
+   ],
+   "end": [
+    0.65,
+    0.9167
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "living"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_bottom_bedroom",
+   "start": [
+    0.65,
+    0.9167
+   ],
+   "end": [
+    0.95,
+    0.9167
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "bedroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_right_upper",
+   "start": [
+    0.95,
+    0.0833
+   ],
+   "end": [
+    0.95,
+    0.4167
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "bathroom",
+    "hall"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_right_lower",
+   "start": [
+    0.95,
+    0.5167
+   ],
+   "end": [
+    0.95,
+    0.9167
+   ],
+   "exterior": true,
+   "thickness_m": null,
+   "rooms": [
+    "hall",
+    "bedroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_kitchen_bathroom",
+   "start": [
+    0.65,
+    0.0833
+   ],
+   "end": [
+    0.65,
+    0.3833
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "kitchen",
+    "bathroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_bathroom_hall_left",
+   "start": [
+    0.65,
+    0.3833
+   ],
+   "end": [
+    0.7,
+    0.3833
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "bathroom",
+    "hall"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_bathroom_hall_right",
+   "start": [
+    0.78,
+    0.3833
+   ],
+   "end": [
+    0.95,
+    0.3833
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "bathroom",
+    "hall"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_living_bedroom",
+   "start": [
+    0.65,
+    0.55
+   ],
+   "end": [
+    0.65,
+    0.9167
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "living",
+    "bedroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_hall_bedroom_left",
+   "start": [
+    0.65,
+    0.55
+   ],
+   "end": [
+    0.82,
+    0.55
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "hall",
+    "bedroom"
+   ],
+   "confidence": 0.99
+  },
+  {
+   "id": "wall_hall_bedroom_right",
+   "start": [
+    0.9,
+    0.55
+   ],
+   "end": [
+    0.95,
+    0.55
+   ],
+   "exterior": false,
+   "thickness_m": null,
+   "rooms": [
+    "hall",
+    "bedroom"
+   ],
+   "confidence": 0.99
+  }
+ ],
+ "doors": [
+  {
+   "id": "door_entrance",
+   "start": [
+    0.95,
+    0.4167
+   ],
+   "end": [
+    0.95,
+    0.5167
+   ],
+   "width_m": 0.6,
+   "swing": "right",
+   "opens_into": "hall",
+   "connects": [
+    "outside",
+    "hall"
+   ],
+   "wall_id": "wall_right_upper",
+   "confidence": 0.98
+  },
+  {
+   "id": "door_bathroom",
+   "start": [
+    0.7,
+    0.3833
+   ],
+   "end": [
+    0.78,
+    0.3833
+   ],
+   "width_m": 0.8,
+   "swing": "left",
+   "opens_into": "hall",
+   "connects": [
+    "bathroom",
+    "hall"
+   ],
+   "wall_id": "wall_bathroom_hall_left",
+   "confidence": 0.99
+  },
+  {
+   "id": "door_bedroom",
+   "start": [
+    0.82,
+    0.55
+   ],
+   "end": [
+    0.9,
+    0.55
+   ],
+   "width_m": 0.8,
+   "swing": "right",
+   "opens_into": "bedroom",
+   "connects": [
+    "hall",
+    "bedroom"
+   ],
+   "wall_id": "wall_hall_bedroom_left",
+   "confidence": 0.99
+  },
+  {
+   "id": "door_balcony",
+   "start": [
+    0.2,
+    0.3667
+   ],
+   "end": [
+    0.2,
+    0.6333
+   ],
+   "width_m": 1.6,
+   "swing": "sliding",
+   "opens_into": null,
+   "connects": [
+    "balcony",
+    "dining",
+    "living"
+   ],
+   "wall_id": "wall_left_upper",
+   "confidence": 0.77
+  }
+ ],
+ "windows": [
+  {
+   "id": "window_kitchen",
+   "start": [
+    0.32,
+    0.0833
+   ],
+   "end": [
+    0.481,
+    0.0833
+   ],
+   "width_m": 1.61,
+   "wall_id": "wall_top_kitchen",
+   "room_id": "kitchen",
+   "confidence": 0.55
+  },
+  {
+   "id": "window_bathroom",
+   "start": [
+    0.78,
+    0.0833
+   ],
+   "end": [
+    0.901,
+    0.0833
+   ],
+   "width_m": 1.21,
+   "wall_id": "wall_top_bathroom",
+   "room_id": "bathroom",
+   "confidence": 0.98
+  },
+  {
+   "id": "window_bedroom",
+   "start": [
+    0.72,
+    0.9167
+   ],
+   "end": [
+    0.881,
+    0.9167
+   ],
+   "width_m": 1.61,
+   "wall_id": "wall_bottom_bedroom",
+   "room_id": "bedroom",
+   "confidence": 0.99
+  }
+ ],
+ "furniture": [
+  {
+   "id": "kitchen_counter",
+   "type": "countertop",
+   "room_id": "kitchen",
+   "bbox": [
+    0.23,
+    0.0933,
+    0.62,
+    0.195
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 3.9,
+   "depth_m": 0.6,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  },
+  {
+   "id": "kitchen_sink",
+   "type": "sink",
+   "room_id": "kitchen",
+   "bbox": [
+    0.3,
+    0.11,
+    0.36,
+    0.1783
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.6,
+   "depth_m": 0.41,
+   "dimension_source": "inferred",
+   "confidence": 0.86
+  },
+  {
+   "id": "kitchen_stove",
+   "type": "stove",
+   "room_id": "kitchen",
+   "bbox": [
+    0.462,
+    0.1133,
+    0.519,
+    0.1783
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.57,
+   "depth_m": 0.39,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "kitchen_right_appliance",
+   "type": "fridge",
+   "room_id": "kitchen",
+   "bbox": [
+    0.56,
+    0.1,
+    0.616,
+    0.1883
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.56,
+   "depth_m": 0.53,
+   "dimension_source": "inferred",
+   "confidence": 0.55
+  },
+  {
+   "id": "dining_table",
+   "type": "dining_table",
+   "room_id": "dining",
+   "bbox": [
+    0.25,
+    0.2833,
+    0.38,
+    0.4183
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.3,
+   "depth_m": 0.81,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  },
+  {
+   "id": "dining_chair_1",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.263,
+    0.2533,
+    0.287,
+    0.2817
+   ],
+   "orientation_deg": 180.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "dining_chair_2",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.303,
+    0.2533,
+    0.327,
+    0.2817
+   ],
+   "orientation_deg": 180.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "dining_chair_3",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.343,
+    0.2533,
+    0.367,
+    0.2817
+   ],
+   "orientation_deg": 180.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "dining_chair_4",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.263,
+    0.42,
+    0.287,
+    0.4483
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "dining_chair_5",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.303,
+    0.42,
+    0.327,
+    0.4483
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "dining_chair_6",
+   "type": "chair",
+   "room_id": "dining",
+   "bbox": [
+    0.343,
+    0.42,
+    0.367,
+    0.4483
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 0.24,
+   "depth_m": 0.17,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "living_sofa",
+   "type": "sofa",
+   "room_id": "living",
+   "bbox": [
+    0.23,
+    0.7667,
+    0.46,
+    0.885
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 2.3,
+   "depth_m": 0.71,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "coffee_table",
+   "type": "table",
+   "room_id": "living",
+   "bbox": [
+    0.29,
+    0.65,
+    0.4,
+    0.735
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.1,
+   "depth_m": 0.51,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  },
+  {
+   "id": "bed",
+   "type": "bed",
+   "room_id": "bedroom",
+   "bbox": [
+    0.76,
+    0.65,
+    0.88,
+    0.9017
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.6,
+   "depth_m": 2.0,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  },
+  {
+   "id": "bedroom_wardrobe",
+   "type": "wardrobe",
+   "room_id": "bedroom",
+   "bbox": [
+    0.66,
+    0.5667,
+    0.7,
+    0.8683
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 1.81,
+   "depth_m": 0.4,
+   "dimension_source": "inferred",
+   "confidence": 0.88
+  },
+  {
+   "id": "bathtub",
+   "type": "bathtub",
+   "room_id": "bathroom",
+   "bbox": [
+    0.79,
+    0.1,
+    0.94,
+    0.2183
+   ],
+   "orientation_deg": 0.0,
+   "width_m": 1.6,
+   "depth_m": 0.75,
+   "dimension_source": "inferred",
+   "confidence": 0.98
+  },
+  {
+   "id": "toilet",
+   "type": "toilet",
+   "room_id": "bathroom",
+   "bbox": [
+    0.672,
+    0.0967,
+    0.709,
+    0.195
+   ],
+   "orientation_deg": 180.0,
+   "width_m": 0.37,
+   "depth_m": 0.59,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  },
+  {
+   "id": "bathroom_vanity",
+   "type": "cabinet",
+   "room_id": "bathroom",
+   "bbox": [
+    0.66,
+    0.2667,
+    0.72,
+    0.36
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 0.56,
+   "depth_m": 0.6,
+   "dimension_source": "inferred",
+   "confidence": 0.95
+  },
+  {
+   "id": "bathroom_sink",
+   "type": "sink",
+   "room_id": "bathroom",
+   "bbox": [
+    0.677,
+    0.2917,
+    0.705,
+    0.3383
+   ],
+   "orientation_deg": 90.0,
+   "width_m": 0.28,
+   "depth_m": 0.28,
+   "dimension_source": "inferred",
+   "confidence": 0.99
+  }
+ ],
+ "scale_references": [
+  {
+   "kind": "door",
+   "element_id": "door_bathroom",
+   "start": [
+    0.7,
+    0.3833
+   ],
+   "end": [
+    0.78,
+    0.3833
+   ],
+   "real_m": 0.8,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.88
+  },
+  {
+   "kind": "door",
+   "element_id": "door_bedroom",
+   "start": [
+    0.82,
+    0.55
+   ],
+   "end": [
+    0.9,
+    0.55
+   ],
+   "real_m": 0.8,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.88
+  },
+  {
+   "kind": "countertop",
+   "element_id": "kitchen_counter",
+   "start": [
+    0.4,
+    0.0933
+   ],
+   "end": [
+    0.4,
+    0.195
+   ],
+   "real_m": 0.6,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.88
+  },
+  {
+   "kind": "bathtub",
+   "element_id": "bathtub",
+   "start": [
+    0.79,
+    0.1
+   ],
+   "end": [
+    0.94,
+    0.1
+   ],
+   "real_m": 1.6,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.79
+  },
+  {
+   "kind": "bed",
+   "element_id": "bed",
+   "start": [
+    0.76,
+    0.65
+   ],
+   "end": [
+    0.76,
+    0.9017
+   ],
+   "real_m": 2.0,
+   "dimension_source": "inferred",
+   "text": null,
+   "confidence": 0.6
+  }
+ ],
+ "warnings": [
+  "No written dimensions or scale are visible. All physical dimensions and areas are approximate.",
+  "Room dimensions primarily use the interior-door and countertop scale assumptions. Furniture symbols are schematic: the standard double-bed length implies a different scale, and the dining-chair symbols are unusually small.",
+  "Kitchen, dining and living areas share one open space. Their polygons are functional subdivisions, not walls; the hall is also open to this space.",
+  "The balcony is outside the apartment envelope. Its thin outer boundary appears to be a railing and is not listed as a structural wall.",
+  "The balcony opening appears to be sliding glazing, but the precise panel arrangement is unclear.",
+  "The left endpoint of the kitchen's upper window is uncertain.",
+  "The diagonally marked square at the right end of the kitchen counter is tentatively identified as a refrigerator.",
+  "Exterior wall segments include window openings; door openings are represented as gaps between structural wall segments."
+ ],
+ "image": {
+  "width": 1000,
+  "height": 600
+ },
+ "scale": {
+  "pixels_per_meter": null,
+  "confidence": 0.0,
+  "source": "pending_estimation"
+ },
+ "model": "gpt-6-astra",
+ "schema_version": "plan-analysis-v1",
+ "cached": false,
+ "issues": []
+}

@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     openai_astra_model: str = "gpt-6-astra"
     # Floor plans: GPT reads room names and measurements before the OpenCV conversion ("" turns it off).
     openai_plan_model: str = "gpt-6-astra"
-    openai_plan_timeout_seconds: float = 60.0
+    openai_plan_timeout_seconds: float = 240.0  # a full layout answer takes 1–3 minutes
+    openai_plan_expected_seconds: float = 90.0  # typical answer time, for the progress percentage
     # Match: OpenAI image editing with two reference images (POST /v1/images/edits).
     openai_image_model: str = "gpt-image-2"
     openai_image_size: str = "1536x1024"  # landscape room photo

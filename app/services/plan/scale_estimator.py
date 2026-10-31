@@ -1,7 +1,8 @@
 """Plan scale from every reference available; never returns without one.
 
-Priority: printed dimensions (OCR, dimension_ocr.calibrate, and GPT's reading, plan_reader.py) →
-door openings → standard furniture → a labelled low-confidence heuristic (wall thickness). Every reference gives one metres-per-pixel
+Priority: written dimensions (OCR or read by the vision model: room sizes via dimension_ocr.calibrate,
+dimension lines) → door openings → standard furniture → the model's room estimates → a labelled
+low-confidence heuristic (wall thickness). References come from analysis_guidance.py. Every reference gives one metres-per-pixel
 candidate; outliers are dropped with a weighted median/MAD test and the weighted median of the
 rest is the scale. Doors outweigh furniture (architecture is drawn more consistently).
 """
@@ -21,17 +22,6 @@ PRINTED_MIN_CONFIDENCE = 0.5
 BATHTUB_M = 1.6  # 1.5–1.7 m long
 BED_AREA_M2 = 1.6 * 2.0  # double bed
 COUNTER_DEPTH_M = 0.6
-
-
-def door_references(openings: list, min_confidence: float = 0.6) -> list[dict]:
-    refs = []
-    for o in openings:
-        kind, conf = (o["kind"], o.get("confidence", 1.0)) if isinstance(o, dict) else (o.kind, o.confidence)
-        start, end = (o["start"], o["end"]) if isinstance(o, dict) else (o.start, o.end)
-        width = float(np.hypot(end[0] - start[0], end[1] - start[1]))
-        if kind == "door" and conf >= min_confidence and width > 4:
-            refs.append({"source": "door", "label": f"Door ({width:.0f} px ≈ {DOOR_WIDTH_M} m)", "mpp": DOOR_WIDTH_M / width, "weight": DOOR_WEIGHT * conf})
-    return refs
 
 
 def furniture_references(gray: np.ndarray, zones: list[dict]) -> list[dict]:
@@ -93,8 +83,8 @@ def estimate_scale(printed: dict, refs: list[dict], thickness_px: float) -> dict
     """`printed` is calibrate()'s result; refs = GPT reading + doors + furniture."""
     scale = {**printed, "references": [], "estimated": False}
     strong_ocr = bool(printed.get("meters_per_pixel")) and printed.get("confidence", 0) >= PRINTED_MIN_CONFIDENCE
-    has_gpt = any(r["source"].startswith("gpt") for r in refs)
-    if strong_ocr and not has_gpt:
+    has_lines = any(r["source"] == "annotation" for r in refs)
+    if strong_ocr and not has_lines:
         scale["source"] = "printed dimensions"
         return scale
     if not strong_ocr:
@@ -105,17 +95,17 @@ def estimate_scale(printed: dict, refs: list[dict], thickness_px: float) -> dict
     if found:
         mpp, inliers = found
         count = lambda *sources: sum(r["source"] in sources for r in inliers)  # noqa: E731
-        printed_n, gpt_printed, gpt_guess = count("printed"), count("gpt_printed"), count("gpt")
+        printed_n, lines, estimates = count("printed"), count("annotation"), count("room_estimate")
         doors, furniture = count("door"), count("furniture")
-        strong = printed_n + gpt_printed
-        conf = 0.2 + 0.25 * min(strong, 3) + 0.08 * min(doors, 5) + 0.06 * min(furniture, 3) + 0.04 * min(gpt_guess, 3) - (0.15 if len(inliers) == 1 else 0.0)
+        strong = printed_n + lines
+        conf = 0.2 + 0.25 * min(strong, 3) + 0.08 * min(doors, 5) + 0.06 * min(furniture, 3) + 0.04 * min(estimates, 3) - (0.15 if len(inliers) == 1 else 0.0)
         scale.update(
             meters_per_pixel=mpp,
-            # Only written measurements (OCR or read by GPT) may approach certainty; estimates stay below.
+            # Only written measurements may approach certainty; anything inferred stays below.
             confidence=round(min(max(conf, 0.15), 0.9 if strong else 0.75), 2),
             estimated=not strong,
             source=" + ".join(
-                s for s, n in (("printed dimensions", printed_n), ("GPT reading", gpt_printed + gpt_guess), ("doors", doors), ("furniture", furniture)) if n
+                s for s, n in (("printed dimensions", printed_n), ("dimension lines", lines), ("doors", doors), ("furniture", furniture), ("room estimates", estimates)) if n
             ),
             references=refs,
         )

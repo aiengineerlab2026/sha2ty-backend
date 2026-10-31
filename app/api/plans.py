@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import json
+import logging
+import math
 from functools import partial
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
@@ -15,11 +21,12 @@ from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, rectangular_room, room_extents
 from app.services.plan.image_processor import plan_from_image, plan_from_state
-from app.services.plan.plan_reader import read_plan
+from app.services.plan.vision_analysis import analyze_plan
 from app.services.plan.placement import validate_placement
 from app.services.plan.plan_exporter import export_room_glb, step_unsupported_reason
 from app.services.plan_store import PlanStore
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 # Building a plan (from dimensions / an image, correction, validation) is public so guests can design;
 # saving, listing, loading and exporting plans require a signed-in user.
@@ -57,8 +64,10 @@ class CorrectionBody(BaseModel):
     straight_lines: str | None = None
     drawing_unit: str | None = None
     image_scale: float = 1.0
-    scale_refs: list[dict[str, Any]] = Field(default_factory=list)  # GPT + furniture references from the upload
-    plan_reading: dict[str, Any] | None = None
+    # Measured once on upload (they need the drawing) and carried through every correction.
+    scale_refs: list[dict[str, Any]] = Field(default_factory=list)
+    fixtures_px: list[dict[str, Any]] = Field(default_factory=list)
+    analysis: dict[str, Any] | None = None  # the vision model's validated JSON
     meters_per_pixel: float | None = Field(default=None, gt=0)
     scale_confirmed: bool = False
     height: float = Field(default=DEFAULT_HEIGHT, gt=0, le=20)
@@ -119,35 +128,73 @@ async def from_image(
     width: Annotated[float | None, Form()] = None,
     depth: Annotated[float | None, Form()] = None,
     debug: Annotated[str, Form()] = "false",
-) -> dict[str, Any]:
+) -> StreamingResponse:
     raw = await image.read()
     if len(raw) > get_settings().max_image_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
     mime = (image.content_type or "").split(";")[0].strip().lower()
     if mime not in ALLOWED:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a PNG or JPG floor plan.")
-    # GPT reads the plan's rooms and measurements first; the conversion then weighs them as scale references.
-    reading = await read_plan(raw, mime, get_settings(), request.app.state.openai_http)
+    # The vision model reads the whole layout first (cached per image); OpenCV then measures and refines.
     try:
-        payload = await run_in_threadpool(
-            partial(
-                plan_from_image,
-                raw,
-                wall_height=height,
-                wall_thickness=wall_thickness,
-                width_m=width,
-                depth_m=depth,
-                debug=str(debug).lower() in {"1", "true", "yes"},
-                reading=reading,
+        with Image.open(io.BytesIO(raw)) as probe:
+            size = probe.size
+    except OSError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not read this image.") from exc
+    settings = get_settings()
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue = asyncio.Queue()
+
+    def stage(name: str, percent: int) -> None:  # called from the conversion thread
+        loop.call_soon_threadsafe(events.put_nowait, {"stage": name, "progress": percent})
+
+    async def stream():
+        """NDJSON progress lines {"stage", "progress"} (0–100), then {"success": true, "plan": …} or {"error": …}.
+
+        The model call has no progress of its own: its percentage follows the elapsed time against the
+        usual latency (OPENAI_PLAN_EXPECTED_SECONDS) and never passes 70 until it answers. The later
+        stages are reported by the conversion as it reaches them.
+        """
+        yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
+        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.openai_http))
+        started = loop.time()
+        while not task.done():
+            await asyncio.wait({task}, timeout=1.0)
+            elapsed = loop.time() - started
+            yield json.dumps({"stage": "Analyzing", "progress": int(2 + 68 * (1 - math.exp(-elapsed / settings.openai_plan_expected_seconds)))}) + "\n"
+        analysis = task.result()
+        conversion = asyncio.create_task(
+            run_in_threadpool(
+                partial(
+                    plan_from_image, raw, wall_height=height, wall_thickness=wall_thickness, width_m=width, depth_m=depth,
+                    debug=str(debug).lower() in {"1", "true", "yes"}, analysis=analysis, on_stage=stage,
+                )
             )
         )
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Could not convert this floor plan ({exc}).") from exc
-    width, depth, h = room_extents(payload)
-    payload["extents"] = {"width": width, "depth": depth, "height": h}
-    return payload
+        while not conversion.done() or not events.empty():
+            getter = asyncio.create_task(events.get())
+            done, _ = await asyncio.wait({getter, conversion}, return_when=asyncio.FIRST_COMPLETED)
+            if getter in done:
+                yield json.dumps(getter.result()) + "\n"
+            else:
+                getter.cancel()
+        try:
+            payload = conversion.result()
+        except ValueError as exc:
+            yield json.dumps({"error": str(exc), "status": 400}) + "\n"
+            return
+        except Exception as exc:  # noqa: BLE001 - reported to the user, logged below
+            logger.exception("Floor plan conversion failed")
+            yield json.dumps({"error": f"Could not convert this floor plan ({exc}).", "status": 500}) + "\n"
+            return
+        if analysis is None and settings.openai_plan_model and settings.astra_configured:
+            payload["warnings"] = ["The vision model was unavailable, so this plan was read with OpenCV only.", *payload["warnings"]]
+        w, d, h = room_extents(payload)
+        payload["extents"] = {"width": w, "depth": d, "height": h}
+        logger.info("Plan 3D extents %.2f × %.2f × %.2f m, %d walls, %d floors, %d fixtures", w, d, h, len(payload["walls"]), len(payload["zones"]), len(payload.get("fixtures") or []))
+        yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @router.post("/segment")

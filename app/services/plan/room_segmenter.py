@@ -415,7 +415,8 @@ def _fallback_kind(room: dict, thickness: float) -> str:
 
 
 def _fallback_name(room: dict, thickness: float) -> str:
-    return "Closet" if _fallback_kind(room, thickness) == "closet" else "Room"
+    # Never a named room type without a label: a mis-sized region once came out as one big "Closet".
+    return "Room"
 
 
 def _polygons(geom) -> list[Polygon]:
