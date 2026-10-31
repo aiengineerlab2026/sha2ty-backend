@@ -20,7 +20,7 @@ from app.services.auth import service_headers
 
 logger = logging.getLogger(__name__)
 
-MODELS = {"gemini-3.5-flash": "Gemini 3.5 Flash", "gpt-6-astra": "GPT-6 Astra"}
+MODELS = {"gemini-3.5-flash": "Gemini 3.5 Flash", "gpt-4o-mini": "GPT-4o mini"}
 RETRY_DELAY = 2.0  # seconds, doubled per attempt
 RETRIES = 1  # one extra attempt on 429 / 5xx / timeouts
 
