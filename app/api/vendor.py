@@ -18,7 +18,10 @@ from app.domain.vendor import Vendor
 from app.services.astra_service import AstraError, AstraService
 from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
+from app.schemas.product_details import ProductDetails
+from app.services import vision
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
+from app.services.product_details import extract_product_details
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services.meshy_service import MeshyError, MeshyService
@@ -34,6 +37,7 @@ class GenerateAccepted(BaseModel):
     provider: Provider
     status: str = "PENDING"
     remaining: int | None = None  # tries left for this provider after this call
+    details: ProductDetails | None = None  # the vision model's reading of the photo (sizes are estimates)
 
 
 class GenerateReady(BaseModel):
@@ -42,6 +46,7 @@ class GenerateReady(BaseModel):
     status: Literal["SUCCEEDED"] = "SUCCEEDED"
     glb_url: str
     remaining: int | None = None
+    details: ProductDetails | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -179,6 +184,13 @@ async def generate_model(
     object_id = model_id or uuid4().hex
     textured = should_texture.strip().lower() not in {"0", "false", "no"}
 
+    async def read_photo(photo: bytes) -> ProductDetails | None:
+        """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation."""
+        if not photo:
+            return None  # an image URL only: Meshy fetches it, nothing to read here
+        model = await vision.current_model(settings, request.app.state.auth_http)
+        return await extract_product_details(photo, mime, category, title, settings, vision.client_for(request.app.state, model), model)
+
     if provider == "astra":
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
@@ -186,29 +198,31 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
         remaining = await take_try(request, user_id, "astra", settings)
         try:
-            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title))
+            details = await read_photo(raw)
+            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
-        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining)
+        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining, details=details)
 
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
+    details = await read_photo(raw)
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),
             image=None if public_url else raw,
             mime_type=mime,
             image_url=public_url,
-            texture_prompt=meshy_texture_prompt(category, title),
+            texture_prompt=meshy_texture_prompt(category, title, details),
         )
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
     request.app.state.pending_cdn[task_id] = {"user_id": user_id, "model_id": object_id}
-    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining)
+    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)

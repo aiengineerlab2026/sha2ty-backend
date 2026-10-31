@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.services.auth import user_id_from_bearer
+from app.services import vision
 from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
 from app.services.plan.cad_exporter import export_plan_dxf
@@ -133,7 +134,7 @@ async def convert_to_3d(
 ) -> StreamingResponse:
     """OpenCV + OCR geometry, guided by the vision model's reading (PLAN_VISION_MODEL, default gemini-3.5-flash)
     when configured; the plan plus GLB and DXF download URLs."""
-    return await _convert(request, image, height, wall_thickness, None, None, debug, vision=True, exports=True)
+    return await _convert(request, image, height, wall_thickness, None, None, debug, use_vision=True, exports=True)
 
 
 @router.get("/files/{name}")
@@ -157,10 +158,10 @@ async def from_image(
     depth: Annotated[float | None, Form()] = None,
     debug: Annotated[str, Form()] = "false",
 ) -> StreamingResponse:
-    return await _convert(request, image, height, wall_thickness, width, depth, debug, vision=True)
+    return await _convert(request, image, height, wall_thickness, width, depth, debug, use_vision=True)
 
 
-async def _convert(request: Request, image: UploadFile, height, wall_thickness, width, depth, debug, vision: bool, exports: bool = False) -> StreamingResponse:
+async def _convert(request: Request, image: UploadFile, height, wall_thickness, width, depth, debug, use_vision: bool, exports: bool = False) -> StreamingResponse:
     raw = await image.read()
     if len(raw) > get_settings().max_image_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
@@ -188,7 +189,8 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         stages are reported by the conversion as it reaches them.
         """
         yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
-        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.auth_http if settings.plan_vision_gemini else request.app.state.openai_http) if vision else asyncio.sleep(0))
+        model = await vision.current_model(settings, request.app.state.auth_http) if use_vision else ""
+        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, vision.client_for(request.app.state, model), model) if use_vision else asyncio.sleep(0))
         started = loop.time()
         while not task.done():
             await asyncio.wait({task}, timeout=1.0)
@@ -219,7 +221,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
             logger.exception("Floor plan conversion failed")
             yield json.dumps({"error": f"Could not convert this floor plan ({exc}).", "status": 500}) + "\n"
             return
-        if vision and analysis is None and settings.plan_vision_configured:
+        if use_vision and analysis is None and vision.configured(settings, model):
             payload["warnings"] = ["The vision model was unavailable, so this plan was read with OpenCV only.", *payload["warnings"]]
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}

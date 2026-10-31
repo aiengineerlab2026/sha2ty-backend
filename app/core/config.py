@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"
     # Floor plans: GPT reads room names and measurements before the OpenCV conversion ("" turns it off).
-    # Floor plan reading (vision): gemini-* → Google Gemini (GEMINI_API_KEY), otherwise OpenAI Responses
-    # (OPENAI_API_KEY). Empty = OpenCV + OCR only.
+    # Default vision model (floor plans, vendor photos) until the admin picks one (services/vision.py):
+    # gemini-* → Google Gemini (GEMINI_API_KEY), otherwise OpenAI Responses (OPENAI_API_KEY).
     plan_vision_model: str = "gemini-3.5-flash"
     gemini_api_key: SecretStr = SecretStr("")
     openai_plan_timeout_seconds: float = 120.0
@@ -66,19 +66,6 @@ class Settings(BaseSettings):
     def meshy_configured(self) -> bool:
         key = self.meshy_api_key.get_secret_value().strip()
         return bool(key) and not key.startswith("<")
-
-    @property
-    def plan_vision_gemini(self) -> bool:
-        return self.plan_vision_model.startswith("gemini")
-
-    @property
-    def plan_vision_configured(self) -> bool:
-        if not self.plan_vision_model:
-            return False
-        if self.plan_vision_gemini:
-            key = self.gemini_api_key.get_secret_value().strip()
-            return bool(key) and not key.startswith("<")
-        return self.astra_configured
 
     @property
     def astra_configured(self) -> bool:

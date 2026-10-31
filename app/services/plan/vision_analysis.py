@@ -8,12 +8,10 @@ scale_estimator weighs the references. One call per distinct image (cached on di
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
 import logging
-import time
 from pathlib import Path
 
 import httpx
@@ -21,13 +19,12 @@ from pydantic import ValidationError
 from shapely.geometry import LineString, Point, Polygon
 
 from app.core.config import Settings
+from app.services import vision
 from app.schemas.plan_analysis import ImageSize, LlmPlan, PlanAnalysis
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "plan-analysis-v2"  # bump when PROMPT or the schema changes: it invalidates the cache
-RETRY_DELAY = 2.0  # seconds, doubled per attempt
-RETRIES = 1  # one extra attempt on 429 / 5xx / timeouts (each can take minutes)
 SNAP = 0.012  # normalised distance under which wall ends are the same corner
 PROMPT = """You are an architect reading a 2D floor plan image. Describe the WHOLE layout as JSON.
 
@@ -56,9 +53,9 @@ def cache_key(image: bytes, model: str) -> str:
     return hashlib.sha256(image + model.encode() + SCHEMA_VERSION.encode() + PROMPT.encode()).hexdigest()
 
 
-async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings: Settings, client: httpx.AsyncClient) -> PlanAnalysis | None:
-    model = settings.plan_vision_model
-    if not settings.plan_vision_configured:
+async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings: Settings, client: httpx.AsyncClient, model: str | None = None) -> PlanAnalysis | None:
+    model = model or settings.plan_vision_model  # the API passes the admin's choice (vision.current_model)
+    if not vision.configured(settings, model):
         return None
     key = cache_key(image, model)
     path = Path(settings.storage_dir) / "plan-analysis" / f"{key}.json"
@@ -69,12 +66,12 @@ async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings:
             path.unlink(missing_ok=True)
 
     content = [{"type": "input_text", "text": PROMPT}, {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"}]
-    plan, issues = await _ask(content, settings, client)
+    plan, issues = await _ask(content, settings, client, model)
     if plan is None or _serious(plan, issues):
         # Targeted retry: the same image, told exactly what was wrong.
         problems = "; ".join(issues) or "the answer was not valid JSON for the schema"
         retry = [*content, {"type": "input_text", "text": f"Your previous answer had these problems: {problems}. Return the complete JSON again with them fixed."}]
-        again, again_issues = await _ask(retry, settings, client)
+        again, again_issues = await _ask(retry, settings, client, model)
         if again is not None and (plan is None or len(again.rooms) >= len(plan.rooms)):
             plan, issues = again, again_issues
     if plan is None:
@@ -88,67 +85,15 @@ async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings:
     return analysis
 
 
-async def _ask(content: list[dict], settings: Settings, client: httpx.AsyncClient) -> tuple[LlmPlan | None, list[str]]:
-    """`content` is OpenAI-style input parts; Gemini gets the same text and image as its own parts."""
-    schema = LlmPlan.model_json_schema()
-    model = settings.plan_vision_model
-    if settings.plan_vision_gemini:
-        parts = []
-        for c in content:
-            if c["type"] == "input_text":
-                parts.append({"text": c["text"]})
-            else:
-                mime, _, data = c["image_url"].removeprefix("data:").partition(";base64,")
-                parts.append({"inline_data": {"mime_type": mime, "data": data}})
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema}}
-        headers = {"x-goog-api-key": settings.gemini_api_key.get_secret_value()}
-    else:
-        url, headers = "https://api.openai.com/v1/responses", {}  # the OpenAI client sends its key
-        payload = {
-            "model": model,
-            "input": [{"role": "user", "content": content}],
-            # strict=False: Pydantic's schema (optional fields, defaults) is a guide, and Pydantic validates.
-            "text": {"format": {"type": "json_schema", "name": "floor_plan", "schema": schema, "strict": False}},
-        }
-    body = await _post(url, payload, headers, settings, client)
-    if body is None:
+async def _ask(content: list[dict], settings: Settings, client: httpx.AsyncClient, model: str) -> tuple[LlmPlan | None, list[str]]:
+    text = await vision.ask_json(content, LlmPlan.model_json_schema(), "floor_plan", settings, client, model)
+    if text is None:
         return None, []
     try:
-        if settings.plan_vision_gemini:
-            text = "".join(p.get("text", "") for p in body["candidates"][0]["content"]["parts"] if not p.get("thought"))
-        else:
-            text = next(c["text"] for item in body.get("output", []) if item.get("type") == "message" for c in item.get("content", []) if c.get("type") == "output_text")
         return validate_and_correct(LlmPlan.model_validate(json.loads(text)))
-    except (StopIteration, KeyError, IndexError, ValueError, ValidationError) as exc:
+    except (ValueError, ValidationError) as exc:
         logger.warning("Plan analysis returned invalid JSON: %s", str(exc)[:300])
         return None, [f"invalid JSON: {str(exc)[:200]}"]
-
-
-async def _post(url: str, payload: dict, headers: dict, settings: Settings, client: httpx.AsyncClient) -> dict | None:
-    for attempt in range(RETRIES + 1):
-        started = time.monotonic()
-        try:
-            response = await client.post(url, json=payload, headers=headers, timeout=settings.openai_plan_timeout_seconds)
-        except httpx.HTTPError as exc:
-            logger.warning("Plan analysis request failed (attempt %d): %s", attempt + 1, exc)
-        else:
-            data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-            usage = data.get("usage") or {}
-            gemini = data.get("usageMetadata") or {}
-            logger.info(
-                "Plan analysis %s %s in %.1fs (input %s, output %s tokens)", settings.plan_vision_model,
-                response.status_code, time.monotonic() - started,
-                usage.get("input_tokens", gemini.get("promptTokenCount")), usage.get("output_tokens", gemini.get("candidatesTokenCount")),
-            )
-            if response.status_code < 400:
-                return response.json()
-            logger.warning("Plan analysis refused: %s", response.text[:300])
-            if (response.status_code != 429 and response.status_code < 500) or any(c in response.text for c in ("insufficient_quota", "credit_balance_exhausted")):
-                return None  # a bad request, or no credits left, does not get better by repeating it
-        if attempt < RETRIES:
-            await asyncio.sleep(RETRY_DELAY * 2**attempt)
-    return None
 
 
 def validate_and_correct(plan: LlmPlan) -> tuple[LlmPlan, list[str]]:

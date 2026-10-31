@@ -22,6 +22,7 @@ from shapely.geometry import LineString, Point, Polygon
 
 from app.core.config import Settings, get_settings
 from app.schemas.plan_analysis import LlmPlan, PlanAnalysis
+from app.services import vision
 from app.services.plan import image_processor, vision_analysis
 from app.services.plan.dimension_ocr import OcrBox
 from app.services.plan.geometry_builder import build_room_glb
@@ -215,7 +216,7 @@ def run_analysis(handler, tmp_path) -> tuple[PlanAnalysis | None, int]:
 
 
 def test_targeted_retry_then_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(vision_analysis, "RETRY_DELAY", 0)
+    monkeypatch.setattr(vision, "RETRY_DELAY", 0)
     answer = json.loads((FIXTURES / "open_plan_apartment.analysis.json").read_text())
     good = {k: answer[k] for k in LlmPlan.model_fields}
     seen = []
@@ -232,7 +233,7 @@ def test_targeted_retry_then_cache(tmp_path, monkeypatch):
 
 
 def test_failures_fall_back_to_opencv(tmp_path, monkeypatch):
-    monkeypatch.setattr(vision_analysis, "RETRY_DELAY", 0)
+    monkeypatch.setattr(vision, "RETRY_DELAY", 0)
     analysis, calls = run_analysis(lambda _r, _n: httpx.Response(503), tmp_path)
     assert analysis is None and calls["n"] == 4  # (1 + 1 retry) × (first ask + targeted retry)
 
