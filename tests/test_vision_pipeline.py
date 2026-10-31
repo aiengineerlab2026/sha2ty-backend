@@ -205,7 +205,7 @@ def run_analysis(handler, tmp_path) -> tuple[PlanAnalysis | None, int]:
         calls["n"] += 1
         return handler(request, calls["n"])
 
-    settings = Settings(openai_api_key="sk-test", openai_plan_model="test-model", storage_dir=tmp_path)
+    settings = Settings(openai_api_key="sk-test", plan_vision_model="test-model", storage_dir=tmp_path)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(counted)) as client:
@@ -330,3 +330,38 @@ def test_grey_fill_glb_is_rooms_and_walls_not_a_block(grey):
         if n.startswith("wall_"):
             w, _, d = scene.geometry[scene.graph[n][1]].extents
             assert min(w, d) < 0.5, n  # every wall is a thin vertical body
+
+
+def test_grey_fill_plan_with_recorded_gemini_answer(monkeypatch):
+    monkeypatch.setattr(image_processor, "run_ocr", lambda _i: (list(GREY_OCR), []))
+    analysis = PlanAnalysis.model_validate_json((FIXTURES / "grey_fill_apartment.gemini-analysis.json").read_text())
+    payload = image_processor.plan_from_image(GREY.read_bytes(), analysis=analysis)
+    assert payload["validation"]["ok"] and payload["geometry_source"] == "opencv"
+    # The plan's own label decides the open space: no extra "Kitchen" / "Dining" zones from the model.
+    assert sorted(z["name"] for z in payload["zones"]) == ["Balcony", "Bathroom", "Bedroom", "Hall", "Living Room and Kitchen"]
+    assert {"bed", "sofa", "toilet"} <= {f["type"] for f in payload["fixtures"]}  # furniture boxes from the model
+
+
+def test_gemini_request_uses_its_own_key_and_format(tmp_path):
+    answer = json.loads((FIXTURES / "open_plan_apartment.analysis.json").read_text())
+    good = {k: answer[k] for k in LlmPlan.model_fields}
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(good)}]}}], "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 2}})
+
+    settings = Settings(gemini_api_key="gem-test", openai_api_key="sk-secret", plan_vision_model="gemini-3.5-flash", storage_dir=tmp_path)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await analyze_plan(b"image-bytes", "image/png", (100, 50), settings, client)
+
+    analysis = asyncio.run(go())
+    assert analysis is not None and len(analysis.rooms) == 6 and analysis.model == "gemini-3.5-flash"
+    request = seen[0]
+    assert str(request.url) == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+    assert request.headers["x-goog-api-key"] == "gem-test" and "authorization" not in request.headers  # the OpenAI key never goes to Google
+    body = json.loads(request.content)
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "image/png"

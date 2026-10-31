@@ -131,7 +131,7 @@ async def convert_to_3d(
     wall_thickness: Annotated[float, Form()] = DEFAULT_THICKNESS,
     debug: Annotated[str, Form()] = "false",
 ) -> StreamingResponse:
-    """OpenCV + OCR geometry, guided by the vision model's reading (OPENAI_PLAN_MODEL, default gpt-4o-mini)
+    """OpenCV + OCR geometry, guided by the vision model's reading (PLAN_VISION_MODEL, default gemini-3.5-flash)
     when configured; the plan plus GLB and DXF download URLs."""
     return await _convert(request, image, height, wall_thickness, None, None, debug, vision=True, exports=True)
 
@@ -188,7 +188,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         stages are reported by the conversion as it reaches them.
         """
         yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
-        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.openai_http) if vision else asyncio.sleep(0))
+        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.auth_http if settings.plan_vision_gemini else request.app.state.openai_http) if vision else asyncio.sleep(0))
         started = loop.time()
         while not task.done():
             await asyncio.wait({task}, timeout=1.0)
@@ -219,7 +219,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
             logger.exception("Floor plan conversion failed")
             yield json.dumps({"error": f"Could not convert this floor plan ({exc}).", "status": 500}) + "\n"
             return
-        if vision and analysis is None and settings.openai_plan_model and settings.astra_configured:
+        if vision and analysis is None and settings.plan_vision_configured:
             payload["warnings"] = ["The vision model was unavailable, so this plan was read with OpenCV only.", *payload["warnings"]]
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}

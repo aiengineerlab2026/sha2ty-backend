@@ -33,14 +33,20 @@ def _px(p, size) -> tuple[float, float]:
 
 
 def labels_from_analysis(analysis: PlanAnalysis | None, labels: list[RoomLabel], size: tuple[int, int]) -> list[RoomLabel]:
-    """Model rooms become labels unless OCR already labelled that room with the same type."""
+    """Model rooms become labels unless the plan's own (OCR) labels already name them: same type inside
+    it, the type written in a label ("Living Room and Kitchen"), or an open-plan area (living / kitchen /
+    dining) when the plan labels its open space itself — printed labels decide how it is divided."""
     if not analysis:
         return []
+    printed = " ".join(l.text.lower() for l in labels)
+    open_plan = {"living", "kitchen", "dining"}
     out = []
     for room in analysis.rooms:
         poly = Polygon([_px(p, size) for p in room.polygon])
         kind = KIND[room.type]
         if any(l.kind == kind and poly.contains(Point(l.x, l.y)) for l in labels):
+            continue
+        if NAME[room.type].split()[0].lower() in printed or (kind in open_plan and any(l.kind in open_plan for l in labels)):
             continue
         anchor = poly.representative_point()
         dims = None

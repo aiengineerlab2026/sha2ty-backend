@@ -57,8 +57,8 @@ def cache_key(image: bytes, model: str) -> str:
 
 
 async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings: Settings, client: httpx.AsyncClient) -> PlanAnalysis | None:
-    model = settings.openai_plan_model
-    if not model or not settings.astra_configured:
+    model = settings.plan_vision_model
+    if not settings.plan_vision_configured:
         return None
     key = cache_key(image, model)
     path = Path(settings.storage_dir) / "plan-analysis" / f"{key}.json"
@@ -89,35 +89,57 @@ async def analyze_plan(image: bytes, mime: str, size: tuple[int, int], settings:
 
 
 async def _ask(content: list[dict], settings: Settings, client: httpx.AsyncClient) -> tuple[LlmPlan | None, list[str]]:
-    payload = {
-        "model": settings.openai_plan_model,
-        "input": [{"role": "user", "content": content}],
-        # strict=False: Pydantic's schema (optional fields, defaults) is a guide, and Pydantic validates.
-        "text": {"format": {"type": "json_schema", "name": "floor_plan", "schema": LlmPlan.model_json_schema(), "strict": False}},
-    }
-    body = await _post(payload, settings, client)
+    """`content` is OpenAI-style input parts; Gemini gets the same text and image as its own parts."""
+    schema = LlmPlan.model_json_schema()
+    model = settings.plan_vision_model
+    if settings.plan_vision_gemini:
+        parts = []
+        for c in content:
+            if c["type"] == "input_text":
+                parts.append({"text": c["text"]})
+            else:
+                mime, _, data = c["image_url"].removeprefix("data:").partition(";base64,")
+                parts.append({"inline_data": {"mime_type": mime, "data": data}})
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema}}
+        headers = {"x-goog-api-key": settings.gemini_api_key.get_secret_value()}
+    else:
+        url, headers = "https://api.openai.com/v1/responses", {}  # the OpenAI client sends its key
+        payload = {
+            "model": model,
+            "input": [{"role": "user", "content": content}],
+            # strict=False: Pydantic's schema (optional fields, defaults) is a guide, and Pydantic validates.
+            "text": {"format": {"type": "json_schema", "name": "floor_plan", "schema": schema, "strict": False}},
+        }
+    body = await _post(url, payload, headers, settings, client)
     if body is None:
         return None, []
     try:
-        text = next(c["text"] for item in body.get("output", []) if item.get("type") == "message" for c in item.get("content", []) if c.get("type") == "output_text")
+        if settings.plan_vision_gemini:
+            text = "".join(p.get("text", "") for p in body["candidates"][0]["content"]["parts"] if not p.get("thought"))
+        else:
+            text = next(c["text"] for item in body.get("output", []) if item.get("type") == "message" for c in item.get("content", []) if c.get("type") == "output_text")
         return validate_and_correct(LlmPlan.model_validate(json.loads(text)))
-    except (StopIteration, ValueError, ValidationError) as exc:
+    except (StopIteration, KeyError, IndexError, ValueError, ValidationError) as exc:
         logger.warning("Plan analysis returned invalid JSON: %s", str(exc)[:300])
         return None, [f"invalid JSON: {str(exc)[:200]}"]
 
 
-async def _post(payload: dict, settings: Settings, client: httpx.AsyncClient) -> dict | None:
+async def _post(url: str, payload: dict, headers: dict, settings: Settings, client: httpx.AsyncClient) -> dict | None:
     for attempt in range(RETRIES + 1):
         started = time.monotonic()
         try:
-            response = await client.post("https://api.openai.com/v1/responses", json=payload, timeout=settings.openai_plan_timeout_seconds)
+            response = await client.post(url, json=payload, headers=headers, timeout=settings.openai_plan_timeout_seconds)
         except httpx.HTTPError as exc:
             logger.warning("Plan analysis request failed (attempt %d): %s", attempt + 1, exc)
         else:
-            usage = (response.json().get("usage") if response.headers.get("content-type", "").startswith("application/json") else None) or {}
+            data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            usage = data.get("usage") or {}
+            gemini = data.get("usageMetadata") or {}
             logger.info(
-                "Plan analysis %s in %.1fs (input %s, output %s tokens)",
-                response.status_code, time.monotonic() - started, usage.get("input_tokens"), usage.get("output_tokens"),
+                "Plan analysis %s %s in %.1fs (input %s, output %s tokens)", settings.plan_vision_model,
+                response.status_code, time.monotonic() - started,
+                usage.get("input_tokens", gemini.get("promptTokenCount")), usage.get("output_tokens", gemini.get("candidatesTokenCount")),
             )
             if response.status_code < 400:
                 return response.json()
