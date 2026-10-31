@@ -24,9 +24,10 @@ from app.schemas.plan_analysis import ImageSize, LlmPlan, PlanAnalysis
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "plan-analysis-v2"  # bump when PROMPT or the schema changes: it invalidates the cache
+SCHEMA_VERSION = "plan-analysis-v3"  # bump when PROMPT or the schema changes: it invalidates the cache (v3: structure only)
 SNAP = 0.012  # normalised distance under which wall ends are the same corner
-PROMPT = """You are an architect reading a 2D floor plan image. Describe the WHOLE layout as JSON.
+PROMPT = """You are an architect reading a 2D floor plan image. Describe the apartment's STRUCTURE as JSON:
+rooms, walls, doors, windows and balconies only.
 
 Coordinates: normalised to the image, origin top-left, x to the right, y downwards, 0..1. Never pixels or metres.
 
@@ -35,17 +36,17 @@ rooms: every enclosed or open space (living, kitchen, dining, bedroom, bathroom,
   each in the other's connects_to. A balcony/terrace lies OUTSIDE the apartment's exterior wall.
   If a size is written on the plan, copy it to dimension_text, convert to metres and set dimension_source
   "annotated". Otherwise give your estimate with "inferred", or null with "unknown".
-walls: structural walls only (thick lines), as straight segments with both ends. Never furniture or
+walls: structural walls only (thick lines), as straight segments with both ends. Never furniture, fixture or
   cabinet outlines. Mark exterior walls. A shared wall appears once, with both rooms listed. Include a
   balcony's or terrace's outer edge (railing) as exterior walls. Never invent rooms (e.g. a closet) that
   are not drawn; list every room that is drawn, even narrow hallways.
-doors: the opening between its jambs, swing, connected rooms ("outside" for the entrance).
+doors: the opening between its jambs, swing, connected rooms ("outside" for the entrance; a balcony door
+  connects the room and the balcony).
 windows: the segment along its wall.
-furniture: beds, sofas, tables, chairs, wardrobes, cabinets/countertops, appliances, sinks, toilets,
-  showers, bathtubs... with a tight bbox, orientation in degrees and an estimated size.
-scale_references: objects whose real size is known, as a segment ALONG the measured side: written
-  dimension lines (real_m from the text, "annotated"), interior doors (jamb to jamb, ~0.8 m), double beds
-  (long side 2.0 m), bathtubs (long side ~1.6 m), kitchen countertop depth (0.6 m). Prefer several.
+furniture: always an empty list. Do not report beds, sofas, tables, chairs, kitchen units, appliances or
+  bathroom fixtures: they are not part of the apartment's structure.
+scale_references: only written dimension lines (real_m from the text, "annotated") and interior doors
+  (jamb to jamb, ~0.8 m), as a segment along the measured side.
 warnings: anything unclear. Return only what you can see; do not invent rooms."""
 
 
@@ -115,6 +116,9 @@ async def _ask(content: list[dict], settings: Settings, client: httpx.AsyncClien
 def validate_and_correct(plan: LlmPlan) -> tuple[LlmPlan, list[str]]:
     """Deterministic fixes first (clamp, repair, snap, associate); what can't be fixed is reported."""
     issues: list[str] = []
+    # Structure only: furniture the model lists anyway, and references measured on furniture, are dropped.
+    plan.furniture = []
+    plan.scale_references = [r for r in plan.scale_references if r.kind in ("dimension_annotation", "door")]
     clamped = 0
 
     def clamp(p: list[float]) -> list[float]:

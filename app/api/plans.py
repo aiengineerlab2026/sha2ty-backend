@@ -25,8 +25,8 @@ from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
 from app.services.plan.cad_exporter import export_plan_dxf
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, rectangular_room, room_extents
-from app.services.plan.image_processor import plan_from_image, plan_from_state
-from app.services.plan.vision_analysis import analyze_plan
+from app.services.plan.image_processor import plan_from_image, plan_from_state, preview_data_url
+from app.services.plan.vision_analysis import SCHEMA_VERSION, analyze_plan
 from app.services.plan.placement import validate_placement
 from app.services.plan.plan_exporter import export_room_glb, step_unsupported_reason
 from app.services.plan_store import PlanStore
@@ -36,6 +36,8 @@ router = APIRouter(prefix="/api/plans", tags=["plans"])
 # Building a plan (from dimensions / an image, correction, validation) is public so guests can design;
 # saving, listing, loading and exporting plans require a signed-in user.
 ALLOWED = {"image/png", "image/jpeg", "image/jpg"}
+# Bump when the conversion changes (walls, rooms, scale, geometry): cached plans from older code are not reused.
+PLAN_CACHE_VERSION = f"plan-3d-v1/{SCHEMA_VERSION}"
 
 
 class DimensionsBody(BaseModel):
@@ -189,7 +191,20 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         stages are reported by the conversion as it reaches them.
         """
         yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
-        model = await vision.current_model(settings, request.app.state.auth_http) if use_vision else ""
+        db = request.app.state.auth_http
+        model = await vision.current_model(settings, db) if use_vision else ""
+        debugging = str(debug).lower() in {"1", "true", "yes"}
+        # The same image, sizes and vision model → the finished plan from model_cache: no model call,
+        # no conversion. Debug runs always convert (their images are not cached).
+        key = hashlib.sha256(raw + f"|{height}|{wall_thickness}|{width}|{depth}|{model}|{PLAN_CACHE_VERSION}".encode()).hexdigest()
+        cached = await vision.cache_get(settings, db, key, table="model_cache") if settings.plan_vision_cache and not debugging else None
+        if cached:
+            logger.info("Floor plan from the cache (%s): no model call, no conversion", model or "opencv")
+            payload = {**cached, "cached": True, "preview_image": await run_in_threadpool(preview_data_url, raw)}
+            if exports and payload["walls"] and not _exports_exist(raw):
+                payload.update(await run_in_threadpool(_write_exports, raw, payload))
+            yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
+            return
         task = asyncio.create_task(analyze_plan(raw, mime, size, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http) if use_vision else asyncio.sleep(0))
         started = loop.time()
         while not task.done():
@@ -201,7 +216,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
             run_in_threadpool(
                 partial(
                     plan_from_image, raw, wall_height=height, wall_thickness=wall_thickness, width_m=width, depth_m=depth,
-                    debug=str(debug).lower() in {"1", "true", "yes"}, analysis=analysis, on_stage=stage,
+                    debug=debugging, analysis=analysis, on_stage=stage,
                 )
             )
         )
@@ -221,13 +236,18 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
             logger.exception("Floor plan conversion failed")
             yield json.dumps({"error": f"Could not convert this floor plan ({exc}).", "status": 500}) + "\n"
             return
-        if use_vision and analysis is None and vision.configured(settings, model):
+        vision_failed = use_vision and analysis is None and vision.configured(settings, model)
+        if vision_failed:
             payload["warnings"] = ["The vision model was unavailable, so this plan was read with OpenCV only.", *payload["warnings"]]
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}
         logger.info("Plan 3D extents %.2f × %.2f × %.2f m, %d walls, %d floors, %d fixtures", w, d, h, len(payload["walls"]), len(payload["zones"]), len(payload.get("fixtures") or []))
         if exports and payload["walls"]:  # also with validation problems: they are listed with the model
             payload.update(await run_in_threadpool(_write_exports, raw, payload))
+        # A fallback after a failed model call is not cached: the next upload tries the model again.
+        if settings.plan_vision_cache and not debugging and not vision_failed:
+            stored = {k: v for k, v in payload.items() if k not in ("preview_image", "debug_images")}
+            await vision.cache_put(settings, db, key, "floor_plan_3d", model or "opencv", stored, table="model_cache")
         yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -352,6 +372,12 @@ async def convert_cad(
     cdn: Cdn = request.app.state.cdn
     url = cdn.upload(f"{user_id}/converted/{uuid4().hex}.glb", glb, "model/gltf-binary")
     return {"glb_url": url, "via": how}
+
+
+def _exports_exist(raw: bytes) -> bool:
+    folder = get_settings().storage_dir / "plan-exports"
+    key = hashlib.sha256(raw).hexdigest()[:24]
+    return (folder / f"{key}.glb").exists() and (folder / f"{key}.dxf").exists()
 
 
 def _write_exports(raw: bytes, payload: dict[str, Any]) -> dict[str, str]:

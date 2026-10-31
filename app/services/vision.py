@@ -147,34 +147,35 @@ async def _post(url: str, payload: dict, headers: dict, settings: Settings, clie
     return None
 
 
-# ── Answer cache in the database (supabase/vision_cache.sql) ────────────────────────────────────
+# ── Caches in the database (supabase/vision_cache.sql, supabase/model_cache.sql) ─────────────────
 # Callers also keep their disk cache: it still works when the table is missing or Supabase is down.
 
 
-async def cache_get(settings: Settings, db: httpx.AsyncClient | None, key: str) -> dict | None:
+async def cache_get(settings: Settings, db: httpx.AsyncClient | None, key: str, table: str = "vision_cache") -> dict | None:
+    """One cached row's result: `vision_cache` (model answers) or `model_cache` (finished 3D results)."""
     if db is None or not settings.supabase_url:
         return None
     try:
-        response = await db.get(f"{settings.supabase_url.rstrip('/')}/rest/v1/vision_cache?key=eq.{key}&select=result", headers=service_headers(settings), timeout=10)
+        response = await db.get(f"{settings.supabase_url.rstrip('/')}/rest/v1/{table}?key=eq.{key}&select=result", headers=service_headers(settings), timeout=10)
         rows = response.json() if response.status_code < 400 else []
     except (httpx.HTTPError, HTTPException, ValueError) as exc:
         logger.warning("Vision cache unreadable: %s", exc)
         return None
     if response.status_code >= 400:
-        logger.warning("Vision cache unreadable (%s). Run supabase/vision_cache.sql.", response.status_code)
+        logger.warning("Cache %s unreadable (%s). Run supabase/%s.sql.", table, response.status_code, table)
     return rows[0]["result"] if rows else None
 
 
-async def cache_put(settings: Settings, db: httpx.AsyncClient | None, key: str, kind: str, model: str, result: dict) -> None:
+async def cache_put(settings: Settings, db: httpx.AsyncClient | None, key: str, kind: str, model: str, result: dict, table: str = "vision_cache") -> None:
     if db is None or not settings.supabase_url:
         return
     try:
         response = await db.post(
-            f"{settings.supabase_url.rstrip('/')}/rest/v1/vision_cache",
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/{table}",
             json={"key": key, "kind": kind, "model": model, "result": result},
             headers={**service_headers(settings), "Prefer": "resolution=merge-duplicates,return=minimal"}, timeout=10,
         )
         if response.status_code >= 400:
-            logger.warning("Vision cache not saved (%s): %s", response.status_code, response.text[:200])
+            logger.warning("Cache %s not saved (%s): %s", table, response.status_code, response.text[:200])
     except (httpx.HTTPError, HTTPException) as exc:
-        logger.warning("Vision cache not saved: %s", exc)
+        logger.warning("Cache %s not saved: %s", table, exc)

@@ -32,7 +32,6 @@ from app.schemas.plan_analysis import PlanAnalysis
 from app.services.plan.analysis_guidance import (
     door_references,
     drop_furniture_walls,
-    fixtures_px,
     labels_from_analysis,
     object_references,
     room_estimate_references,
@@ -169,7 +168,7 @@ def plan_from_state(
         objects = object_references(analysis, gray, size)
         if not any(r["source"] == "furniture" for r in objects):
             objects += furniture_references(gray, seg.zones)  # no model, or it pointed at no furniture
-        state = {**state, "scale_refs": objects + room_estimate_references(analysis, seg.zones), "fixtures_px": fixtures_px(analysis, gray, size)}
+        state = {**state, "scale_refs": objects + room_estimate_references(analysis, seg.zones), "fixtures_px": []}  # structure only: no furniture boxes in the 3D model
     # Doors are re-measured on every run: the correction view can edit openings.
     refs = door_references(openings, analysis, size, thickness) + [dict(r) for r in state.get("scale_refs") or []]
     scale = estimate_scale(calibrate(seg.zones), refs, thickness)
@@ -381,6 +380,11 @@ def _decode_mask(data: str | None, shape) -> np.ndarray | None:
 
 
 # ── images ──────────────────────────────────────────────────────────────────────────────
+
+
+def preview_data_url(image_bytes: bytes) -> str:
+    """The "Original plan" thumbnail, rebuilt for a plan served from the cache (not stored with it)."""
+    return _png_data_url(_working_copy(_decode_image(image_bytes))[0])
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:

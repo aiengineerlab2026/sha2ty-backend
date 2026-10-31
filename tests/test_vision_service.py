@@ -252,16 +252,15 @@ def test_missing_cache_table_never_blocks_the_model(tmp_path):
     assert asyncio.run(go()).object_type == "three-seat sofa"
 
 
-def test_floor_plans_call_the_model_on_every_upload_by_default(tmp_path):
-    """PLAN_VISION_CACHE is off by default: the same plan uploaded twice is read twice, nothing is stored."""
+def test_floor_plans_call_the_model_on_every_upload_when_caching_is_off(tmp_path):
+    """PLAN_VISION_CACHE=false: the same plan uploaded twice is read twice, nothing is stored."""
     from app.services.plan.vision_analysis import analyze_plan
 
     answer = json.loads(open("tests/fixtures/open_plan_apartment.analysis.json").read())
     good = {k: answer[k] for k in ("rooms", "walls", "doors", "windows", "furniture", "scale_references", "warnings")}
     calls = []
     rows, db = fake_db()
-    s = Settings(gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
-    assert not s.plan_vision_cache
+    s = Settings(gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_cache=False)
 
     def provider(request):
         calls.append(request)
@@ -273,3 +272,110 @@ def test_floor_plans_call_the_model_on_every_upload_by_default(tmp_path):
 
     assert not asyncio.run(go()).cached and not asyncio.run(go()).cached
     assert len(calls) == 2 and not rows and not (tmp_path / "plan-analysis").exists()
+
+
+
+def test_structure_only_reading_drops_furniture():
+    from app.schemas.plan_analysis import LlmPlan
+    from app.services.plan.vision_analysis import validate_and_correct
+
+    raw = json.loads(open("tests/fixtures/grey_fill_apartment.gemini-analysis.json").read())
+    plan, _ = validate_and_correct(LlmPlan.model_validate({k: raw[k] for k in LlmPlan.model_fields}))
+    assert raw["furniture"] and plan.furniture == []  # the model listed beds / sofas: none kept
+    assert all(r.kind in ("dimension_annotation", "door") for r in plan.scale_references)
+    assert plan.rooms and plan.walls and plan.doors
+
+
+def fake_model_cache():
+    rows: dict[str, dict] = {}
+
+    def handler(request):
+        assert "model_cache" in request.url.path or "vision_cache" in request.url.path
+        if request.method == "POST":
+            body = json.loads(request.content)
+            rows[body["key"]] = body
+            return httpx.Response(201)
+        key = request.url.params["key"].removeprefix("eq.")
+        return httpx.Response(200, json=[{"result": rows[key]["result"]}] if key in rows else [])
+
+    return rows, httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def test_same_floor_plan_upload_returns_the_cached_3d_plan(tmp_path, monkeypatch):
+    from app.api import plans
+    from app.services.plan import image_processor
+    from tests.test_vision_pipeline import GREY, GREY_OCR
+
+    rows, db = fake_model_cache()
+    analyses, conversions = [], []
+    real_convert = image_processor.plan_from_image
+
+    async def no_model(*_args, **_kwargs):
+        analyses.append(1)
+        return None
+
+    def counted(*args, **kwargs):
+        conversions.append(1)
+        return real_convert(*args, **kwargs)
+
+    s = Settings(storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_model="")
+    monkeypatch.setattr(plans, "analyze_plan", no_model)
+    monkeypatch.setattr(plans, "plan_from_image", counted)
+    monkeypatch.setattr(plans, "get_settings", lambda: s)
+    monkeypatch.setattr(image_processor, "run_ocr", lambda _i: (list(GREY_OCR), []))
+    with TestClient(app) as client:
+        client.app.state.auth_http = db
+        first, second = (json.loads(client.post("/api/plans/convert-to-3d", files={"image": ("p.jpg", GREY.read_bytes(), "image/jpeg")}).text.splitlines()[-1])["plan"] for _ in range(2))
+        assert client.get(second["glb_url"]).status_code == 200
+    assert len(conversions) == 1 and not first.get("cached") and second["cached"]  # converted once
+    assert second["zones"] == first["zones"] and second["preview_image"].startswith("data:image/png")
+    assert [r["kind"] for r in rows.values()] == ["floor_plan_3d"] and "preview_image" not in next(iter(rows.values()))["result"]
+
+
+def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
+    rows, db = fake_model_cache()
+    calls = {"meshy": 0, "details": 0}
+
+    async def fake_details(*_args, **_kwargs):
+        calls["details"] += 1
+        return product_details.clean(ProductDetails.model_validate(SOFA))
+
+    class FakeMeshy:
+        async def create_image_to_3d_task(self, _options, **_kwargs):
+            calls["meshy"] += 1
+            return f"task-{calls['meshy']}"
+
+        async def get_image_to_3d_task(self, task_id):
+            return {"status": "SUCCEEDED", "progress": 100, "model_urls": {"glb": "https://meshy.test/m.glb"}}, None
+
+        async def download_file(self, _url, dest, _limit):
+            dest.write_bytes(b"glTF")
+
+    class FakeCdn:
+        def upload(self, path, _data, _type):
+            return f"https://cdn.test/{path}"
+
+    async def one_try(*_args):
+        return 4
+
+    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "take_try", one_try)
+    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
+    monkeypatch.setattr(vendor, "get_settings", lambda: s)
+    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    form = {"category": "furniture", "title": "Oslo sofa"}
+    try:
+        with TestClient(app) as client:
+            client.app.state.auth_http = db
+            first = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data=form).json()
+            done = client.get(f"/api/vendor/tasks/{first['task_id']}").json()
+            again = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data=form).json()
+            other = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data={**form, "category": "table"}).json()
+    finally:
+        app.dependency_overrides.clear()
+    assert first["status"] == "PENDING" and done["status"] == "SUCCEEDED"
+    assert again["status"] == "SUCCEEDED" and again["glb_url"] == done["glb_url"]  # served from the cache…
+    assert again["details"]["object_type"] == "three-seat sofa"
+    assert calls == {"meshy": 2, "details": 2}  # …no second Meshy job or vision call; another category is new
+    assert other["status"] == "PENDING" and [r["kind"] for r in rows.values()] == ["vendor_glb"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -28,6 +29,7 @@ from app.services.meshy_service import MeshyError, MeshyService
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
+GLB_CACHE_VERSION = "vendor-glb-v1"
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -141,6 +143,11 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
     return QuotaResponse(limit=settings.generation_limit, remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()})
 
 
+def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool) -> str:
+    """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
+    return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}|{GLB_CACHE_VERSION}".encode()).hexdigest()
+
+
 async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
     """Reserve one generation try; 429 when the vendor has used them all. Returns tries left."""
     used = await use_generation(user_id, provider, 1, settings, request.app.state.auth_http)
@@ -183,6 +190,19 @@ async def generate_model(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Upload a photo or provide image_url.")
     object_id = model_id or uuid4().hex
     textured = should_texture.strip().lower() not in {"0", "false", "no"}
+    db = request.app.state.auth_http
+    # The same photo, vendor and options → the model generated before (model_cache): no vision call,
+    # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
+    cache_key = glb_cache_key(raw, user_id, provider, category, title, textured) if raw else None
+    hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
+    if hit and hit.get("glb_url"):
+        details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
+        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details)
+
+    async def remember(url: str, details: ProductDetails | None) -> None:
+        if cache_key:
+            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None}
+            await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
     async def read_photo(photo: bytes) -> ProductDetails | None:
         """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation."""
@@ -201,6 +221,7 @@ async def generate_model(
             details = await read_photo(raw)
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+            await remember(url, details)
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
@@ -221,7 +242,10 @@ async def generate_model(
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    request.app.state.pending_cdn[task_id] = {"user_id": user_id, "model_id": object_id}
+    request.app.state.pending_cdn[task_id] = {
+        "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
+        "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
+    }
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
@@ -273,6 +297,9 @@ async def get_task(
         url = cdn.upload(f"{owner}/{object_id}.glb", dest.read_bytes(), "model/gltf-binary")
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
+    if pending.get("cache_key"):
+        result = {"glb_url": url, "model_id": object_id, "details": pending.get("details")}
+        await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
     request.app.state.pending_cdn.pop(task_id, None)
     return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url)
 

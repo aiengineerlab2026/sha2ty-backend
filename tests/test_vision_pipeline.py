@@ -96,10 +96,7 @@ def test_doors_are_openings_and_furniture_is_not_wall(plan):
     for door in plan["doors"]:
         mid = LineString([door["start"], door["end"]]).interpolate(0.5, normalized=True)
         assert all(LineString([w["start"], w["end"]]).distance(mid) > w["thickness"] / 2 for w in full), "a door is filled with wall"
-    if plan["analysis"]:  # furniture boxes come from the model; OpenCV alone builds none
-        bed = next(f for f in plan["fixtures"] if f["type"] == "bed")
-        w, d, _ = bed["size"]
-        assert 1.0 < min(w, d) < 2.2 and 1.4 < max(w, d) < 2.6  # bed-sized at the estimated scale (approximate)
+    assert plan["fixtures"] == []  # structure only: beds, tables… are never built
     walls = [LineString([w["start"], w["end"]]) for w in full]
     footprint = Polygon(plan["exterior"]).buffer(-0.3)
     for f in plan["fixtures"]:
@@ -113,7 +110,7 @@ def test_glb_has_named_meshes_for_every_space(plan):
     for slug in ("living_room", "kitchen", "bedroom", "bathroom", "hall", "balcony"):
         assert f"room_{slug}_1_floor" in names
     assert any(n.startswith("wall_bedroom_1_") for n in names)
-    assert "furniture_bedroom_1_bed" in names or not plan["analysis"]
+    assert not any(n.startswith("furniture_") for n in names)
     assert any(n.startswith("door_") for n in names) and any(n.startswith("window_") for n in names)
     width, _, depth = scene.extents
     assert 7 < width < 14 and 4 < depth < 8  # a whole flat, not one rectangle
@@ -340,7 +337,7 @@ def test_grey_fill_plan_with_recorded_gemini_answer(monkeypatch):
     assert payload["validation"]["ok"] and payload["geometry_source"] == "opencv"
     # The plan's own label decides the open space: no extra "Kitchen" / "Dining" zones from the model.
     assert sorted(z["name"] for z in payload["zones"]) == ["Balcony", "Bathroom", "Bedroom", "Hall", "Living Room and Kitchen"]
-    assert {"bed", "sofa", "toilet"} <= {f["type"] for f in payload["fixtures"]}  # furniture boxes from the model
+    assert payload["fixtures"] == []  # the recorded answer lists furniture; structure only is built
 
 
 def test_gemini_request_uses_its_own_key_and_format(tmp_path):
