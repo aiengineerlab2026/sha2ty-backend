@@ -2,7 +2,7 @@
 vendor product photos before 3D generation (product_details.py).
 
 The admin picks it (GET/PUT /api/admin/vision); the choice is kept in public.app_settings and falls back
-to PLAN_VISION_MODEL (default gemini-3.8-flash). gemini-* models go to Google's generateContent with GEMINI_API_KEY, the others to
+to PLAN_VISION_MODEL (default gemini-3.1-pro-preview). gemini-* models go to Google's generateContent with GEMINI_API_KEY, the others to
 the OpenAI Responses API with OPENAI_API_KEY.
 """
 
@@ -20,7 +20,7 @@ from app.services.auth import service_headers
 
 logger = logging.getLogger(__name__)
 
-MODELS = {"gemini-3.8-flash": "Gemini 3.8 Flash", "gpt-6-astra": "GPT-6 Astra"}
+MODELS = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "gpt-6-astra": "GPT-6 Astra"}
 RETRY_DELAY = 2.0  # seconds, doubled per attempt
 RETRIES = 1  # one extra attempt on 429 / 5xx / timeouts
 

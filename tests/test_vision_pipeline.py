@@ -352,16 +352,16 @@ def test_gemini_request_uses_its_own_key_and_format(tmp_path):
         seen.append(request)
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(good)}]}}], "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 2}})
 
-    settings = Settings(gemini_api_key="gem-test", openai_api_key="sk-secret", plan_vision_model="gemini-3.8-flash", storage_dir=tmp_path)
+    settings = Settings(gemini_api_key="gem-test", openai_api_key="sk-secret", plan_vision_model="gemini-3.1-pro-preview", storage_dir=tmp_path)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             return await analyze_plan(b"image-bytes", "image/png", (100, 50), settings, client)
 
     analysis = asyncio.run(go())
-    assert analysis is not None and len(analysis.rooms) == 6 and analysis.model == "gemini-3.8-flash"
+    assert analysis is not None and len(analysis.rooms) == 6 and analysis.model == "gemini-3.1-pro-preview"
     request = seen[0]
-    assert str(request.url) == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+    assert str(request.url) == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent"
     assert request.headers["x-goog-api-key"] == "gem-test" and "authorization" not in request.headers  # the OpenAI key never goes to Google
     body = json.loads(request.content)
     assert body["generationConfig"]["responseMimeType"] == "application/json"
