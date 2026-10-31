@@ -206,7 +206,7 @@ def run_analysis(handler, tmp_path) -> tuple[PlanAnalysis | None, int]:
         calls["n"] += 1
         return handler(request, calls["n"])
 
-    settings = Settings(openai_api_key="sk-test", plan_vision_model="test-model", storage_dir=tmp_path)
+    settings = Settings(openai_api_key="sk-test", plan_vision_model="test-model", storage_dir=tmp_path, plan_vision_cache=True)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(counted)) as client:

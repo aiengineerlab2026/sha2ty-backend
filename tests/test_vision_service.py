@@ -194,7 +194,7 @@ def fake_db():
 
 def db_settings(tmp_path, model="gemini-3.5-flash") -> Settings:
     return Settings(gemini_api_key="gem-test", openai_api_key="sk-test", plan_vision_model=model, storage_dir=tmp_path,
-                    supabase_url="https://db.test", supabase_service_role_key="service")
+                    supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_cache=True)
 
 
 @pytest.mark.parametrize("model", list(vision.MODELS))
@@ -250,3 +250,26 @@ def test_missing_cache_table_never_blocks_the_model(tmp_path):
             return await product_details.extract_product_details(b"photo", "image/png", "furniture", "", db_settings(tmp_path), client, "gemini-3.5-flash", db=db)
 
     assert asyncio.run(go()).object_type == "three-seat sofa"
+
+
+def test_floor_plans_call_the_model_on_every_upload_by_default(tmp_path):
+    """PLAN_VISION_CACHE is off by default: the same plan uploaded twice is read twice, nothing is stored."""
+    from app.services.plan.vision_analysis import analyze_plan
+
+    answer = json.loads(open("tests/fixtures/open_plan_apartment.analysis.json").read())
+    good = {k: answer[k] for k in ("rooms", "walls", "doors", "windows", "furniture", "scale_references", "warnings")}
+    calls = []
+    rows, db = fake_db()
+    s = Settings(gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
+    assert not s.plan_vision_cache
+
+    def provider(request):
+        calls.append(request)
+        return provider_reply("gemini-3.5-flash", good)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            return await analyze_plan(b"plan", "image/png", (100, 50), s, client, "gemini-3.5-flash", db=db)
+
+    assert not asyncio.run(go()).cached and not asyncio.run(go()).cached
+    assert len(calls) == 2 and not rows and not (tmp_path / "plan-analysis").exists()

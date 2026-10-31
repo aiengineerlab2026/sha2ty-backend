@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     plan_vision_model: str = "gemini-3.5-flash"
     gemini_api_key: SecretStr = SecretStr("")
     openai_plan_timeout_seconds: float = 120.0
+    # Floor plans: off = every upload is read by the vision model again (no DB / disk answer cache).
+    # Vendor product photos are always cached.
+    plan_vision_cache: bool = False
     openai_plan_expected_seconds: float = 25.0  # typical answer time, for the progress percentage
     # Match: OpenAI image editing with two reference images (POST /v1/images/edits).
     openai_image_model: str = "gpt-image-2"

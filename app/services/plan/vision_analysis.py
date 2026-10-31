@@ -62,6 +62,8 @@ async def analyze_plan(
     if not vision.configured(settings, model):
         return None
     key = cache_key(image, model)
+    if not settings.plan_vision_cache:
+        db = None  # PLAN_VISION_CACHE off: one model call per upload, nothing read or stored
     stored = await vision.cache_get(settings, db, key)
     if stored:
         try:
@@ -70,7 +72,7 @@ async def analyze_plan(
         except ValidationError:
             pass  # an older shape: ask again and overwrite
     path = Path(settings.storage_dir) / "plan-analysis" / f"{key}.json"
-    if path.exists():
+    if settings.plan_vision_cache and path.exists():
         try:
             return PlanAnalysis.model_validate_json(path.read_text()).model_copy(update={"cached": True})
         except ValidationError:
@@ -89,6 +91,8 @@ async def analyze_plan(
         return None
     analysis = PlanAnalysis(**plan.model_dump(), image=ImageSize(width=size[0], height=size[1]), model=model, schema_version=SCHEMA_VERSION, issues=issues)
     await vision.cache_put(settings, db, key, "floor_plan", model, analysis.model_dump(mode="json"))
+    if not settings.plan_vision_cache:
+        return analysis
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(analysis.model_dump_json())
