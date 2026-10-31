@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
 import math
+import re
 from functools import partial
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -19,6 +21,7 @@ from app.core.config import get_settings
 from app.services.auth import user_id_from_bearer
 from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
+from app.services.plan.cad_exporter import export_plan_dxf
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, rectangular_room, room_extents
 from app.services.plan.image_processor import plan_from_image, plan_from_state
 from app.services.plan.vision_analysis import analyze_plan
@@ -119,6 +122,29 @@ async def from_dimensions(body: DimensionsBody) -> dict[str, Any]:
     return payload
 
 
+@router.post("/convert-to-3d")
+async def convert_to_3d(
+    request: Request,
+    image: Annotated[UploadFile, File()],
+    height: Annotated[float, Form()] = DEFAULT_HEIGHT,
+    wall_thickness: Annotated[float, Form()] = DEFAULT_THICKNESS,
+    debug: Annotated[str, Form()] = "false",
+) -> StreamingResponse:
+    """Computer vision only (OpenCV + OCR + geometry), no LLM: the plan plus GLB and DXF download URLs."""
+    return await _convert(request, image, height, wall_thickness, None, None, debug, vision=False)
+
+
+@router.get("/files/{name}")
+async def converted_file(name: str) -> FileResponse:
+    if not re.fullmatch(r"[0-9a-f]{24}\.(glb|dxf)", name):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.")
+    path = get_settings().storage_dir / "plan-exports" / name
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.")
+    media = "model/gltf-binary" if name.endswith(".glb") else "image/vnd.dxf"
+    return FileResponse(path, media_type=media, filename=f"floor-plan{path.suffix}")
+
+
 @router.post("/from-image")
 async def from_image(
     request: Request,
@@ -129,6 +155,10 @@ async def from_image(
     depth: Annotated[float | None, Form()] = None,
     debug: Annotated[str, Form()] = "false",
 ) -> StreamingResponse:
+    return await _convert(request, image, height, wall_thickness, width, depth, debug, vision=True)
+
+
+async def _convert(request: Request, image: UploadFile, height, wall_thickness, width, depth, debug, vision: bool) -> StreamingResponse:
     raw = await image.read()
     if len(raw) > get_settings().max_image_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
@@ -156,7 +186,7 @@ async def from_image(
         stages are reported by the conversion as it reaches them.
         """
         yield json.dumps({"stage": "Analyzing", "progress": 2}) + "\n"
-        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.openai_http))
+        task = asyncio.create_task(analyze_plan(raw, mime, size, settings, request.app.state.openai_http) if vision else asyncio.sleep(0))
         started = loop.time()
         while not task.done():
             await asyncio.wait({task}, timeout=1.0)
@@ -187,11 +217,13 @@ async def from_image(
             logger.exception("Floor plan conversion failed")
             yield json.dumps({"error": f"Could not convert this floor plan ({exc}).", "status": 500}) + "\n"
             return
-        if analysis is None and settings.openai_plan_model and settings.astra_configured:
+        if vision and analysis is None and settings.openai_plan_model and settings.astra_configured:
             payload["warnings"] = ["The vision model was unavailable, so this plan was read with OpenCV only.", *payload["warnings"]]
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}
         logger.info("Plan 3D extents %.2f × %.2f × %.2f m, %d walls, %d floors, %d fixtures", w, d, h, len(payload["walls"]), len(payload["zones"]), len(payload.get("fixtures") or []))
+        if not vision and payload["walls"]:
+            payload.update(await run_in_threadpool(_write_exports, raw, payload))
         yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -316,6 +348,16 @@ async def convert_cad(
     cdn: Cdn = request.app.state.cdn
     url = cdn.upload(f"{user_id}/converted/{uuid4().hex}.glb", glb, "model/gltf-binary")
     return {"glb_url": url, "via": how}
+
+
+def _write_exports(raw: bytes, payload: dict[str, Any]) -> dict[str, str]:
+    """GLB + DXF next to each other, named by the upload's hash (same image → same files)."""
+    folder = get_settings().storage_dir / "plan-exports"
+    folder.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(raw).hexdigest()[:24]
+    (folder / f"{key}.glb").write_bytes(build_room_glb(payload))
+    (folder / f"{key}.dxf").write_bytes(export_plan_dxf(payload))
+    return {"glb_url": f"/api/plans/files/{key}.glb", "dxf_url": f"/api/plans/files/{key}.dxf"}
 
 
 def _reject_invalid(body: PlanSaveBody) -> None:

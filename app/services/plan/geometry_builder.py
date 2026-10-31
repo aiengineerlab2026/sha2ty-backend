@@ -8,8 +8,9 @@ from uuid import uuid4
 
 import numpy as np
 import trimesh
+from shapely.geometry import Polygon
 
-DEFAULT_HEIGHT = 2.7
+DEFAULT_HEIGHT = 2.8
 DEFAULT_THICKNESS = 0.15
 
 
@@ -92,6 +93,9 @@ def geometry_from_plan(
             "label_point": m(z["label_point"]),
             "boundary": z["boundary"],
             "dimensions": _dims(z, s),
+            "area_m2": round(Polygon(z["polygon"]).area * s * s, 2),
+            # printed = read off the plan by OCR; measured = drawn size × the estimated scale
+            "dimension_source": "printed" if z.get("dims_m") else "measured",
             "printed": z.get("dims_text"),
             "confidence": z.get("confidence"),
         }

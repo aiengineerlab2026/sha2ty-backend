@@ -159,6 +159,7 @@ def plan_from_state(
     else:
         straight = _decode_mask(state.get("straight_lines"), shape)
         seg = segment(shape, walls, openings, thickness, labels, (straight, straight) if straight is not None else None, state.get("zone_lines"))
+        state = {**state, "openings_px": [o.as_dict(i) for i, o in enumerate(openings)]}  # balcony windows became doors
     if image is not None and "scale_refs" not in state:
         # Object references and fixtures need the drawing: measured once on upload, carried in the state.
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

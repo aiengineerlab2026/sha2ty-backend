@@ -1,4 +1,4 @@
-"""Regression: vision-LLM analysis → OpenCV refinement → 2D layout → 3D/GLB.
+"""Regression: floor plan image → 2D layout → 3D/GLB, with OpenCV + OCR alone and with vision-LLM guidance.
 
 The plan (tests/fixtures/open_plan_apartment.png, drawn by make_open_plan.py) has the layout that used
 to collapse into one region: balcony left, open living + kitchen, bathroom upper-right, hallway
@@ -29,14 +29,23 @@ from app.services.plan.vision_analysis import analyze_plan, validate_and_correct
 
 FIXTURES = Path(__file__).parent / "fixtures"
 IMAGE = FIXTURES / "open_plan_apartment.png"
-ANSWERS = ["open_plan_apartment.analysis.json", "open_plan_apartment.recorded-analysis.json"]
+ANSWERS = [None, "open_plan_apartment.analysis.json", "open_plan_apartment.recorded-analysis.json"]  # None: no LLM
+# What the OCR engine read off the plan, recorded (deterministic: no OCR engine needed in CI).
+LABELS = [OcrBox(**row) for row in json.loads((FIXTURES / "open_plan_apartment.ocr.json").read_text())]
 
 
 def no_ocr(_image):
     return [], []
 
 
-def convert(answer: str, monkeypatch) -> dict:
+def label_ocr(_image):
+    return list(LABELS), []
+
+
+def convert(answer: str | None, monkeypatch) -> dict:
+    if answer is None:  # computer vision only: OCR reads the names
+        monkeypatch.setattr(image_processor, "run_ocr", label_ocr)
+        return image_processor.plan_from_image(IMAGE.read_bytes())
     monkeypatch.setattr(image_processor, "run_ocr", no_ocr)  # names must come from the model
     analysis = PlanAnalysis.model_validate_json((FIXTURES / answer).read_text())
     return image_processor.plan_from_image(IMAGE.read_bytes(), analysis=analysis)
@@ -46,17 +55,16 @@ def centre(room: dict) -> Point:
     return Polygon(room["polygon"]).centroid
 
 
-@pytest.fixture(params=ANSWERS)
+@pytest.fixture(params=ANSWERS, ids=lambda a: a or "opencv-only")
 def plan(request, monkeypatch):
     return convert(request.param, monkeypatch)
 
 
 def test_all_functional_spaces_are_built_where_the_drawing_has_them(plan):
-    assert plan["geometry_source"] == "vision"
     assert plan["validation"]["ok"], plan["validation"]["errors"]
-    rooms = {r["kind"]: r for r in plan["rooms"]}
+    rooms = {z["kind"]: z for z in plan["zones"]}  # functional spaces (an open plan is one room, several zones)
     assert {"living", "kitchen", "bedroom", "bathroom", "hall", "patio"} <= rooms.keys()
-    assert not any("closet" in r["name"].lower() for r in plan["rooms"])  # none on the drawing
+    assert not any("closet" in z["name"].lower() for z in plan["zones"])  # none on the drawing
     xs = [x for r in plan["rooms"] for x, _ in r["polygon"]]
     zs = [z for r in plan["rooms"] for _, z in r["polygon"]]
     mid_x, mid_z = (min(xs) + max(xs)) / 2, (min(zs) + max(zs)) / 2
@@ -70,12 +78,16 @@ def test_all_functional_spaces_are_built_where_the_drawing_has_them(plan):
 
 
 def test_open_plan_and_connectivity(plan):
-    by_id = {r["id"]: r["kind"] for r in plan["rooms"]}
-    via = {frozenset((by_id[e["a"]], by_id[e["b"]])): e["via"] for e in plan["adjacency"]}
-    assert via[frozenset(("living", "kitchen"))] == "opening"  # no wall between them
-    assert via[frozenset(("hall", "bedroom"))] == "door"
-    assert via[frozenset(("hall", "bathroom"))] == "door"
-    assert frozenset(("living", "patio")) in via
+    room_of = {z["kind"]: z["room_id"] for z in plan["zones"]}
+    via = {frozenset((e["a"], e["b"])): e["via"] for e in plan["adjacency"]}
+
+    def link(a, b):
+        return "same room" if room_of[a] == room_of[b] else via.get(frozenset((room_of[a], room_of[b])))
+
+    assert link("living", "kitchen") in ("same room", "opening")  # no wall between them
+    assert link("hall", "bedroom") == "door"
+    assert link("hall", "bathroom") == "door"
+    assert link("living", "patio") in ("door", "opening")  # the balcony slider
 
 
 def test_doors_are_openings_and_furniture_is_not_wall(plan):
@@ -83,9 +95,10 @@ def test_doors_are_openings_and_furniture_is_not_wall(plan):
     for door in plan["doors"]:
         mid = LineString([door["start"], door["end"]]).interpolate(0.5, normalized=True)
         assert all(LineString([w["start"], w["end"]]).distance(mid) > w["thickness"] / 2 for w in full), "a door is filled with wall"
-    bed = next(f for f in plan["fixtures"] if f["type"] == "bed")
-    w, d, _ = bed["size"]
-    assert 1.0 < min(w, d) < 2.2 and 1.4 < max(w, d) < 2.6  # bed-sized at the estimated scale (approximate)
+    if plan["analysis"]:  # furniture boxes come from the model; OpenCV alone builds none
+        bed = next(f for f in plan["fixtures"] if f["type"] == "bed")
+        w, d, _ = bed["size"]
+        assert 1.0 < min(w, d) < 2.2 and 1.4 < max(w, d) < 2.6  # bed-sized at the estimated scale (approximate)
     walls = [LineString([w["start"], w["end"]]) for w in full]
     footprint = Polygon(plan["exterior"]).buffer(-0.3)
     for f in plan["fixtures"]:
@@ -99,7 +112,7 @@ def test_glb_has_named_meshes_for_every_space(plan):
     for slug in ("living_room", "kitchen", "bedroom", "bathroom", "hall", "balcony"):
         assert f"room_{slug}_1_floor" in names
     assert any(n.startswith("wall_bedroom_1_") for n in names)
-    assert "furniture_bedroom_1_bed" in names
+    assert "furniture_bedroom_1_bed" in names or not plan["analysis"]
     assert any(n.startswith("door_") for n in names) and any(n.startswith("window_") for n in names)
     width, _, depth = scene.extents
     assert 7 < width < 14 and 4 < depth < 8  # a whole flat, not one rectangle
@@ -109,14 +122,49 @@ def test_scale_is_estimated_and_labelled(plan):
     scale = plan["scale"]
     assert scale["estimated"] and scale["confidence"] < 0.8
     assert "Dimensions automatically estimated from your floor plan. Measurements are approximate." in plan["warnings"]
-    assert plan["analysis"]["scale"]["pixels_per_meter"] > 0  # written back for later editing
+    assert not plan["analysis"] or plan["analysis"]["scale"]["pixels_per_meter"] > 0  # written back for later editing
 
 
-def test_opencv_alone_reports_failure_instead_of_a_fake_room(monkeypatch):
+def test_without_labels_rooms_are_found_but_never_given_invented_names(monkeypatch):
     monkeypatch.setattr(image_processor, "run_ocr", no_ocr)
     payload = image_processor.plan_from_image(IMAGE.read_bytes())
-    assert not payload["validation"]["ok"]  # diagnosed, not presented as a finished apartment
-    assert not any(r["name"] == "Closet" for r in payload["rooms"])
+    assert payload["validation"]["ok"] and len(payload["rooms"]) == 3  # open plan, bathroom, bedroom; an unlabelled railing is not claimed as a balcony
+    assert {z["name"] for z in payload["zones"]} == {"Room"}  # no "Closet", no guessed bedroom
+
+
+def test_openings_are_classified_from_their_symbols(plan):
+    kinds = sorted(o["kind"] for o in plan["openings"] if o.get("evidence") != "opens onto the balcony")
+    assert kinds.count("window") == 3  # kitchen, bathroom, bedroom: double lines, furniture against two of them
+    assert kinds.count("door") >= 3  # bathroom, bedroom, entrance (swing arcs)
+
+
+def test_convert_to_3d_never_calls_a_model_and_returns_glb_and_dxf(monkeypatch, tmp_path):
+    import ezdxf
+    from fastapi.testclient import TestClient
+
+    from app.api import plans
+    from app.main import app
+
+    async def forbidden(*_args):
+        raise AssertionError("convert-to-3d must not call the vision model")
+
+    monkeypatch.setattr(plans, "analyze_plan", forbidden)
+    monkeypatch.setattr(image_processor, "run_ocr", label_ocr)
+    monkeypatch.setattr(plans, "get_settings", lambda: get_settings().model_copy(update={"storage_dir": tmp_path}))
+    with TestClient(app) as client:
+        response = client.post("/api/plans/convert-to-3d", files={"image": ("plan.png", IMAGE.read_bytes(), "image/png")})
+        plan = json.loads(response.text.splitlines()[-1])["plan"]
+        glb, dxf = client.get(plan["glb_url"]), client.get(plan["dxf_url"])
+        assert client.get("/api/plans/files/..%2F..%2Fsecret.glb").status_code == 404
+    assert plan["validation"]["ok"] and plan["height"] == 2.8  # default wall height
+    assert {z["name"] for z in plan["zones"]} == {"Kitchen", "Living Room", "Hall", "Bathroom", "Bedroom", "Balcony"}
+    assert all(z["dimension_source"] == "measured" and z["area_m2"] > 0 for z in plan["zones"])  # no printed sizes on this plan
+    scene = trimesh.load(io.BytesIO(glb.content), file_type="glb")
+    assert "room_bedroom_1_floor" in scene.graph.nodes_geometry
+    doc = ezdxf.read(io.StringIO(dxf.text))
+    layers = {e.dxf.layer for e in doc.modelspace()}
+    assert {"ROOMS", "WALLS", "DOORS", "WINDOWS", "DIMENSIONS"} <= layers
+    assert len(doc.modelspace().query('LWPOLYLINE[layer=="ROOMS"]')) == 6
 
 
 def test_good_opencv_plans_keep_opencv_geometry(monkeypatch):
@@ -227,4 +275,4 @@ def test_upload_streams_progress_then_the_full_plan(monkeypatch):
     percents = [line["progress"] for line in lines]
     assert percents == sorted(percents) and percents[-1] == 100
     plan = lines[-1]["plan"]
-    assert plan["validation"]["ok"] and plan["height"] == 2.7 and len(plan["rooms"]) == 6
+    assert plan["validation"]["ok"] and plan["height"] == 2.7 and len(plan["zones"]) == 6

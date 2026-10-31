@@ -78,8 +78,8 @@ def door_references(openings: list, analysis: PlanAnalysis | None, size: tuple[i
     reach = max(0.03 * float(np.hypot(*size)), 2 * thickness)
     refs = []
     for o in openings:
-        if o.kind != "door" or o.confidence < 0.6:
-            continue
+        if o.kind != "door" or o.confidence < 0.6 or o.evidence == "opens onto the balcony":
+            continue  # a balcony slider has no standard width
         width = float(np.hypot(o.end[0] - o.start[0], o.end[1] - o.start[1]))
         if width <= 4:
             continue

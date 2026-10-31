@@ -11,6 +11,7 @@ numpy>=2.1
 opencv-python-headless>=4.10
 shapely>=2.0
 trimesh>=4.5
+ezdxf>=1.3
 pillow>=11
 pytest>=8.0
 # OCR: macOS Vision via pyobjc (no PaddleOCR wheel on Python 3.14). Elsewhere install one of

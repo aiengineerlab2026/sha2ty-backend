@@ -199,17 +199,19 @@ def _classify_gap(a, b, axis, t, thickness, gap, evidence, ends, seg, door_only:
     dx, dy = axis
     px, py = -dy, dx  # perpendicular
     # Door swing: a quarter arc hinged at either jamb, on either side, sweeping a clear quarter
-    # disc. The leaf is often shorter than the clear gap (jamb/stop), so search radius 0.6–1.05 gap.
+    # disc. The leaf is often shorter than the clear gap (jamb/stop), so search radius 0.6–1.2 gap.
     if gap <= 10 * thickness:
         near = evidence["near_arc"]
         best = 0.0
-        for r in np.arange(0.6, 1.06, 0.05) * gap:
+        for r in np.arange(0.6, 1.21, 0.05) * gap:  # leaf up to 1.2× the gap: wall end caps shorten the measured gap
             for side in (1, -1):
                 perp = (px * side, py * side)
-                for hinge, toward in ((a, (dx, dy)), (b, (-dx, -dy))):
-                    arc = _arc_cover(near, hinge, toward, perp, r)
-                    if arc > best and _swing_clear(evidence, hinge, toward, perp, r):
-                        best = arc
+                for jamb, toward in ((a, (dx, dy)), (b, (-dx, -dy))):
+                    for back in (0.0, t / 2):  # hinge at the jamb face, or on the wall's end cap centre
+                        hinge = (jamb[0] - toward[0] * back, jamb[1] - toward[1] * back)
+                        arc = _arc_cover(near, hinge, toward, perp, r + back)
+                        if arc > best and _swing_clear(evidence, hinge, toward, perp, r + back):
+                            best = arc
                 # Double door: two half-radius arcs from both jambs, same side.
                 left = _arc_cover(near, a, (dx, dy), perp, r / 2)
                 right = _arc_cover(near, b, (-dx, -dy), perp, r / 2)
@@ -226,7 +228,8 @@ def _classify_gap(a, b, axis, t, thickness, gap, evidence, ends, seg, door_only:
     lines = evidence["dark_h"] if dx else evidence["dark_v"]
     band = _band_cover(lines, a, b, t * 0.5)
     if band >= 0.75:
-        beside = max(
+        # Tiling repeats on both sides of the wall; a bed or bathtub pushed against a window is on one.
+        beside = min(
             _band_cover(lines, _offset(a, px, py, s * t * 1.6), _offset(b, px, py, s * t * 1.6), t * 0.5) for s in (1, -1)
         )
         if beside < band * 0.5 and not _fixture_edge(evidence, a, b, t, horizontal=bool(dx)):
@@ -235,11 +238,11 @@ def _classify_gap(a, b, axis, t, thickness, gap, evidence, ends, seg, door_only:
             n = _parallel_lines(lines, a, b, t, horizontal=bool(dx))
             if n >= 2:
                 return "window", f"{n} parallel lines {band:.0%}", 0.8
-            if _exterior_side(evidence["wall_mask"], a, b, (px, py)):
+            if _exterior_side(evidence, a, b, (px, py)):
                 return "window", f"railing line on exterior {band:.0%}", 0.65
     # The building envelope is never open: a door-to-window-sized gap whose outer side reaches the
     # image edge is closed as an exterior opening even without a readable symbol.
-    if gap <= 15 * thickness and _exterior_side(evidence["wall_mask"], a, b, (px, py)):
+    if gap <= 15 * thickness and _exterior_side(evidence, a, b, (px, py)):
         return "window", "gap in exterior wall (symbol unclear)", 0.55
     # Collinear wall end of the same thickness across a door-sized gap: likely opening, no symbol.
     if gap <= 7 * thickness:
@@ -330,15 +333,16 @@ def _parallel_lines(lines: np.ndarray, a, b, t: float, horizontal: bool) -> int:
     return len(_runs(np.where(profile >= 0.7)[0]))
 
 
-def _exterior_side(wall_mask: np.ndarray, a, b, perp) -> bool:
-    """Walking away from the gap on one side reaches the image edge without crossing a wall."""
+def _exterior_side(evidence: dict, a, b, perp) -> bool:
+    """Walking away from the gap reaches the image edge without crossing a wall on exactly one side.
+    Both sides open means the rays escaped through other doorways: an interior passage, not the envelope."""
+    wall_mask = evidence["wall_mask"]
     h, w = wall_mask.shape
-    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-    for side in (1, -1):
+
+    def escapes(side) -> bool:
         for frac in (0.25, 0.5, 0.75):
             x = a[0] + (b[0] - a[0]) * frac
             y = a[1] + (b[1] - a[1]) * frac
-            blocked = False
             step = 0
             while True:
                 step += 1
@@ -347,13 +351,10 @@ def _exterior_side(wall_mask: np.ndarray, a, b, perp) -> bool:
                 if not (0 <= xi < w and 0 <= yi < h):
                     break
                 if step > 3 and wall_mask[yi, xi]:
-                    blocked = True
-                    break
-            if blocked:
-                break
-        else:
-            return True
-    return False
+                    return False
+        return True
+
+    return escapes(1) != escapes(-1)
 
 
 def _arc_cover(near_arc: np.ndarray, hinge, along, perp, radius: float) -> float:
