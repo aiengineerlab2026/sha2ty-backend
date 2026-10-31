@@ -186,10 +186,14 @@ def parse_dimension_pair(text: str) -> tuple[float, float] | None:
 def parse_room_label(text: str) -> tuple[str, str] | None:
     lower = re.sub(r"[^a-z ]", " ", normalize(text).lower())
     lower = re.sub(r"\s+", " ", lower).strip()
-    for needle, name, kind in ROOM_NAMES:
-        if re.search(rf"\b{needle}", lower):
-            return name, kind
-    return None
+    hits = [(name, kind) for needle, name, kind in ROOM_NAMES if re.search(rf"\b{needle}", lower)]
+    if not hits:
+        return None
+    kinds = list(dict.fromkeys(k for _, k in hits))
+    words = [w for w in lower.split() if len(w) > 2 and w not in {"by", "ft", "feet", "inch", "sqm"}]  # drop "x", units
+    if len(kinds) > 1 and len(words) <= 6:  # "Living Room and Kitchen": one open space, its own name
+        return " ".join(words).title().replace(" And ", " and "), kinds[0]
+    return hits[0]
 
 
 # ── OCR engines ────────────────────────────────────────────────────────────────────────────
@@ -466,7 +470,9 @@ def _is_title(b: OcrBox, boxes: list[OcrBox]) -> bool:
     if len(heights) < 3:
         return False
     median = heights[len(heights) // 2]
-    return b.height > median * 1.5 and len(b.text.split()) >= 3
+    # Larger text alone is not enough: "Living Room and Kitchen" is a room label set a bit bigger.
+    titled = re.search(r"\b(plan|floor|apartment|flat|layout|level|unit|house|residence)\b", b.text, re.IGNORECASE)
+    return b.height > median * 1.5 and len(b.text.split()) >= 3 and bool(titled)
 
 
 def measurements_from_boxes(boxes: list[OcrBox], warnings: list[str] | None = None):

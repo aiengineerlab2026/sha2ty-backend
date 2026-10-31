@@ -122,7 +122,7 @@ async def _post(payload: dict, settings: Settings, client: httpx.AsyncClient) ->
             if response.status_code < 400:
                 return response.json()
             logger.warning("Plan analysis refused: %s", response.text[:300])
-            if (response.status_code != 429 and response.status_code < 500) or "insufficient_quota" in response.text:
+            if (response.status_code != 429 and response.status_code < 500) or any(c in response.text for c in ("insufficient_quota", "credit_balance_exhausted")):
                 return None  # a bad request, or no credits left, does not get better by repeating it
         if attempt < RETRIES:
             await asyncio.sleep(RETRY_DELAY * 2**attempt)

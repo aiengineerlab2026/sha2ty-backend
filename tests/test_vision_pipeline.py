@@ -138,17 +138,17 @@ def test_openings_are_classified_from_their_symbols(plan):
     assert kinds.count("door") >= 3  # bathroom, bedroom, entrance (swing arcs)
 
 
-def test_convert_to_3d_never_calls_a_model_and_returns_glb_and_dxf(monkeypatch, tmp_path):
+def test_convert_to_3d_falls_back_to_opencv_and_returns_glb_and_dxf(monkeypatch, tmp_path):
     import ezdxf
     from fastapi.testclient import TestClient
 
     from app.api import plans
     from app.main import app
 
-    async def forbidden(*_args):
-        raise AssertionError("convert-to-3d must not call the vision model")
+    async def unavailable(*_args):
+        return None  # no key, no credits, timeout: the model never blocks a conversion
 
-    monkeypatch.setattr(plans, "analyze_plan", forbidden)
+    monkeypatch.setattr(plans, "analyze_plan", unavailable)
     monkeypatch.setattr(image_processor, "run_ocr", label_ocr)
     monkeypatch.setattr(plans, "get_settings", lambda: get_settings().model_copy(update={"storage_dir": tmp_path}))
     with TestClient(app) as client:
@@ -276,3 +276,57 @@ def test_upload_streams_progress_then_the_full_plan(monkeypatch):
     assert percents == sorted(percents) and percents[-1] == 100
     plan = lines[-1]["plan"]
     assert plan["validation"]["ok"] and plan["height"] == 2.7 and len(plan["zones"]) == 6
+
+
+# ── The user's plan: grey room fills, thin interior walls, angled door leaves, no dimensions ───────
+# tests/fixtures/grey_fill_apartment.jpg used to come out as one solid block: the grey floor fill read
+# as wall ink, so one "wall" 7.6 m thick covered the flat.
+
+GREY = FIXTURES / "grey_fill_apartment.jpg"
+GREY_OCR = [OcrBox(**row) for row in json.loads((FIXTURES / "grey_fill_apartment.ocr.json").read_text())]
+
+
+@pytest.fixture(scope="module")
+def grey():
+    mp = pytest.MonkeyPatch()
+    mp.setattr(image_processor, "run_ocr", lambda _i: (list(GREY_OCR), []))
+    try:
+        yield image_processor.plan_from_image(GREY.read_bytes())
+    finally:
+        mp.undo()
+
+
+def test_grey_fill_plan_has_its_five_spaces_in_place(grey):
+    assert grey["validation"]["ok"], grey["validation"]["errors"]
+    zones = {z["kind"]: z for z in grey["zones"]}
+    assert {"living", "bedroom", "bathroom", "hall", "patio"} <= zones.keys()
+    assert zones["living"]["name"] == "Living Room and Kitchen"  # one open space, as labelled
+    living, bed, bath, hall, balcony = (centre(zones[k]) for k in ("living", "bedroom", "bathroom", "hall", "patio"))
+    assert balcony.x < living.x < hall.x and bath.y < hall.y < bed.y and bed.x > living.x
+    assert not Polygon(grey["exterior"]).contains(balcony)  # outside the apartment walls
+    assert zones["living"]["room_id"] == zones["hall"]["room_id"]  # the hallway opens onto the living area
+    assert len({zones[k]["room_id"] for k in ("living", "bedroom", "bathroom", "patio")}) == 4  # own walls
+
+
+def test_grey_fill_plan_walls_doors_and_windows(grey):
+    assert max(w["thickness"] for w in grey["walls"]) < 0.4  # no fill extruded as a slab of "wall"
+    room_of = {z["kind"]: z["room_id"] for z in grey["zones"]}
+    via = {frozenset((e["a"], e["b"])): e["via"] for e in grey["adjacency"]}
+    assert via[frozenset((room_of["living"], room_of["bathroom"]))] == "door"
+    assert via[frozenset((room_of["living"], room_of["bedroom"]))] == "door"
+    assert via[frozenset((room_of["living"], room_of["patio"]))] == "door"  # the balcony doors
+    assert sum(o["kind"] == "window" for o in grey["openings"]) >= 4
+
+
+def test_grey_fill_glb_is_rooms_and_walls_not_a_block(grey):
+    scene = trimesh.load(io.BytesIO(build_room_glb(grey)), file_type="glb")
+    names = list(scene.graph.nodes_geometry)
+    floors = [n for n in names if n.startswith("room_") and n.endswith("_floor")]
+    assert len(floors) == 5 and not any("ceiling" in n for n in names)
+    assert sum(n.startswith("wall_") for n in names) >= 10 and any(n.startswith("balcony_") for n in names)
+    slab = scene.geometry[scene.graph["floor_slab"][1]]
+    assert slab.bounds[1][1] <= 0.0  # under the room floors, never covering them
+    for n in names:
+        if n.startswith("wall_"):
+            w, _, d = scene.geometry[scene.graph[n][1]].extents
+            assert min(w, d) < 0.5, n  # every wall is a thin vertical body

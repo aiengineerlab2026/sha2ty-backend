@@ -75,7 +75,7 @@ class WallDetection:
 
 def detect_walls(image_bgr: np.ndarray, text_boxes: list[tuple[float, float, float, float]] | None = None) -> WallDetection:
     warnings: list[str] = []
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    gray = _flatten_fills(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY))
     text = _text_mask(gray.shape, text_boxes or [])
     ink = _all_ink(gray)
     dark = _dark_ink(gray)
@@ -160,8 +160,8 @@ def find_openings(walls: list[WallSegment], wall_mask: np.ndarray, evidence: dic
     near_arc = cv2.dilate(evidence["curves"].astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
     count, dark_labels, dark_stats, _ = cv2.connectedComponentsWithStats(evidence["dark_thin"].astype(np.uint8), connectivity=8)
     dark_h, dark_v = _straight_lines(evidence["dark_thin"], int(thickness * 3))
-    evidence = {**evidence, "wall_mask": wall_mask, "near_arc": near_arc, "dark_labels": dark_labels, "dark_stats": dark_stats, "dark_h": dark_h, "dark_v": dark_v}
     max_gap = int(thickness * 40)
+    evidence = {**evidence, "wall_mask": wall_mask, "outside": _outside(wall_mask, max_gap), "probe": thickness * 1.5 + 2, "near_arc": near_arc, "dark_labels": dark_labels, "dark_stats": dark_stats, "dark_h": dark_h, "dark_v": dark_v}
     found: list[Opening] = []
     ends = _endpoints(walls)
     for (x, y), (dx, dy), seg in ends:
@@ -242,7 +242,9 @@ def _classify_gap(a, b, axis, t, thickness, gap, evidence, ends, seg, door_only:
                 return "window", f"railing line on exterior {band:.0%}", 0.65
     # The building envelope is never open: a door-to-window-sized gap whose outer side reaches the
     # image edge is closed as an exterior opening even without a readable symbol.
-    if gap <= 15 * thickness and _exterior_side(evidence, a, b, (px, py)):
+    # Wider (to 30 T, a glazed balcony front of door + window) only with window lines over part of it.
+    glazed = gap <= 30 * thickness and _band_cover(evidence["straight_h"] if dx else evidence["straight_v"], a, b, t * 0.5) >= 0.3
+    if (gap <= 15 * thickness or glazed) and _exterior_side(evidence, a, b, (px, py)):  # glazed balcony fronts run 3–4 m
         return "window", "gap in exterior wall (symbol unclear)", 0.55
     # Collinear wall end of the same thickness across a door-sized gap: likely opening, no symbol.
     if gap <= 7 * thickness:
@@ -333,11 +335,25 @@ def _parallel_lines(lines: np.ndarray, a, b, t: float, horizontal: bool) -> int:
     return len(_runs(np.where(profile >= 0.7)[0]))
 
 
+def _outside(wall_mask: np.ndarray, k: int) -> np.ndarray:
+    """Free space outside the envelope once every gap up to `k` px is bridged (padded: no border fill)."""
+    closed = cv2.morphologyEx(np.pad(wall_mask.astype(np.uint8), k), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k | 1, k | 1)))
+    canvas = (closed == 0).astype(np.uint8)
+    cv2.floodFill(canvas, None, (0, 0), 2)
+    return canvas[k:-k, k:-k] == 2
+
+
 def _exterior_side(evidence: dict, a, b, perp) -> bool:
-    """Walking away from the gap reaches the image edge without crossing a wall on exactly one side.
-    Both sides open means the rays escaped through other doorways: an interior passage, not the envelope."""
-    wall_mask = evidence["wall_mask"]
+    """The gap is in the envelope when walking away from it reaches the image edge on exactly one side
+    (both sides open: the rays escaped through other doorways), or when, with every door/window-sized
+    gap bridged, exactly one side lies outside the building (two exterior doors that see each other)."""
+    wall_mask, outside = evidence["wall_mask"], evidence["outside"]
     h, w = wall_mask.shape
+    mx, my, r = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, evidence["probe"]
+
+    def out(side) -> bool:
+        x, y = int(round(mx + perp[0] * side * r)), int(round(my + perp[1] * side * r))
+        return not (0 <= x < w and 0 <= y < h) or bool(outside[y, x])
 
     def escapes(side) -> bool:
         for frac in (0.25, 0.5, 0.75):
@@ -354,7 +370,7 @@ def _exterior_side(evidence: dict, a, b, perp) -> bool:
                     return False
         return True
 
-    return escapes(1) != escapes(-1)
+    return escapes(1) != escapes(-1) or out(1) != out(-1)
 
 
 def _arc_cover(near_arc: np.ndarray, hinge, along, perp, radius: float) -> float:
@@ -475,14 +491,14 @@ def _axis_segments(mask: np.ndarray, orientation: str, thickness: float) -> list
         # A wide component is several parallel walls touching at a junction: split by profile.
         comp = labels[y : y + bh, x : x + bw] == i
         profile = comp.sum(axis=1 if orientation == "h" else 0)
-        for lo, hi in _bands(profile, along * 0.35):
+        for lo, hi in _all_bands(profile, along, thickness):
             t = float(hi - lo)
             if t < thickness * 0.5:
                 continue
             sub = comp[lo:hi, :] if orientation == "h" else comp[:, lo:hi]
             idx = np.where(sub.any(axis=0 if orientation == "h" else 1))[0]
             for a, b in _runs(idx):
-                if b - a < thickness * 1.2:
+                if b - a < max(thickness * 1.2, t * 1.5):  # a wall is longer than it is thick
                     continue
                 if orientation == "h":
                     cy = y + (lo + hi) / 2
@@ -491,6 +507,24 @@ def _axis_segments(mask: np.ndarray, orientation: str, thickness: float) -> list
                     cx = x + (lo + hi) / 2
                     out.append(WallSegment((cx, float(y + a)), (cx, float(y + b)), t, "v"))
     return out
+
+
+def _all_bands(profile: np.ndarray, along: int, thickness: float) -> list[tuple[int, int]]:
+    """Bands of the widest walls first, then again over the rows left: a short wall joined to a long
+    one through a perpendicular wall (bathroom wall → partition → exterior wall) is its own band."""
+    bands = _bands(profile, along * 0.35)
+    rest = profile.astype(float).copy()
+    for _ in range(4):
+        for lo, hi in bands:
+            rest[max(0, lo - 1) : hi + 1] = 0
+        top = rest.max(initial=0)
+        if top < thickness * 1.2:
+            break
+        more = [(lo, hi) for lo, hi in _runs(np.where(rest >= top * 0.35)[0])]
+        if not more:
+            break
+        bands += more
+    return sorted(bands)
 
 
 def _bands(profile: np.ndarray, min_value: float) -> list[tuple[int, int]]:
@@ -563,6 +597,28 @@ def _skew_degrees(walls: list[WallSegment]) -> float | None:
     angles = [np.degrees(np.arctan2(w.end[1] - w.start[1], w.end[0] - w.start[0])) % 90 for w in diag]
     angles = [a if a < 45 else a - 90 for a in angles]
     return float(np.median(angles))
+
+
+def _flatten_fills(gray: np.ndarray) -> np.ndarray:
+    """Plans with grey room fills: every fill would read as ink (one wall mass, one solid 3D block).
+    The local floor tone (median over a window much wider than any wall stroke, so white furniture
+    and dark strokes are both minorities) is lifted to white, so ink means darker than the floor
+    around it. Where paper dominates that window (a fill's outer corner) the median is paper, so
+    large flat areas of each fill tone are also painted white directly; grey wall bodies are thin
+    and do not survive that opening. Plain white-paper plans are returned unchanged."""
+    paper = float(np.percentile(gray, 90))
+    if ((gray > 100) & (gray < paper - 22)).mean() < 0.15:
+        return gray
+    k = max(31, min(gray.shape[:2]) // 10) | 1
+    floor = np.maximum(cv2.medianBlur(gray, k), gray)  # never darker than the pixel itself
+    out = np.clip(255 - (floor.astype(np.int16) - gray), 0, 255).astype(np.uint8)
+    hist = np.convolve(np.bincount(gray.ravel(), minlength=256) / gray.size, np.ones(5), "same")
+    tones = [v for v in range(100, int(paper) - 22) if hist[v] >= 0.02 and hist[v] == hist[max(0, v - 3) : v + 4].max()]
+    open_k = max(15, min(gray.shape[:2]) // 30) | 1  # wider than any wall stroke
+    for v in tones:
+        flat = (np.abs(gray.astype(np.int16) - v) <= 8).astype(np.uint8)
+        out[cv2.morphologyEx(flat, cv2.MORPH_OPEN, np.ones((open_k, open_k), np.uint8)) > 0] = 255
+    return out
 
 
 def _dark_ink(gray: np.ndarray) -> np.ndarray:

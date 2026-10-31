@@ -95,9 +95,10 @@ def segment(
             continue
         rooms.append({"geom": poly, "area_px": int(mask.sum()), "measure_px": _chords(mask), "outdoor": True})
         masks.append(mask)
-        for o in openings:  # a window giving onto the balcony is the balcony door
+        for o in openings:  # a window in the flat's outline giving onto the balcony is the balcony door
             start, end = (o["start"], o["end"]) if isinstance(o, dict) else (o.start, o.end)
-            if _kind(o) == "window" and poly.distance(Point((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)) <= thickness * 1.6:
+            mid = Point((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            if _kind(o) == "window" and poly.distance(mid) <= thickness * 1.6 and footprint_geom is not None and footprint_geom.exterior.distance(mid) <= thickness * 1.6:
                 if isinstance(o, dict):
                     o.update(kind="door", evidence="opens onto the balcony")
                 else:

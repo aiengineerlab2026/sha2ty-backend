@@ -8,9 +8,12 @@ from uuid import uuid4
 
 import numpy as np
 import trimesh
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 DEFAULT_HEIGHT = 2.8
+SLAB = 0.05  # floor slab depth (m), below the room floors
+RAILING_HEIGHT = 1.0  # balcony parapet
+RAILING_THICKNESS = 0.05
 DEFAULT_THICKNESS = 0.15
 
 
@@ -148,6 +151,7 @@ def geometry_from_plan(
                 walls.append(_wall(f"{o['id']}-lintel", a, b, t, height - DOOR_HEIGHT, DOOR_HEIGHT))
         if o["kind"] in ("door", "opening"):
             floors.append(_strip(a, b, t))
+    walls += _railings(zones, [m(p) for p in footprint_px], default_thickness)
 
     return {
         **base,
@@ -182,6 +186,46 @@ def _dims(z: dict, s: float) -> dict[str, Any]:
             a, b = b, a
         out["printed"] = [round(a, 4), round(b, 4)]
     return out
+
+
+def _railings(zones: list[dict], exterior: list[list[float]], thickness: float) -> list[dict[str, Any]]:
+    """A low parapet on every balcony edge away from the building (the drawn railing line)."""
+    if len(exterior) < 3:
+        return []
+    outline = Polygon(exterior).exterior
+    out = []
+    for z in zones:
+        if z["kind"] != "patio" or len(z["polygon"]) < 3:
+            continue
+        ring = list(Polygon(z["polygon"]).buffer(0).simplify(0.05).exterior.coords)
+        for a, b in zip(ring, ring[1:]):
+            mid = Point((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            if np.hypot(b[0] - a[0], b[1] - a[1]) >= 0.2 and outline.distance(mid) > thickness * 2:
+                out.append(_wall(f"railing-{z['id']}-{len(out) + 1}", [round(a[0], 4), round(a[1], 4)], [round(b[0], 4), round(b[1], 4)], RAILING_THICKNESS, RAILING_HEIGHT))
+    return out
+
+
+def _prism(poly, bottom: float, top: float) -> trimesh.Trimesh | None:
+    """Plan polygon (x, z) as a solid from `bottom` to `top` (world y): floor triangulation top and
+    bottom, one quad per outline edge (no extra triangulation dependency)."""
+    cap = _floor_mesh([list(c) for c in poly.exterior.coords[:-1]])
+    if cap is None:
+        return None
+    top_v = cap.vertices.copy()
+    top_v[:, 1] = top
+    bottom_v = cap.vertices.copy()
+    bottom_v[:, 1] = bottom
+    n = len(top_v)
+    verts = [top_v, bottom_v]
+    faces = [cap.faces, cap.faces[:, ::-1] + n]
+    from shapely.geometry.polygon import orient
+
+    ring = list(orient(poly, sign=-1.0).exterior.coords)  # clockwise in (x, z): side quads face outwards
+    for i, ((x0, z0), (x1, z1)) in enumerate(zip(ring, ring[1:])):
+        base = 2 * n + 4 * i
+        verts.append(np.array([[x0, bottom, z0], [x1, bottom, z1], [x1, top, z1], [x0, top, z0]]))
+        faces.append(np.array([[base, base + 1, base + 2], [base, base + 2, base + 3]]))
+    return trimesh.Trimesh(vertices=np.vstack(verts), faces=np.vstack(faces), process=True)
 
 
 def _wall(wid: str, a: list[float], b: list[float], thickness: float, height: float, elevation: float = 0.0) -> dict[str, Any]:
@@ -227,6 +271,7 @@ def build_room_glb(payload: dict[str, Any]) -> bytes:
     window_living_1_sill, furniture_bedroom_1_bed. Floors are coloured by room type (per open-plan zone
     when available); each wall face takes the paint of the room it faces."""
     from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
 
     scene = trimesh.Scene()
     height = float(payload.get("height") or DEFAULT_HEIGHT)
@@ -253,6 +298,17 @@ def build_room_glb(payload: dict[str, Any]) -> bytes:
             paint = (payload.get("floor_paints") or {}).get(area["id"]) or {}
             _paint(floor, paint.get("color") or _finish(area.get("kind"))[0])
             scene.add_geometry(floor, node_name=unique(f"room_{slug}_floor"), geom_name=f"room_{slug}_floor")
+    # Thin structural slab under the flat and its balcony, just below the room floors (never above them).
+    outline = Polygon(payload.get("exterior") or []) if len(payload.get("exterior") or []) >= 3 else None
+    under = [outline.buffer(0)] if outline is not None else []
+    under += [a[1] for a in areas if a[0].get("kind") == "patio"]
+    slab = unary_union(under) if under else None
+    for k, part in enumerate(getattr(slab, "geoms", [slab]) if slab is not None and not slab.is_empty else []):
+        mesh = _prism(part, -SLAB, 0.0)
+        if mesh is None:
+            continue
+        _paint(mesh, FACADE)
+        scene.add_geometry(mesh, node_name=unique("floor_slab"), geom_name=unique(f"floor_slab_mesh_{k}"))
     for i, strip in enumerate(payload.get("floors") or []):
         floor = _floor_mesh(strip)
         if floor is not None:
@@ -282,7 +338,9 @@ def build_room_glb(payload: dict[str, Any]) -> bytes:
         owner = left or right
         slug = owner[2] if owner else "exterior"
         opening_id, _, piece = str(wall["id"]).partition("-")
-        if piece in ("lintel", "sill") and opening_kind.get(opening_id) in ("door", "window"):
+        if opening_id == "railing":
+            name = f"balcony_{slug}_railing"
+        elif piece in ("lintel", "sill") and opening_kind.get(opening_id) in ("door", "window"):
             name = f"{opening_kind[opening_id]}_{slug}_{piece}"
         else:
             c = owner[1].centroid if owner else Point(mx, mz)

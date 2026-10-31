@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Reque
 from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image
+import trimesh
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
@@ -130,8 +131,9 @@ async def convert_to_3d(
     wall_thickness: Annotated[float, Form()] = DEFAULT_THICKNESS,
     debug: Annotated[str, Form()] = "false",
 ) -> StreamingResponse:
-    """Computer vision only (OpenCV + OCR + geometry), no LLM: the plan plus GLB and DXF download URLs."""
-    return await _convert(request, image, height, wall_thickness, None, None, debug, vision=False)
+    """OpenCV + OCR geometry, guided by the vision model's reading (OPENAI_PLAN_MODEL, default gpt-4o-mini)
+    when configured; the plan plus GLB and DXF download URLs."""
+    return await _convert(request, image, height, wall_thickness, None, None, debug, vision=True, exports=True)
 
 
 @router.get("/files/{name}")
@@ -158,7 +160,7 @@ async def from_image(
     return await _convert(request, image, height, wall_thickness, width, depth, debug, vision=True)
 
 
-async def _convert(request: Request, image: UploadFile, height, wall_thickness, width, depth, debug, vision: bool) -> StreamingResponse:
+async def _convert(request: Request, image: UploadFile, height, wall_thickness, width, depth, debug, vision: bool, exports: bool = False) -> StreamingResponse:
     raw = await image.read()
     if len(raw) > get_settings().max_image_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
@@ -222,7 +224,7 @@ async def _convert(request: Request, image: UploadFile, height, wall_thickness, 
         w, d, h = room_extents(payload)
         payload["extents"] = {"width": w, "depth": d, "height": h}
         logger.info("Plan 3D extents %.2f × %.2f × %.2f m, %d walls, %d floors, %d fixtures", w, d, h, len(payload["walls"]), len(payload["zones"]), len(payload.get("fixtures") or []))
-        if not vision and payload["walls"]:
+        if exports and payload["walls"] and payload["validation"]["ok"]:  # never a download of a wrong model
             payload.update(await run_in_threadpool(_write_exports, raw, payload))
         yield json.dumps({"stage": "Done", "progress": 100, "success": True, "plan": payload}) + "\n"
 
@@ -355,7 +357,13 @@ def _write_exports(raw: bytes, payload: dict[str, Any]) -> dict[str, str]:
     folder = get_settings().storage_dir / "plan-exports"
     folder.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha256(raw).hexdigest()[:24]
-    (folder / f"{key}.glb").write_bytes(build_room_glb(payload))
+    glb = build_room_glb(payload)
+    (folder / f"{key}.glb").write_bytes(glb)
+    scene = trimesh.load(io.BytesIO(glb), file_type="glb")
+    names = list(scene.graph.nodes_geometry)
+    logger.info("GLB %s: %d meshes (%d walls, %d floors, %d doors, %d windows), bounds %s", key, len(names),
+                sum(n.startswith("wall_") for n in names), sum(n.endswith("_floor") for n in names),
+                sum(n.startswith("door_") for n in names), sum(n.startswith("window_") for n in names), scene.bounds.round(2).tolist())
     (folder / f"{key}.dxf").write_bytes(export_plan_dxf(payload))
     return {"glb_url": f"/api/plans/files/{key}.glb", "dxf_url": f"/api/plans/files/{key}.dxf"}
 

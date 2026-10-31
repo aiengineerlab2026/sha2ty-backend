@@ -23,6 +23,7 @@ from dataclasses import asdict
 import cv2
 import numpy as np
 from PIL import Image
+from shapely.geometry import Point, Polygon
 
 from app.services.plan.dimension_ocr import calibrate, measurements_from_boxes, parse_dimension, room_labels, run_ocr
 from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, geometry_from_plan
@@ -99,9 +100,10 @@ def plan_from_image(
         debug_images["25_vision_rooms"] = draw_analysis(image, analysis)
         agreement = opencv_agreement(analysis, payload["zones_px"], size)
         payload["opencv_agreement"] = round(agreement, 2)
-        # OpenCV keeps the plan only when it found the rooms the model sees. Otherwise (thin or styled
-        # walls that never seal into rooms → one big region) the model's layout is refined instead.
-        if agreement < 0.7 or not payload["validation"]["ok"] or len(payload["rooms_px"]) <= 1:
+        # OpenCV geometry wins whenever it validates: the model's coordinates are approximate. Every
+        # room the model names is also a label, so a room OpenCV missed fails validation and only
+        # then is the model's layout refined on the detected walls instead.
+        if not payload["validation"]["ok"] or len(payload["rooms_px"]) <= 1:
             vision_debug: dict = {}
             vision = run({**state, "geometry_source": "vision"}, debug_images=vision_debug)
             logger.info("OpenCV found %d rooms (agreement %.0f%%, ok=%s); vision layout: %d rooms, ok=%s",
@@ -189,7 +191,7 @@ def plan_from_state(
         scale["px_per_ft"] = round(0.3048 / mpp, 2)
 
     _check_zone_sizes(seg.zones, mpp)
-    validation = validate(seg, walls, openings, thickness, scale)
+    validation = validate(seg, walls, openings, thickness, scale, labels)
     _room_confidence(seg, validation)
 
     payload: dict = {
@@ -220,10 +222,20 @@ def plan_from_state(
     return payload
 
 
-def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: float, scale: dict) -> dict:
+def validate(seg, walls: list[WallSegment], openings: list[Opening], thickness: float, scale: dict, labels: list[RoomLabel] | None = None) -> dict:
     """Blocking errors stop 3D generation; warnings are shown but do not block."""
     errors = list(seg.errors)
     warnings: list[str] = []
+    # A "wall" many times the drawing's stroke width is a filled area (grey room fill, furniture
+    # block) read as ink: extruded, it is a solid slab over the rooms.
+    for w in walls:
+        if w.thickness > max(4 * thickness, 25) and w.length > w.thickness:
+            errors.append(f"A {w.thickness:.0f} px thick wall at ({w.start[0]:.0f}, {w.start[1]:.0f}) is a filled area, not a wall.")
+    # Every room named on the plan must be an enclosed space of its own (or a zone of an open plan).
+    named = {z.get("label_index") for z in seg.zones}
+    for i, label in enumerate(labels or []):
+        if i not in named and not any(Polygon(z["polygon"]).buffer(thickness).contains(Point(label.x, label.y)) for z in seg.zones if len(z["polygon"]) >= 3):
+            errors.append(f"'{label.text}' is labelled on the plan but no enclosed space was found for it.")
     if not seg.footprint:
         errors.append("Exterior footprint is not closed. Add the missing exterior wall or mark the opening.")
     if not seg.rooms:
