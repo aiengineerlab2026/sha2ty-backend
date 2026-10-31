@@ -9,5 +9,5 @@ create table if not exists public.app_settings (
 -- No policies: only the service role (the API) can read or write.
 alter table public.app_settings enable row level security;
 
-insert into public.app_settings (key, value) values ('vision_model', '"gemini-3.5-flash"')
+insert into public.app_settings (key, value) values ('vision_model', '"gemini-3.8-flash"')
 on conflict (key) do nothing;

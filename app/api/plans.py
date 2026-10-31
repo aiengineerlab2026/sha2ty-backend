@@ -132,7 +132,7 @@ async def convert_to_3d(
     wall_thickness: Annotated[float, Form()] = DEFAULT_THICKNESS,
     debug: Annotated[str, Form()] = "false",
 ) -> StreamingResponse:
-    """OpenCV + OCR geometry, guided by the vision model's reading (PLAN_VISION_MODEL, default gemini-3.5-flash)
+    """OpenCV + OCR geometry, guided by the vision model's reading (PLAN_VISION_MODEL, default gemini-3.8-flash)
     when configured; the plan plus GLB and DXF download URLs."""
     return await _convert(request, image, height, wall_thickness, None, None, debug, use_vision=True, exports=True)
 

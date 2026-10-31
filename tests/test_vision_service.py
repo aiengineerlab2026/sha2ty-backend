@@ -29,7 +29,7 @@ SOFA = {
 }
 
 
-def settings(tmp_path, model="gemini-3.5-flash") -> Settings:
+def settings(tmp_path, model="gemini-3.8-flash") -> Settings:
     return Settings(gemini_api_key="gem-test", openai_api_key="sk-test", plan_vision_model=model, storage_dir=tmp_path)
 
 
@@ -111,7 +111,7 @@ def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
         app.dependency_overrides.clear()
     assert response.status_code == 200, response.text
     body = response.json()
-    assert calls["details"] == ("gemini-3.5-flash", "furniture")  # the default vision model
+    assert calls["details"] == ("gemini-3.8-flash", "furniture")  # the default vision model
     assert "three-seat sofa" in calls["prompt"]  # the reading guided Meshy
     assert body["details"]["object_type"] == "three-seat sofa" and body["details"]["dimension_source"] == "inferred"
 
@@ -128,7 +128,7 @@ def test_admin_choice_is_read_and_saved_in_the_database(monkeypatch):
             return httpx.Response(201)
         return httpx.Response(200, json=[{"value": rows["vision_model"]}] if "vision_model" in rows else [])
 
-    s = Settings(supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_model="gemini-3.5-flash")
+    s = Settings(supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_model="gemini-3.8-flash")
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(supabase)) as client:
@@ -137,7 +137,7 @@ def test_admin_choice_is_read_and_saved_in_the_database(monkeypatch):
             vision._cached = None  # as on another API host after the cache expires
             return first, await vision.current_model(s, client)
 
-    assert asyncio.run(go()) == ("gemini-3.5-flash", "gpt-6-astra")
+    assert asyncio.run(go()) == ("gemini-3.8-flash", "gpt-6-astra")
     with pytest.raises(vision.VisionSettingError):
         asyncio.run(vision.set_model(s, httpx.AsyncClient(), "claude-vision"))
 
@@ -150,14 +150,14 @@ def test_unreadable_setting_falls_back_to_gemini(monkeypatch):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(404, json={"message": "relation does not exist"}))) as client:
             return await vision.current_model(s, client)
 
-    assert asyncio.run(go()) == "gemini-3.5-flash"  # table not created yet: the default, never an error
+    assert asyncio.run(go()) == "gemini-3.8-flash"  # table not created yet: the default, never an error
 
 
 def test_admin_vision_endpoints(monkeypatch):
     saved = {}
 
     async def fake_current(_settings, _client):
-        return saved.get("model", "gemini-3.5-flash")
+        return saved.get("model", "gemini-3.8-flash")
 
     async def fake_set(_settings, _client, model):
         saved["model"] = model
@@ -170,7 +170,7 @@ def test_admin_vision_endpoints(monkeypatch):
     token = admin.issue_token(admin.get_settings())[0]
     assert client.get("/api/admin/vision").status_code == 401
     got = client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()
-    assert got["model"] == "gemini-3.5-flash" and {o["id"] for o in got["options"]} == {"gemini-3.5-flash", "gpt-6-astra"}
+    assert got["model"] == "gemini-3.8-flash" and {o["id"] for o in got["options"]} == {"gemini-3.8-flash", "gpt-6-astra"}
     assert client.put("/api/admin/vision", json={"model": "gpt-6-astra"}, headers={"X-Admin-Token": token}).json() == {"model": "gpt-6-astra"}
     assert client.get("/api/admin/vision", headers={"X-Admin-Token": token}).json()["model"] == "gpt-6-astra"
     assert client.put("/api/admin/vision", json={"model": "other"}, headers={"X-Admin-Token": token}).status_code == 422
@@ -192,7 +192,7 @@ def fake_db():
     return rows, httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def db_settings(tmp_path, model="gemini-3.5-flash") -> Settings:
+def db_settings(tmp_path, model="gemini-3.8-flash") -> Settings:
     return Settings(gemini_api_key="gem-test", openai_api_key="sk-test", plan_vision_model=model, storage_dir=tmp_path,
                     supabase_url="https://db.test", supabase_service_role_key="service", plan_vision_cache=True)
 
@@ -226,11 +226,11 @@ def test_same_floor_plan_is_read_once_from_the_database(tmp_path):
 
     def provider(request):
         calls.append(request)
-        return provider_reply("gemini-3.5-flash", good)
+        return provider_reply("gemini-3.8-flash", good)
 
     async def go(storage):
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            return await analyze_plan(b"plan", "image/png", (100, 50), db_settings(storage), client, "gemini-3.5-flash", db=db)
+            return await analyze_plan(b"plan", "image/png", (100, 50), db_settings(storage), client, "gemini-3.8-flash", db=db)
 
     first = asyncio.run(go(tmp_path / "host-a"))
     second = asyncio.run(go(tmp_path / "host-b"))
@@ -246,8 +246,8 @@ def test_missing_cache_table_never_blocks_the_model(tmp_path):
     db = httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(404, json={"message": "relation does not exist"})))
 
     async def go():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: provider_reply("gemini-3.5-flash", SOFA))) as client:
-            return await product_details.extract_product_details(b"photo", "image/png", "furniture", "", db_settings(tmp_path), client, "gemini-3.5-flash", db=db)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: provider_reply("gemini-3.8-flash", SOFA))) as client:
+            return await product_details.extract_product_details(b"photo", "image/png", "furniture", "", db_settings(tmp_path), client, "gemini-3.8-flash", db=db)
 
     assert asyncio.run(go()).object_type == "three-seat sofa"
 
@@ -265,11 +265,11 @@ def test_floor_plans_call_the_model_on_every_upload_by_default(tmp_path):
 
     def provider(request):
         calls.append(request)
-        return provider_reply("gemini-3.5-flash", good)
+        return provider_reply("gemini-3.8-flash", good)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            return await analyze_plan(b"plan", "image/png", (100, 50), s, client, "gemini-3.5-flash", db=db)
+            return await analyze_plan(b"plan", "image/png", (100, 50), s, client, "gemini-3.8-flash", db=db)
 
     assert not asyncio.run(go()).cached and not asyncio.run(go()).cached
     assert len(calls) == 2 and not rows and not (tmp_path / "plan-analysis").exists()
