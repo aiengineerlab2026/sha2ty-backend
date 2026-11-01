@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import re
+from typing import Literal
 from pathlib import Path
 
 import httpx
@@ -23,9 +24,27 @@ from app.services.generation_prompt import object_description
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "product-details-v2"  # bump with PROMPT or the schema: invalidates the cache
+SCHEMA_VERSION = "product-details-v4"  # bump with PROMPT or the schema: invalidates the cache
 NAME_MAX = 80
 DESCRIPTION_MAX = 400
+ARABIC = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
+LATIN = re.compile(r"[A-Za-z]")
+
+Lang = Literal["ar", "en"]
+# The listing's language follows the vendor's interface (web / mobile): name + description, in that language only.
+LISTING: dict[str, str] = {
+    "ar": 'They MUST be written in Modern Standard Arabic (Arabic script), whatever the photo or the vendor\'s wording: '
+          'name = a short catalogue name (2–6 words, e.g. "كنبة ثلاثية من الكتان الرمادي"); description = one or two plain '
+          "Arabic sentences (style, materials, colours, notable parts).",
+    "en": 'They MUST be written in English, whatever the photo or the vendor\'s wording: name = a short catalogue name '
+          '(2–6 words, e.g. "Grey linen three-seat sofa"); description = one or two plain English sentences (style, '
+          "materials, colours, notable parts).",
+}
+
+
+def in_language(text: str, lang: Lang) -> bool:
+    """Arabic: has Arabic letters. English: has Latin letters and no Arabic script."""
+    return bool(ARABIC.search(text)) if lang == "ar" else bool(LATIN.search(text)) and not ARABIC.search(text)
 SIZE_RANGE_M = (0.02, 6.0)  # outside this, an estimated size is noise
 PROMPT = """You are a furniture and product modeller looking at a vendor's product photo. The vendor says it is {what}.
 Describe the main object as JSON so it can be modelled in 3D.
@@ -36,26 +55,28 @@ Describe the main object as JSON so it can be modelled in 3D.
 - width_m / depth_m / height_m: your estimate in metres from typical sizes ("inferred"), or sizes written on
   the image ("annotated"); null and "unknown" if you cannot tell. Never present a guess as exact.
 - materials and colours exactly as seen; hidden: what the photo cannot show (back, underside).
-- name: a short catalogue name (2–6 words, e.g. "Grey linen three-seat sofa"); description: one or two plain
-  sentences for a shop listing (style, materials, colours, notable parts). No prices, brands or sizes you cannot see.
+- name and description are the shop listing. {listing} No prices, brands or sizes you cannot see.
+  Every other field stays in English.
 - warnings: anything unclear (several objects, cropped, low quality). Only describe what you can see."""
 
 
-def _key(image: bytes, model: str, what: str) -> str:
-    return hashlib.sha256(image + model.encode() + what.encode() + SCHEMA_VERSION.encode() + PROMPT.encode()).hexdigest()
+def _key(image: bytes, model: str, what: str, lang: str) -> str:
+    return hashlib.sha256(image + model.encode() + what.encode() + lang.encode() + SCHEMA_VERSION.encode() + PROMPT.encode()).hexdigest()
 
 
 async def extract_product_details(
     image: bytes, mime: str, category: str | None, title: str | None, settings: Settings, client: httpx.AsyncClient, model: str,
     db: httpx.AsyncClient | None = None,
     kind: str | None = None,
+    lang: Lang = "ar",
 ) -> ProductDetails | None:
     """`client` talks to the model provider; `db` (no provider key in its headers) to the cache table.
-    `kind`: the furniture type the vendor typed (furniture category)."""
+    `kind`: the furniture type the vendor typed (furniture category). `lang`: the listing's language (the
+    vendor's interface)."""
     if not vision.configured(settings, model):
         return None
     what = object_description(category, title, kind)
-    key = _key(image, model, what)
+    key = _key(image, model, what, lang)
     stored = await vision.cache_get(settings, db, key)
     if stored:
         try:
@@ -70,14 +91,14 @@ async def extract_product_details(
         except ValidationError:
             path.unlink(missing_ok=True)
     content = [
-        {"type": "input_text", "text": PROMPT.format(what=what)},
+        {"type": "input_text", "text": PROMPT.format(what=what, listing=LISTING[lang])},
         {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"},
     ]
     text = await vision.ask_json(content, ProductDetails.model_json_schema(), "product_details", settings, client, model)
     if text is None:
         return None
     try:
-        details = clean(ProductDetails.model_validate(json.loads(text)))
+        details = clean(ProductDetails.model_validate(json.loads(text)), lang)
     except (ValueError, ValidationError) as exc:
         logger.warning("Product details returned invalid JSON: %s", str(exc)[:300])
         return None
@@ -93,7 +114,7 @@ async def extract_product_details(
     return details
 
 
-def clean(details: ProductDetails) -> ProductDetails:
+def clean(details: ProductDetails, lang: Lang = "ar") -> ProductDetails:
     """Deterministic fixes: boxes clamped and ordered, implausible sizes dropped, proportions normalised."""
 
     def box(b):
@@ -107,6 +128,12 @@ def clean(details: ProductDetails) -> ProductDetails:
     # Listing text: plain (no markup), one line for the name, bounded lengths.
     details.name = " ".join(re.sub(r"<[^>]*>", "", details.name).split())[:NAME_MAX].strip(" .")
     details.description = " ".join(re.sub(r"<[^>]*>", "", details.description).split())[:DESCRIPTION_MAX].strip()
+    # The listing is in the vendor's interface language: text in another language is dropped (the app then uses
+    # its own fallback in that language).
+    for field in ("name", "description"):
+        if getattr(details, field) and not in_language(getattr(details, field), lang):
+            details.warnings.append(f"The {field} was not in {'Arabic' if lang == 'ar' else 'English'} and was dropped.")
+            setattr(details, field, "")
     details.bbox = box(details.bbox)
     for c in details.components:
         c.bbox = box(c.bbox)

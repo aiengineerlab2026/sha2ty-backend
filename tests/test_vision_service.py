@@ -385,7 +385,7 @@ def test_vendor_measures_a_photo_before_converting(tmp_path, monkeypatch):
     """POST /api/vendor/product-details: the estimate the app shows on the photo; no generation try."""
     seen = {}
 
-    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, kind=None):
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, kind=None, lang="ar"):
         seen.update(category=category, kind=kind)
         return product_details.clean(ProductDetails.model_validate(SOFA))
 
@@ -416,14 +416,50 @@ def test_furniture_type_names_the_object_in_meshy_and_astra_prompts():
     assert "wardrobe" in meshy_texture_prompt("wardrobe", kind="ignored for other categories")
 
 
-def test_reading_writes_a_plain_listing_name_and_description():
-    """Name and description fill a model the vendor left unnamed (web and mobile); never markup, bounded."""
+def test_reading_writes_a_plain_arabic_listing_name_and_description():
+    """Name and description fill a model the vendor left unnamed (web and mobile): Arabic, never markup, bounded."""
     details = product_details.clean(ProductDetails.model_validate({
         **SOFA,
-        "name": "  <b>Grey linen</b>   three-seat sofa. ",
-        "description": "A <i>low</i> sofa\nwith wooden legs. " + "x" * 500,
+        "name": "  <b>كنبة ثلاثية</b>   من الكتان الرمادي. ",
+        "description": "كنبة <i>منخفضة</i>\nبأرجل خشبية. " + "س" * 500,
     }))
-    assert details.name == "Grey linen three-seat sofa"
-    assert details.description.startswith("A low sofa with wooden legs.")
+    assert details.name == "كنبة ثلاثية من الكتان الرمادي"
+    assert details.description.startswith("كنبة منخفضة بأرجل خشبية.")
     assert len(details.description) <= product_details.DESCRIPTION_MAX
-    assert "name" in product_details.PROMPT and "description" in product_details.PROMPT
+    assert "{listing}" in product_details.PROMPT  # the language comes from the request (LISTING)
+
+
+def test_the_listing_follows_the_interface_language():
+    arabic = {**SOFA, "name": "كنبة رمادية", "description": "كنبة منخفضة."}
+    english = {**SOFA, "name": "Grey linen sofa", "description": "A low sofa."}
+    # Arabic interface: an English listing is dropped; English interface: an Arabic one is.
+    ar = product_details.clean(ProductDetails.model_validate(english), "ar")
+    assert ar.name == "" and ar.description == "" and any("not in Arabic" in w for w in ar.warnings)
+    en = product_details.clean(ProductDetails.model_validate(arabic), "en")
+    assert en.name == "" and en.description == "" and any("not in English" in w for w in en.warnings)
+    assert product_details.clean(ProductDetails.model_validate(english), "en").name == "Grey linen sofa"
+    assert product_details.clean(ProductDetails.model_validate(arabic), "ar").name == "كنبة رمادية"
+    assert ar.object_type == "three-seat sofa"  # the fields for Meshy / Astra stay English
+    # The prompt asks for the listing in that language, and readings are cached per language.
+    assert "Arabic" in product_details.LISTING["ar"] and "English" in product_details.LISTING["en"]
+    assert product_details._key(b"p", "m", "w", "ar") != product_details._key(b"p", "m", "w", "en")
+
+
+def test_generate_and_measure_pass_the_listing_language(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, kind=None, lang="ar"):
+        seen.append(lang)
+        return product_details.clean(ProductDetails.model_validate(SOFA), lang)
+
+    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(gemini_api_key="gem-test", storage_dir=tmp_path)
+    try:
+        with TestClient(app) as client:
+            png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+            client.post("/api/vendor/product-details", files={"image": ("p.png", png, "image/png")}, data={"lang": "en"})
+            client.post("/api/vendor/product-details", files={"image": ("p.png", png, "image/png")})
+    finally:
+        app.dependency_overrides.clear()
+    assert seen == ["en", "ar"]  # English when asked, Arabic by default
