@@ -143,9 +143,52 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
     return QuotaResponse(limit=settings.generation_limit, remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()})
 
 
-def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool) -> str:
+def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "") -> str:
     """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
-    return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}|{GLB_CACHE_VERSION}".encode()).hexdigest()
+    other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
+    return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
+
+
+def read_upload(raw: bytes, declared: str, settings: Settings) -> str:
+    """The photo's real type (sniffed), or 413 / 415."""
+    if len(raw) > settings.max_image_bytes:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
+    sniffed = sniff_image_mime(raw)
+    declared = declared.split(";")[0].strip().lower()
+    if sniffed not in ALLOWED_IMAGE_TYPES or (declared and declared not in ALLOWED_IMAGE_TYPES and declared != "application/octet-stream"):
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a PNG, JPG or WEBP image.")
+    return sniffed or "image/png"
+
+
+async def read_photo(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str) -> ProductDetails | None:
+    """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation (cached
+    per photo, model and object description, so measuring first and converting after costs one call)."""
+    if not photo:
+        return None  # an image URL only: Meshy fetches it, nothing to read here
+    model = await vision.current_model(settings, request.app.state.auth_http)
+    return await extract_product_details(
+        photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http, kind=kind or None
+    )
+
+
+@router.post("/product-details", response_model=ProductDetails)
+async def product_details(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    user_id: Annotated[str, Depends(current_user)],
+    image: Annotated[UploadFile, File()],
+    category: Annotated[str, Form(max_length=40)] = "furniture",
+    title: Annotated[str, Form(max_length=200)] = "",
+    kind: Annotated[str, Form(max_length=60)] = "",
+) -> ProductDetails:
+    """Measure before converting: the vision model's estimate (size in metres, the object's box in the photo,
+    parts, materials) for the vendor to check and correct. Uses no generation try."""
+    raw = await image.read()
+    mime = read_upload(raw, image.content_type or "", settings)
+    details = await read_photo(request, settings, raw, mime, category, title, kind)
+    if details is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The photo could not be measured right now. Enter the size yourself.")
+    return details
 
 
 async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
@@ -173,17 +216,12 @@ async def generate_model(
     should_texture: Annotated[str, Form()] = "true",
     category: Annotated[str, Form(max_length=40)] = "furniture",
     title: Annotated[str, Form(max_length=200)] = "",
+    kind: Annotated[str, Form(max_length=60)] = "",  # furniture: the type the vendor typed ("corner sofa")
 ) -> GenerateAccepted | GenerateReady:
     raw = await image.read() if image is not None else b""
     public_url = (image_url or "").strip() or None
     if raw:
-        if len(raw) > settings.max_image_bytes:
-            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Images must be 20 MB or smaller.")
-        sniffed = sniff_image_mime(raw)
-        declared = (image.content_type or "").split(";")[0].strip().lower() if image else ""
-        if sniffed not in ALLOWED_IMAGE_TYPES or (declared and declared not in ALLOWED_IMAGE_TYPES and declared != "application/octet-stream"):
-            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a PNG, JPG or WEBP image.")
-        mime = sniffed or "image/png"
+        mime = read_upload(raw, image.content_type if image else "", settings)
     elif public_url:
         mime = "image/png"
     else:
@@ -193,7 +231,7 @@ async def generate_model(
     db = request.app.state.auth_http
     # The same photo, vendor and options → the model generated before (model_cache): no vision call,
     # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
-    cache_key = glb_cache_key(raw, user_id, provider, category, title, textured) if raw else None
+    cache_key = glb_cache_key(raw, user_id, provider, category, title, textured, kind) if raw else None
     hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
     if hit and hit.get("glb_url"):
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
@@ -204,13 +242,6 @@ async def generate_model(
             result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
-    async def read_photo(photo: bytes) -> ProductDetails | None:
-        """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation."""
-        if not photo:
-            return None  # an image URL only: Meshy fetches it, nothing to read here
-        model = await vision.current_model(settings, request.app.state.auth_http)
-        return await extract_product_details(photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http)
-
     if provider == "astra":
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
@@ -218,8 +249,8 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
         remaining = await take_try(request, user_id, "astra", settings)
         try:
-            details = await read_photo(raw)
-            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details))
+            details = await read_photo(request, settings, raw, mime, category, title, kind)
+            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             await remember(url, details)
         except (AstraError, CdnError) as exc:
@@ -230,14 +261,14 @@ async def generate_model(
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
-    details = await read_photo(raw)
+    details = await read_photo(request, settings, raw, mime, category, title, kind) if raw else None
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),
             image=None if public_url else raw,
             mime_type=mime,
             image_url=public_url,
-            texture_prompt=meshy_texture_prompt(category, title, details),
+            texture_prompt=meshy_texture_prompt(category, title, details, kind or None),
         )
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try

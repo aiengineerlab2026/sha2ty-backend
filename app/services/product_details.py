@@ -43,11 +43,13 @@ def _key(image: bytes, model: str, what: str) -> str:
 async def extract_product_details(
     image: bytes, mime: str, category: str | None, title: str | None, settings: Settings, client: httpx.AsyncClient, model: str,
     db: httpx.AsyncClient | None = None,
+    kind: str | None = None,
 ) -> ProductDetails | None:
-    """`client` talks to the model provider; `db` (no provider key in its headers) to the cache table."""
+    """`client` talks to the model provider; `db` (no provider key in its headers) to the cache table.
+    `kind`: the furniture type the vendor typed (furniture category)."""
     if not vision.configured(settings, model):
         return None
-    what = object_description(category, title)
+    what = object_description(category, title, kind)
     key = _key(image, model, what)
     stored = await vision.cache_get(settings, db, key)
     if stored:

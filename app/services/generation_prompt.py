@@ -23,8 +23,12 @@ OBJECTS: dict[str, str] = {
 MESHY_TEXTURE_PROMPT_MAX = 600  # Meshy rejects longer texture prompts
 
 
-def object_description(category: str | None, title: str | None = None) -> str:
-    what = OBJECTS.get((category or "").strip(), OBJECTS["furniture"])
+def object_description(category: str | None, title: str | None = None, kind: str | None = None) -> str:
+    """`kind`: the furniture type the vendor typed (e.g. "corner sofa", "bunk bed"); it replaces the generic
+    furniture description, so the vision model, Meshy and Astra know exactly what to measure and model."""
+    custom = " ".join((kind or "").split())[:60]
+    category = (category or "").strip()
+    what = f"a single {custom} (a piece of furniture)" if category in ("", "furniture") and custom else OBJECTS.get(category, OBJECTS["furniture"])
     name = (title or "").strip()
     return f"{what}{f' — the product “{name[:80]}”' if name else ''}"
 
@@ -48,9 +52,9 @@ def colour_rule(what: str, category: str | None = None) -> str:
     )
 
 
-def _what(category: str | None, title: str | None, details) -> str:
+def _what(category: str | None, title: str | None, details, kind: str | None = None) -> str:
     """The vision model's reading of the photo names the object more precisely than the category."""
-    what = object_description(category, title)
+    what = object_description(category, title, kind)
     return f"{what}: a {details.object_type}" if details and details.matches_category and details.object_type else what
 
 
@@ -82,9 +86,9 @@ def size_text(details) -> str:
     return ""
 
 
-def meshy_texture_prompt(category: str | None, title: str | None = None, details=None) -> str:
+def meshy_texture_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
     """Meshy image-to-3D `texture_prompt`: guides texturing; the geometry comes from the photo."""
-    what = _what(category, title, details)
+    what = _what(category, title, details, kind)
     text = f"{colour_rule(what, category)} {details_text(details)}".strip()
     if len(text) <= MESHY_TEXTURE_PROMPT_MAX:
         return text
@@ -92,8 +96,8 @@ def meshy_texture_prompt(category: str | None, title: str | None = None, details
     return cut[: cut.rfind(".") + 1] or cut  # whole sentences only
 
 
-def astra_prompt(category: str | None, title: str | None = None, details=None) -> str:
-    what = _what(category, title, details)
+def astra_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
+    what = _what(category, title, details, kind)
     hidden = f" The photo does not show {details.hidden}: keep those parts simple and plausible." if details and details.hidden else ""
     return (
         f"Create a 3D model of {what} shown in the photo. {colour_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
