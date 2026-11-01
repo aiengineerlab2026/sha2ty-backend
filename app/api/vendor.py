@@ -22,7 +22,7 @@ from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import vision
 from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
-from app.services.product_details import extract_product_details
+from app.services.product_details import extract_product_details, in_language
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services.meshy_service import MeshyError, MeshyService
@@ -160,14 +160,14 @@ def read_upload(raw: bytes, declared: str, settings: Settings) -> str:
     return sniffed or "image/png"
 
 
-async def read_photo(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str) -> ProductDetails | None:
+async def read_photo(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: Literal["ar", "en"] = "ar") -> ProductDetails | None:
     """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation (cached
     per photo, model and object description, so measuring first and converting after costs one call)."""
     if not photo:
         return None  # an image URL only: Meshy fetches it, nothing to read here
     model = await vision.current_model(settings, request.app.state.auth_http)
     return await extract_product_details(
-        photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http, kind=kind or None
+        photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http, kind=kind or None, lang=lang
     )
 
 
@@ -180,12 +180,13 @@ async def product_details(
     category: Annotated[str, Form(max_length=40)] = "furniture",
     title: Annotated[str, Form(max_length=200)] = "",
     kind: Annotated[str, Form(max_length=60)] = "",
+    lang: Annotated[Literal["ar", "en"], Form()] = "ar",  # the listing (name, description) in the vendor's interface language
 ) -> ProductDetails:
     """Measure before converting: the vision model's estimate (size in metres, the object's box in the photo,
     parts, materials) for the vendor to check and correct. Uses no generation try."""
     raw = await image.read()
     mime = read_upload(raw, image.content_type or "", settings)
-    details = await read_photo(request, settings, raw, mime, category, title, kind)
+    details = await read_photo(request, settings, raw, mime, category, title, kind, lang)
     if details is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The photo could not be measured right now. Enter the size yourself.")
     return details
@@ -217,6 +218,7 @@ async def generate_model(
     category: Annotated[str, Form(max_length=40)] = "furniture",
     title: Annotated[str, Form(max_length=200)] = "",
     kind: Annotated[str, Form(max_length=60)] = "",  # furniture: the type the vendor typed ("corner sofa")
+    lang: Annotated[Literal["ar", "en"], Form()] = "ar",  # the listing (name, description) in the vendor's interface language
 ) -> GenerateAccepted | GenerateReady:
     raw = await image.read() if image is not None else b""
     public_url = (image_url or "").strip() or None
@@ -235,6 +237,10 @@ async def generate_model(
     hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
     if hit and hit.get("glb_url"):
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
+        # The 3D model is reused; its listing must be in the language asked for now: read again only when it is not
+        # (the reading is cached per language, and costs no generation try).
+        if details is None or not all(in_language(t, lang) for t in (details.name, details.description) if t):
+            details = await read_photo(request, settings, raw, mime, category, title, kind, lang) or details
         return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details)
 
     async def remember(url: str, details: ProductDetails | None) -> None:
@@ -249,7 +255,7 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
         remaining = await take_try(request, user_id, "astra", settings)
         try:
-            details = await read_photo(request, settings, raw, mime, category, title, kind)
+            details = await read_photo(request, settings, raw, mime, category, title, kind, lang)
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None))
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             await remember(url, details)
@@ -261,7 +267,7 @@ async def generate_model(
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
-    details = await read_photo(request, settings, raw, mime, category, title, kind) if raw else None
+    details = await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),
