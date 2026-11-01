@@ -86,7 +86,7 @@ def test_failed_vision_call_returns_none(tmp_path, monkeypatch):
 def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
     calls = {}
 
-    async def fake_details(image, mime, category, title, _settings, _client, model, db=None):
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, **_kwargs):
         calls["details"] = (model, category)
         return product_details.clean(ProductDetails.model_validate(SOFA))
 
@@ -379,3 +379,38 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
     assert again["details"]["object_type"] == "three-seat sofa"
     assert calls == {"meshy": 2, "details": 2}  # …no second Meshy job or vision call; another category is new
     assert other["status"] == "PENDING" and [r["kind"] for r in rows.values()] == ["vendor_glb"]
+
+
+def test_vendor_measures_a_photo_before_converting(tmp_path, monkeypatch):
+    """POST /api/vendor/product-details: the estimate the app shows on the photo; no generation try."""
+    seen = {}
+
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, kind=None):
+        seen.update(category=category, kind=kind)
+        return product_details.clean(ProductDetails.model_validate(SOFA))
+
+    async def no_try(*_args):
+        raise AssertionError("measuring must not use a generation try")
+
+    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "take_try", no_try)
+    app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(gemini_api_key="gem-test", storage_dir=tmp_path)
+    try:
+        with TestClient(app) as client:
+            png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+            ok = client.post("/api/vendor/product-details", files={"image": ("p.png", png, "image/png")}, data={"category": "furniture", "kind": "corner sofa"})
+            bad = client.post("/api/vendor/product-details", files={"image": ("p.txt", b"hello", "text/plain")})
+    finally:
+        app.dependency_overrides.clear()
+    assert ok.status_code == 200, ok.text
+    assert seen == {"category": "furniture", "kind": "corner sofa"}
+    assert ok.json()["width_m"] == SOFA["width_m"] and ok.json()["bbox"]
+    assert bad.status_code == 415
+
+
+def test_furniture_type_names_the_object_in_meshy_and_astra_prompts():
+    assert "a single corner sofa" in meshy_texture_prompt("furniture", "Oslo", kind="corner sofa")
+    assert "a single corner sofa" in astra_prompt("furniture", "Oslo", kind="corner sofa")
+    assert "such as a sofa, bed" in meshy_texture_prompt("furniture")  # no type typed: the generic description
+    assert "wardrobe" in meshy_texture_prompt("wardrobe", kind="ignored for other categories")
