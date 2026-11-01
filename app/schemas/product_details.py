@@ -25,7 +25,9 @@ class Component(BaseModel):
 class ProductDetails(BaseModel):
     object_type: str = Field(description="What the main object is, e.g. 'three-seat sofa'")
     matches_category: bool = Field(default=True, description="False when the photo shows something else than the vendor's category")
-    description: str = ""
+    # The catalogue listing, used when the vendor leaves the model's name or description empty.
+    name: str = Field(default="", description="A short catalogue name for the product, e.g. 'Grey linen three-seat sofa'")
+    description: str = Field(default="", description="One or two plain sentences for a shop listing: style, materials, colours, notable parts; only what is visible")
     bbox: Box | None = Field(default=None, description="The main object's boundary in the photo")
     orientation: Literal["front", "three_quarter", "side", "back", "top", "unknown"] = "unknown"
     proportions: Annotated[list[float], Field(min_length=3, max_length=3)] | None = Field(

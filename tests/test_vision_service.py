@@ -414,3 +414,16 @@ def test_furniture_type_names_the_object_in_meshy_and_astra_prompts():
     assert "a single corner sofa" in astra_prompt("furniture", "Oslo", kind="corner sofa")
     assert "such as a sofa, bed" in meshy_texture_prompt("furniture")  # no type typed: the generic description
     assert "wardrobe" in meshy_texture_prompt("wardrobe", kind="ignored for other categories")
+
+
+def test_reading_writes_a_plain_listing_name_and_description():
+    """Name and description fill a model the vendor left unnamed (web and mobile); never markup, bounded."""
+    details = product_details.clean(ProductDetails.model_validate({
+        **SOFA,
+        "name": "  <b>Grey linen</b>   three-seat sofa. ",
+        "description": "A <i>low</i> sofa\nwith wooden legs. " + "x" * 500,
+    }))
+    assert details.name == "Grey linen three-seat sofa"
+    assert details.description.startswith("A low sofa with wooden legs.")
+    assert len(details.description) <= product_details.DESCRIPTION_MAX
+    assert "name" in product_details.PROMPT and "description" in product_details.PROMPT

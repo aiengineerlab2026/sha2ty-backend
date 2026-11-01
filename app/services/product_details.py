@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -22,7 +23,9 @@ from app.services.generation_prompt import object_description
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "product-details-v1"  # bump with PROMPT or the schema: invalidates the cache
+SCHEMA_VERSION = "product-details-v2"  # bump with PROMPT or the schema: invalidates the cache
+NAME_MAX = 80
+DESCRIPTION_MAX = 400
 SIZE_RANGE_M = (0.02, 6.0)  # outside this, an estimated size is noise
 PROMPT = """You are a furniture and product modeller looking at a vendor's product photo. The vendor says it is {what}.
 Describe the main object as JSON so it can be modelled in 3D.
@@ -33,6 +36,8 @@ Describe the main object as JSON so it can be modelled in 3D.
 - width_m / depth_m / height_m: your estimate in metres from typical sizes ("inferred"), or sizes written on
   the image ("annotated"); null and "unknown" if you cannot tell. Never present a guess as exact.
 - materials and colours exactly as seen; hidden: what the photo cannot show (back, underside).
+- name: a short catalogue name (2–6 words, e.g. "Grey linen three-seat sofa"); description: one or two plain
+  sentences for a shop listing (style, materials, colours, notable parts). No prices, brands or sizes you cannot see.
 - warnings: anything unclear (several objects, cropped, low quality). Only describe what you can see."""
 
 
@@ -99,6 +104,9 @@ def clean(details: ProductDetails) -> ProductDetails:
         y0, y1 = sorted((y0, y1))
         return [x0, y0, x1, y1] if x1 - x0 > 0.005 and y1 - y0 > 0.005 else None
 
+    # Listing text: plain (no markup), one line for the name, bounded lengths.
+    details.name = " ".join(re.sub(r"<[^>]*>", "", details.name).split())[:NAME_MAX].strip(" .")
+    details.description = " ".join(re.sub(r"<[^>]*>", "", details.description).split())[:DESCRIPTION_MAX].strip()
     details.bbox = box(details.bbox)
     for c in details.components:
         c.bbox = box(c.bbox)
