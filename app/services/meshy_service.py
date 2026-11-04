@@ -119,6 +119,7 @@ class MeshyService:
         mime_type: str = "image/png",
         image_url: str | None = None,
         texture_prompt: str | None = None,
+        target_polycount: int | None = None,
     ) -> str:
         source = (image_url or "").strip()
         if not source:
@@ -132,7 +133,12 @@ class MeshyService:
             "target_formats": ["glb"],
             "should_texture": options.should_texture,
         }
+        if target_polycount:
+            # File size: Meshy has no size option, so it is held down by its real ones: a remesh to this many
+            # triangles (unremeshed models came back with 0.3–4 million) and 2k textures. glb_size checks the result.
+            payload.update(should_remesh=True, topology="triangle", target_polycount=max(100, min(300000, target_polycount)))
         if options.should_texture:
+            payload["texture_resolution"] = "2k"
             payload["enable_pbr"] = options.enable_pbr
             if texture_prompt:
                 # What the object is and "keep the photo's colours" (see generation_prompt).

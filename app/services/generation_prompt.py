@@ -132,6 +132,35 @@ def modular_hint(category: str | None, kind: str | None = None, details=None) ->
     return f"Separate named meshes: {parts}; each part with its own material, looking exactly as in the photo."
 
 
+# Meshy remeshes to this many triangles (its `target_polycount`, 100–300000): enough for the shape, small enough for
+# an 8 MB GLB with its 2k texture. Soft, curvy pieces get more; boxy ones fewer.
+POLYCOUNT = {"sofa": 60000, "bed": 60000, "chair": 30000, "table": 30000, "wardrobe": 40000, "door": 20000}
+DEFAULT_POLYCOUNT = 50000
+
+
+def target_polycount(category: str | None, kind: str | None = None) -> int:
+    return POLYCOUNT.get(furniture_family(category, kind), DEFAULT_POLYCOUNT)
+
+
+_EXAMPLES = {"chair": "legs, seat, backrest", "sofa": "frame, seat cushions, back cushions, armrests, legs", "bed": "headboard, frame, mattress, pillows, legs", "table": "tabletop, legs", "wardrobe": "body, doors, drawers, handles", "door": "leaf, frame, handle"}
+
+
+def _read_type(details) -> str | None:
+    """What the photo reading says it is ("three-seat sofa"), for the size rule's examples when no type was typed."""
+    return details.object_type if details and details.matches_category and details.object_type else None
+
+
+def size_rule(category: str | None, kind: str | None = None) -> str:
+    """The file-size instruction for both providers, with this furniture type's parts. A provider cannot promise a
+    size: the backend checks and optimises the GLB it returns (services/glb_size.py)."""
+    parts = _EXAMPLES.get(furniture_family(category, kind), "chair legs, seat, backrest")
+    return (
+        "Generate an optimized, lightweight 3D model with a final GLB file size under 8 MB. Minimize polygons and "
+        "texture sizes while preserving visual quality, accurate dimensions, colors, and modular components "
+        f"(e.g., {parts})."
+    )
+
+
 def split_prompt(category: str | None, kind: str | None = None) -> str | None:
     """Meshy Auto Split `prompt` (mode by_parts): the parts to cut the model into, at most 10, 600 characters."""
     return _PARTS.get(furniture_family(category, kind))
@@ -140,9 +169,9 @@ def split_prompt(category: str | None, kind: str | None = None) -> str | None:
 def meshy_texture_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
     """Meshy image-to-3D `texture_prompt`: guides texturing; the geometry comes from the photo."""
     what = _what(category, title, details, kind)
-    hint = modular_hint(category, kind, details)
+    hint = f"{modular_hint(category, kind, details)} {size_rule(category, kind or _read_type(details))}".strip()
     body = f"{colour_rule(what, category)} {details_text(details)}".strip()
-    # The part list stays even when the colour notes are long: Meshy caps this field at 600 characters.
+    # The part list and size rule stay even when the colour notes are long: Meshy caps this field at 800 characters.
     if hint:
         room = MESHY_TEXTURE_PROMPT_MAX - len(hint) - 1
         if len(body) > room:
@@ -162,8 +191,9 @@ def astra_prompt(category: str | None, title: str | None = None, details=None, k
     hidden = f" The photo does not show {details.hidden}: keep those parts simple and plausible." if details and details.hidden else ""
     return (
         f"Create a 3D model of {what} shown in the photo. {colour_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
-        f"{modular_hint(category, kind, details)} "
+        f"{modular_hint(category, kind, details)} {size_rule(category, kind or _read_type(details))} "
         "Keep its real proportions, standing upright as it does in a room. "
+        "Use few vertices per part and at most 1024 px textures (or plain material colours). "
         "In the code interpreter, write a valid binary glTF file to /mnt/data/model.glb "
         "(magic bytes glTF), with the colours as materials or vertex colours. Use pygltflib, trimesh, or write "
         "the GLB bytes yourself. The file must be a real .glb, not a description. "

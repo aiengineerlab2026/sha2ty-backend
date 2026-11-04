@@ -109,6 +109,16 @@ class DesignStore:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Design not found.")
         return rows[0]
 
+    async def user_model(self, model_id: UUID, user_id: str) -> dict[str, Any]:
+        """One of the user's own models (made from their photo), ready with a 3D file; never anyone else's."""
+        rows = await self._call("GET", f"user_models?id=eq.{model_id}&owner_id=eq.{user_id}&select=*", "load your model")
+        row = rows[0] if rows else None
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Model not found.")
+        if not row.get("glb_url") or row.get("status") in ("generating", "failed"):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This model is not finished yet.")
+        return row
+
     async def catalog_model(self, model_id: UUID, user_id: str) -> dict[str, Any]:
         """A model the user may start a design from: a ready listing of an approved vendor, or one of their own."""
         try:

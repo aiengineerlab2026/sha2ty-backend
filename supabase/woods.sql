@@ -64,7 +64,8 @@ cross join (values
   ('Blockboard', 'blockboard', 'Solid-wood core between veneers: rigid long panels and doors.', 1.22, 1800, 'sheet', '{18,25}', 1.22, 2.44, 0.65),
   ('Melamine', 'melamine', 'Hard-wearing decorative surface pressed onto board. Easy-clean panels.', 0.6, 250, 'm2', null, null, null, 0.4),
   ('Walnut veneer', 'veneer', 'A thin slice of real walnut on a board: the look of solid wood for less.', 0.6, 350, 'm2', '{0.6}', null, null, 0.5),
-  ('Laminate / HPL', 'laminate', 'High-pressure laminate: very durable surface for tops and fronts.', 0.6, 450, 'm2', '{0.8,1}', null, null, 0.3)
+  ('Laminate / HPL', 'laminate', 'High-pressure laminate: very durable surface for tops and fronts.', 0.6, 450, 'm2', '{0.8,1}', null, null, 0.3),
+  ('Clear lacquer', 'lacquer', 'A clear protective coat: the board''s own grain shows, with a soft satin sheen.', 0.6, 180, 'm2', null, null, null, 0.22)
 ) as d(name, wood_type, description, tile_m, price, price_unit, thicknesses_mm, sheet_w, sheet_h, roughness)
 where v.platform
   and not exists (select 1 from public.fabrics f where f.vendor_id = v.id and f.kind = 'wood' and f.wood_type = d.wood_type);

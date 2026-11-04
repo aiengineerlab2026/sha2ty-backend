@@ -56,3 +56,18 @@ def test_untextured_requests_send_no_texture_prompt():
     sent: list[httpx.Request] = []
     anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=False), image=b"x", texture_prompt="ignored"))
     assert "texture_prompt" not in json.loads(sent[0].content)
+
+
+def test_meshy_is_asked_for_a_light_model_and_both_prompts_carry_the_size_rule():
+    from app.services.generation_prompt import astra_prompt, target_polycount
+
+    sent: list[httpx.Request] = []
+    prompt = meshy_texture_prompt("furniture", "Oslo chair", None, "dining chair")
+    anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True), image=b"x", texture_prompt=prompt, target_polycount=target_polycount("furniture", "dining chair")))
+    body = json.loads(sent[0].content)
+    # The real size controls Meshy has (no file-size option exists): remesh to a triangle budget, 2k textures.
+    assert body["should_remesh"] is True and body["target_polycount"] == 30000 and body["texture_resolution"] == "2k"
+    assert "under 8 MB" in body["texture_prompt"] and "backrest" in body["texture_prompt"] and len(body["texture_prompt"]) <= 800
+    assert target_polycount("furniture", "corner sofa") > target_polycount("furniture", "dining chair")
+    astra = astra_prompt("furniture", "Oslo bed", None, "double bed")
+    assert "under 8 MB" in astra and "headboard" in astra

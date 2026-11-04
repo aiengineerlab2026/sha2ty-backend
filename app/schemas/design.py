@@ -111,14 +111,15 @@ class PartDocument(BaseModel):
 
 
 class SourceModel(BaseModel):
-    """The catalogue original a design started from (server-filled)."""
+    """The original a design started from (server-filled): a catalogue listing, or the customer's own model."""
 
     model_config = ConfigDict(extra="forbid")
     model_id: UUID
     title: str
     vendor_id: UUID | None = None
-    # Who made the listing: a vendor (requests go to them only) or the platform's own catalogue (open requests).
-    source_type: Literal["vendor", "platform"] | None = None
+    # Who made it: a vendor (requests go to them only), the platform's own catalogue or the customer's own model
+    # made from their photo (user_models; both open to every approved vendor).
+    source_type: Literal["vendor", "platform", "user"] | None = None
     glb_url: str
     source_glb_url: str | None = None
     width_m: float | None = None
@@ -203,6 +204,14 @@ def plan_kind(snapshot: PlanSnapshot) -> DesignKind:
 
 
 # ---- request bodies ----
+
+
+class FromUserModelBody(BaseModel):
+    """A design from one of the customer's own models (user_models): sizes, parts and materials edited like a
+    customised catalogue model, and requested from every vendor."""
+
+    user_model_id: UUID
+    title: str = Field(default="", max_length=200)
 
 
 class FromModelBody(BaseModel):

@@ -67,7 +67,8 @@ def test_product_details_same_json_from_both_providers(tmp_path, model):
 def test_details_guide_the_generation_prompts_as_estimates():
     details = product_details.clean(ProductDetails.model_validate({**SOFA, "height_m": 0.85}))
     meshy = meshy_texture_prompt("furniture", "Oslo sofa", details)
-    assert "three-seat sofa" in meshy and "grey fabric seat cushions" in meshy and len(meshy) <= 600
+    assert "three-seat sofa" in meshy and "grey fabric seat cushions" in meshy and len(meshy) <= 800  # Meshy's limit
+    assert "under 8 MB" in meshy and "seat cushions, back cushions" in meshy  # the size rule, with a sofa's parts
     astra = astra_prompt("furniture", "Oslo sofa", details)
     assert "roughly 2.20 m wide" in astra and "estimated" in astra and "does not show the back" in astra
     assert meshy_texture_prompt("furniture", "Oslo sofa") == meshy_texture_prompt("furniture", "Oslo sofa", None)  # no details: as before

@@ -7,6 +7,7 @@ cookie set by the Next.js app, which forwards it as the X-Admin-Token header.
 from __future__ import annotations
 
 import hashlib
+import logging
 import hmac
 import time
 from typing import Annotated, Literal
@@ -24,6 +25,7 @@ from app.services import generator_setting, vision
 from app.services.auth import service_headers
 from app.services.platform import ensure_platform_vendor, is_platform, platform_session
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
@@ -83,6 +85,48 @@ async def list_vendors(request: Request) -> dict[str, object]:
     if response.status_code >= 400:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not load vendors. Run supabase/vendor_approval.sql.")
     return {"vendors": response.json()}
+
+
+async def _users(settings, client: httpx.AsyncClient) -> dict[str, dict[str, str]]:
+    """id → name and email of every account (Supabase Auth admin API, service key; up to 1000 per page)."""
+    out: dict[str, dict[str, str]] = {}
+    for page in range(1, 21):  # ponytail: 20 000 accounts; a search endpoint when there are more
+        response = await client.get(f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users", params={"page": page, "per_page": 1000}, headers=service_headers(settings))
+        users = response.json().get("users", []) if response.status_code < 400 else []
+        for u in users:
+            meta = u.get("user_metadata") or {}
+            out[u["id"]] = {"name": (meta.get("full_name") or meta.get("name") or "").strip(), "email": u.get("email") or ""}
+        if len(users) < 1000:
+            break
+    return out
+
+
+@router.get("/models", dependencies=[Depends(require_admin)])
+async def list_models(request: Request) -> dict[str, object]:
+    """Every model on the platform with its owner: vendors' listings, Sha2ty's own catalogue, and customers' private
+    models made from their photos (user_models; never shown to anyone else)."""
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    base = settings.supabase_url.rstrip("/") + "/rest/v1"
+    # Columns both tables have (models has no thumbnail_url: a listing's picture is its source image).
+    fields = "id,title,status,category,width_m,height_m,depth_m,source_image_url,glb_url,created_at"
+    listings = await client.get(f"{base}/models?select={fields},vendor_id,vendors(name,email,platform,status)&order=created_at.desc", headers=service_headers(settings))
+    if listings.status_code >= 400:
+        logger.warning("Admin models list failed: %s %s", listings.status_code, listings.text[:300])
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not load the models.")
+    private = await client.get(f"{base}/user_models?select=*&order=created_at.desc", headers=service_headers(settings))
+    users = await _users(settings, client)
+    rows: list[dict[str, object]] = []
+    for m in listings.json():
+        vendor = m.pop("vendors", None) or {}
+        account = users.get(str(m.get("vendor_id")), {})
+        kind = "platform" if vendor.get("platform") else "vendor"
+        rows.append({**m, "thumbnail_url": None, "kind": kind, "owner": {"id": m.get("vendor_id"), "name": vendor.get("name") or account.get("name") or "", "email": vendor.get("email") or account.get("email") or "", "status": vendor.get("status")}})
+    for m in private.json() if private.status_code < 400 else []:  # before user_models.sql: none
+        account = users.get(str(m.get("owner_id")), {})
+        rows.append({**{k: m.get(k) for k in fields.split(",")}, "thumbnail_url": m.get("thumbnail_url"), "kind": "customer", "owner": {"id": m.get("owner_id"), "name": account.get("name", ""), "email": account.get("email", ""), "status": None}})
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return {"models": rows}
 
 
 class StatusBody(BaseModel):
