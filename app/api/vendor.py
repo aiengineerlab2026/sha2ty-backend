@@ -15,7 +15,7 @@ from app.core.config import Settings, get_settings
 from app.core.events import bus
 from app.domain.errors import DomainError
 from app.domain.events import GenerationFailed, GenerationStarted, UserRegistered
-from app.domain.generation import Provider, QuotaExhausted, remaining as tries_left
+from app.domain.generation import PROVIDER_NAME, Provider, QuotaExhausted, remaining as tries_left
 from app.domain.vendor import Vendor
 from app.services.astra_service import AstraError, AstraService
 from app.services.auth import create_confirmed_user, user_id_from_bearer
@@ -35,7 +35,7 @@ from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 logger = logging.getLogger(__name__)
-GLB_CACHE_VERSION = "vendor-glb-v1"
+GLB_CACHE_VERSION = "vendor-glb-v2"  # v2: chair / sofa parts, part prompts
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -230,10 +230,11 @@ def modular(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, 
     family = furniture_family(category, kind or None)
     info = inspect_glb(glb, family)
     if info.get("separated"):
-        return glb, None, info
+        return glb, None, {**info, "method": "file"}
     split = segment_glb(glb, family)
     if split is None:
-        return glb, None, info
+        logger.info("No parts for this %s: one mesh, and its geometry shows no separable parts", family)
+        return glb, None, {**info, "method": "none", "limits": "Not split into parts: the generator returned one fused mesh and its geometry shows no separate parts. Color and texture change the whole model."}
     modular_glb, doc = split
     return modular_glb, glb, doc
 
@@ -314,24 +315,24 @@ async def generate_model(
             result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
-    if provider == "astra":
+    if provider in ("astra", "sol"):  # both OpenAI models via the Responses API
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
         if not raw:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
-        remaining = await take_try(request, user_id, "astra", settings)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{PROVIDER_NAME[provider]} needs the photo file, not only a URL.")
+        remaining = await take_try(request, user_id, provider, settings)
         try:
             details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
-            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None))
+            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None)
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
             await remember(url, details, components, source_url)
         except (AstraError, CdnError) as exc:
-            await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
+            await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
-        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining, details=details, components=components, source_glb_url=source_url)
+        return GenerateReady(task_id=object_id, provider=provider, glb_url=url, remaining=remaining, details=details, components=components, source_glb_url=source_url)
 
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
@@ -430,7 +431,7 @@ async def get_task(
             info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
             logger.info("Meshy Auto Split GLB for %s: separated=%s components=%s", task_id, info.get("separated"), [c["name"] for c in info.get("components", [])])
             if info.get("separated"):  # independently editable meshes in the file, not just a reported count
-                data, source_glb, components = split_dest.read_bytes(), data, info
+                data, source_glb, components = split_dest.read_bytes(), data, {**info, "method": "meshy_auto_split"}
         if components is None:
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))

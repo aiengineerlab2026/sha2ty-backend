@@ -4,8 +4,8 @@ from typing import Literal
 
 from app.domain.errors import DomainError
 
-Provider = Literal["meshy", "astra"]
-PROVIDER_NAME: dict[str, str] = {"meshy": "Meshy", "astra": "GPT Astra"}
+Provider = Literal["meshy", "astra", "sol"]
+PROVIDER_NAME: dict[str, str] = {"meshy": "Meshy", "astra": "GPT Astra", "sol": "GPT Sol"}
 
 
 class QuotaExhausted(DomainError):

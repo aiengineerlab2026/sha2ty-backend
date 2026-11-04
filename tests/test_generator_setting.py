@@ -31,7 +31,8 @@ def test_admin_sets_the_generator(monkeypatch):
 
     headers = {"X-Admin-Token": issue_token(settings)[0]}
     assert test.put("/api/admin/generator", headers=headers, json={"provider": "astra"}).status_code == 409  # no OpenAI key
+    assert test.put("/api/admin/generator", headers=headers, json={"provider": "sol"}).status_code == 409
     assert test.put("/api/admin/generator", headers=headers, json={"provider": "meshy"}).json() == {"provider": "meshy"}
     assert saved == [{"key": "model_generator", "value": "meshy"}]
     body = test.get("/api/admin/generator", headers=headers).json()
-    assert body["provider"] == "meshy" and [o["configured"] for o in body["options"]] == [True, False]
+    assert body["provider"] == "meshy" and [o["configured"] for o in body["options"]] == [True, False, False]

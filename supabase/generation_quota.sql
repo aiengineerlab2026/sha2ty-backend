@@ -3,7 +3,7 @@
 
 create table if not exists public.generation_usage (
   vendor_id uuid not null references auth.users (id) on delete cascade,
-  provider text not null check (provider in ('meshy', 'astra')),
+  provider text not null check (provider in ('meshy', 'astra', 'sol')),
   used integer not null default 0 check (used >= 0),
   primary key (vendor_id, provider)
 );

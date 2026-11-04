@@ -1,4 +1,4 @@
-"""Which service turns vendors' photos into 3D models (Meshy or GPT Astra): chosen by the admin, never by the vendor.
+"""Which service turns vendors' photos into 3D models (Meshy, GPT Astra or GPT Sol): chosen by the admin, never by the vendor.
 
 Stored in public.app_settings under "model_generator" (supabase/app_settings.sql), read with the service key and
 cached briefly like the vision model; MODEL_GENERATOR (default meshy) when unset or unreadable.
@@ -17,7 +17,7 @@ from app.services.auth import service_headers
 
 logger = logging.getLogger(__name__)
 
-LABELS: dict[Provider, str] = {"meshy": "Meshy", "astra": "GPT Astra"}
+LABELS: dict[Provider, str] = {"meshy": "Meshy", "astra": "GPT Astra", "sol": "GPT Sol"}
 CACHE_SECONDS = 30.0
 _cached: tuple[float, Provider] | None = None
 

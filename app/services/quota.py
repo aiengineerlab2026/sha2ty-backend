@@ -8,7 +8,7 @@ from fastapi import HTTPException, status
 from app.core.config import Settings
 from app.services.auth import service_headers
 
-Provider = Literal["meshy", "astra"]
+Provider = Literal["meshy", "astra", "sol"]
 NOT_SET_UP = "Generation limits are not set up. Run backend/supabase/generation_quota.sql in Supabase."
 
 
@@ -33,6 +33,6 @@ async def generation_usage(vendor_id: str, settings: Settings, client: httpx.Asy
     )
     if response.status_code >= 400:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, NOT_SET_UP)
-    used = {"meshy": 0, "astra": 0}
+    used = {"meshy": 0, "astra": 0, "sol": 0}
     used.update({row["provider"]: row["used"] for row in response.json()})
     return used
