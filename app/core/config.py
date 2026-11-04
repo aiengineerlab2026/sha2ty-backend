@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"
+    # ponytail: GPT Sol runs through the same code as Astra, only the model differs; set OPENAI_SOL_MODEL if OpenAI names it differently.
+    openai_sol_model: str = "gpt-6-sol"
     # Floor plans: GPT reads room names and measurements before the OpenCV conversion ("" turns it off).
     # Default vision model (floor plans, vendor photos) until the admin picks one (services/vision.py):
     # gemini-* → Google Gemini (GEMINI_API_KEY), otherwise OpenAI Responses (OPENAI_API_KEY).

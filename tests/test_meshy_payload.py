@@ -45,7 +45,7 @@ def test_texture_prompt_and_split_prompt_are_in_the_outgoing_payloads(caplog):
 
     assert split_req.url.path == "/openapi/v1/print/split"
     assert json.loads(split_req.content) == {"input_task_id": "task-123", "mode": "by_parts", "prompt": parts, "keep_texture": True}
-    assert parts == "frame, seat cushions, back pillows, armrests, legs"
+    assert parts == "frame, seat cushions, back cushions, left armrest, right armrest, throw pillows, legs"
 
     logs = caplog.text
     assert "texture_prompt" in logs and "task_id=task-123" in logs

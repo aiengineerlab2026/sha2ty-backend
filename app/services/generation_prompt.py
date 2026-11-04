@@ -35,13 +35,15 @@ _FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("chair", ("chair", "armchair", "stool")),
     ("door", ("door",)),
 )
+# The parts each furniture type is cut into (Meshy Auto Split by_parts names 1–10 parts in at most 600 characters):
+# each one a separate, independently editable mesh.
 _PARTS = {
-    "sofa": "frame, seat cushions, back pillows, armrests, legs",
-    "bed": "frame, mattress, headboard, pillows",
-    "wardrobe": "body, doors, drawers, handles",
-    "table": "tabletop, legs, frame",
-    "chair": "seat, back, legs, arms",
-    "door": "leaf, frame, handle",
+    "sofa": "frame, seat cushions, back cushions, left armrest, right armrest, throw pillows, legs",
+    "bed": "headboard, bed frame, side rails, mattress, pillows, blanket, legs",
+    "wardrobe": "cabinet body, doors, drawers, handles, legs or plinth",
+    "table": "tabletop, apron frame, legs",
+    "chair": "backrest, seat cushion, frame, front legs, rear legs, armrests",
+    "door": "door leaf, door frame, handle",
 }
 
 

@@ -131,7 +131,7 @@ class VisionBody(BaseModel):
 
 
 class GeneratorBody(BaseModel):
-    provider: Literal["meshy", "astra"]
+    provider: Literal["meshy", "astra", "sol"]
 
 
 @router.get("/generator", dependencies=[Depends(require_admin)])

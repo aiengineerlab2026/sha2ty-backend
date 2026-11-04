@@ -115,3 +115,43 @@ def test_the_generate_step_saves_the_split_model_and_keeps_the_original():
     block = _one_mesh_glb(_box(2.0, 0.8, 0.9))
     glb, source, doc = modular(block, "furniture", "corner sofa")
     assert glb == block and source is None and doc["separated"] is False
+
+
+def _chair(textured=False):
+    # 0.5 m chair, front +Z: 4 legs to 0.45 m, an 8 cm seat cushion, a backrest at the back up to 1 m.
+    legs = [_box(0.04, 0.45, 0.04, x=sx * 0.23, z=sz * 0.23) for sx in (-1, 1) for sz in (-1, 1)]
+    seat = _box(0.5, 0.08, 0.5, y=0.45)
+    back = _box(0.5, 0.47, 0.05, y=0.53, z=-0.225)
+    return _one_mesh_glb(*(p.subdivide().subdivide() for p in (*legs, seat, back)), textured=textured)  # dense, like generated meshes
+
+
+def test_a_chair_from_one_mesh_gets_backrest_seat_and_front_and_rear_legs():
+    glb, doc = segment_glb(_chair(textured=True), "chair")
+    scene = trimesh.load(trimesh.util.wrap_as_stream(glb), file_type="glb", force="scene")
+    assert {"backrest", "seat_cushion", "front_legs", "rear_legs"} <= set(scene.geometry)
+    assert doc["separated"] and doc["method"] == "geometry"
+    for part in scene.geometry.values():  # independent meshes, each keeping its UVs
+        assert part.visual.uv is not None and len(part.visual.uv) == len(part.vertices)
+    assert sum(len(p.faces) for p in scene.geometry.values()) == 6 * 12 * 16  # every face kept, none duplicated
+    # The back's centre is behind the seat's; front legs are in front.
+    centre = {k: g.bounds.mean(axis=0) for k, g in scene.geometry.items()}
+    assert centre["backrest"][2] < centre["seat_cushion"][2] < centre["front_legs"][2]
+    assert centre["rear_legs"][2] < 0 < centre["front_legs"][2]
+
+
+def test_meshy_split_parts_are_named_from_where_they_sit():
+    import anyio
+    from app.services.part_names import name_components
+
+    scene = trimesh.Scene()
+    for i, part in enumerate([_box(0.5, 0.08, 0.5, y=0.45), _box(0.5, 0.47, 0.05, y=0.53, z=-0.225), _box(0.04, 0.45, 0.04, x=0.23, z=0.23), _box(0.04, 0.45, 0.04, x=0.23, z=-0.23)]):
+        scene.add_geometry(part, geom_name=f"model_part{i}", node_name=f"model_part{i}")  # as Meshy Auto Split names them
+    doc = anyio.run(name_components, inspect_glb(scene.export(file_type="glb"), "chair"), "chair")
+    assert [c["name"] for c in doc["components"]] == ["Seat Cushion", "Backrest", "Front Leg", "Rear Leg"]
+
+
+def test_a_model_that_cannot_be_split_says_how_it_was_left():
+    from app.api.vendor import modular
+
+    _, _, doc = modular(_one_mesh_glb(_box(0.6, 0.9, 0.6)), "furniture", "armchair")
+    assert doc["separated"] is False and doc["method"] == "none" and "Not split" in doc["limits"]

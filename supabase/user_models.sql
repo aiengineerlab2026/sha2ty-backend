@@ -21,6 +21,11 @@ create table if not exists public.user_models (
   created_at timestamptz not null default now()
 );
 
+-- Edited in the app's parts editor (same as a vendor model): the material edits, a thumbnail and a save counter.
+alter table public.user_models add column if not exists material_edits jsonb;
+alter table public.user_models add column if not exists thumbnail_url text;
+alter table public.user_models add column if not exists version integer not null default 1;
+
 create index if not exists user_models_owner_idx on public.user_models (owner_id, created_at desc);
 
 alter table public.user_models enable row level security;

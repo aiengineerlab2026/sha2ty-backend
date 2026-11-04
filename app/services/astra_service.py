@@ -26,10 +26,11 @@ class AstraService:
         self.settings = settings
         self.client = client
 
-    async def generate_glb(self, image: bytes, mime: str, prompt: str | None = None) -> bytes:
+    async def generate_glb(self, image: bytes, mime: str, prompt: str | None = None, model: str | None = None) -> bytes:
+        model = model or self.settings.openai_astra_model
         image_b64 = base64.b64encode(image).decode("ascii")
         payload = {
-            "model": self.settings.openai_astra_model,
+            "model": model,
             "store": True,
             "include": ["code_interpreter_call.outputs"],
             "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
@@ -54,7 +55,7 @@ class AstraService:
         if not glb and body.get("id"):
             body = await self._post_responses(
                 {
-                    "model": self.settings.openai_astra_model,
+                    "model": model,
                     "store": True,
                     "previous_response_id": body["id"],
                     "include": ["code_interpreter_call.outputs"],

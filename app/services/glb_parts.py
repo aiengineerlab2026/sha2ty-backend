@@ -8,8 +8,11 @@ A single mesh stays one editable object — cushions and legs are not invented h
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def inspect_glb(data: bytes, model_type: str = "furniture") -> dict[str, Any]:
@@ -152,7 +155,8 @@ def _pretty(name: str) -> str:
 #   1. disconnected pieces (generated legs, cushions or handles are often separate islands), found on a copy
 #      with vertices merged by position so UV seams do not cut the mesh into fake islands;
 #   2. legs: the bottom band, only when it covers little of the footprint (thin supports, not a solid plinth);
-#   3. a tabletop: the top band of a table, only when it covers most of the footprint (a real flat top).
+#   3. a tabletop: the top band of a table, only when it covers most of the footprint (a real flat top);
+#   4. a chair or sofa: backrest / back cushions, seat cushion(s) and front / rear legs, cut at the seat (`_seating`).
 # Parts keep their faces' UVs and texture, so the model looks exactly as generated; names come from the
 # furniture type the vendor selected. What geometry cannot tell apart (cushions fused to a frame, doors to a
 # wardrobe body) stays one piece, and the returned document says so.
@@ -186,15 +190,23 @@ def segment_glb(data: bytes, family: str) -> tuple[bytes, dict[str, Any]] | None
     if len(names) < 2:
         return None
     out = trimesh.Scene()
+    parts = []
     for name in names:
         faces = np.flatnonzero(np.array(labels) == name)
         part = mesh.submesh([faces], append=True)
+        parts.append(part)
         out.add_geometry(part, geom_name=name, node_name=name)
+    # Every original face in exactly one part, each with its own UVs: a cut that lost geometry or texture is not used.
+    uv = getattr(mesh.visual, "uv", None)
+    if sum(len(p.faces) for p in parts) != len(mesh.faces) or (uv is not None and any(getattr(p.visual, "uv", None) is None or len(p.visual.uv) != len(p.vertices) for p in parts)):
+        logger.warning("Geometry split of a %s dropped faces or UVs; the model is kept whole", family)
+        return None
     glb = out.export(file_type="glb")
     doc = inspect_glb(glb, family)
     if not doc.get("separated"):
         return None
     doc["segmented"] = True
+    doc["method"] = "geometry"
     merged = {"sofa": "cushions and frame", "bed": "mattress, headboard and frame", "wardrobe": "doors and body", "table": "frame and legs"}.get(family)
     doc["limits"] = (
         "Split from the generated geometry (Meshy returns one mesh): " + ", ".join(_pretty(n) for n in names) + "."
@@ -215,7 +227,7 @@ def _labels(mesh, family: str, np, trimesh) -> list[str]:
     lo, hi = mesh.bounds
     height = max(hi[1] - lo[1], 1e-9)
     size = float(np.linalg.norm(hi - lo))
-    base = {"sofa": "frame", "bed": "frame", "table": "frame", "wardrobe": "body", "door": "leaf"}.get(family, "body")
+    base = {"sofa": "frame", "bed": "frame", "table": "frame", "chair": "frame", "wardrobe": "body", "door": "leaf"}.get(family, "body")
     labels = [base] * n
 
     # Connected islands on a position-merged copy (same face order), so UV seams do not split them.
@@ -264,8 +276,8 @@ def _labels(mesh, family: str, np, trimesh) -> list[str]:
             name = "leg"
         elif family in ("wardrobe", "door") and small:
             name = "handle"
-        elif family == "sofa":
-            name = "back_pillow" if bottom > 0.45 else "cushion"
+        elif family in ("sofa", "chair"):
+            continue  # cut by height below (_seating): an island above the seat is part of the back, etc.
         elif family == "bed":
             name = "pillow" if bottom > 0.35 else "mattress"
         else:
@@ -290,7 +302,45 @@ def _labels(mesh, family: str, np, trimesh) -> list[str]:
         if band.sum() >= MIN_PART_FACES and cover(np.flatnonzero(band)) < LEG_COVER:
             for f in np.flatnonzero(band):
                 labels[f] = "legs"
+    if family in ("chair", "sofa"):
+        _seating(mesh, labels, base, family, cover, np)
     return labels
+
+
+def _seating(mesh, labels: list[str], base: str, family: str, cover, np) -> None:
+    """A chair or sofa from one fused surface: the seat is the height with the most upward-facing area (20–75% up),
+    the back the side the surface above it leans to. Then: backrest / back cushions (above the seat, back part), seat
+    cushion(s) (a band down from the seat top), front / rear legs (thin supports under the seat, by side). Without a
+    clear seat or back it is left as it is (a stool, a bench)."""
+    lo, hi = mesh.bounds
+    height, depth = max(hi[1] - lo[1], 1e-9), max(hi[2] - lo[2], 1e-9)
+    c = mesh.triangles_center
+    y = (c[:, 1] - lo[1]) / height
+    z = (c[:, 2] - lo[2]) / depth
+    up = (mesh.face_normals[:, 1] > 0.7) & (y > 0.2) & (y < 0.75)
+    if mesh.area_faces[up].sum() < 0.03 * mesh.area_faces.sum():
+        return
+    hist, edges = np.histogram(y[up], bins=22, range=(0.2, 0.75), weights=mesh.area_faces[up])
+    seat = float(edges[int(np.argmax(hist))] + (edges[1] - edges[0]) / 2)
+    above = y > seat + 0.2
+    if above.sum() < MIN_PART_FACES or abs(float(z[above].mean()) - 0.5) < 0.08:
+        return  # nothing leans back above the seat: no backrest to cut
+    back = z if z[above].mean() < 0.5 else 1 - z  # 0 at the back
+    chair = family == "chair"
+    # Legs: everything under the seat cushion, when it covers little of the footprint (not a solid base).
+    under = np.array([l == base or l.startswith("leg") for l in labels]) & (y < seat - 0.15)
+    legs = under.sum() >= MIN_PART_FACES and cover(np.flatnonzero(under)) < LEG_COVER
+    for name, mask in (
+        ("backrest" if chair else "back_cushions", (y > seat + 0.06) & (back < 0.4)),
+        ("seat_cushion" if chair else "seat_cushions", (y > seat - 0.15) & (y <= seat + 0.06) & (back >= 0.15)),
+    ):
+        mask &= np.array([l == base for l in labels])
+        if mask.sum() >= MIN_PART_FACES:
+            for i in np.flatnonzero(mask):
+                labels[i] = name
+    for i, l in enumerate(labels):
+        if l.startswith("leg") or (legs and under[i]):
+            labels[i] = "front_legs" if back[i] >= 0.5 else "rear_legs"
 
 
 def _components(pairs, n: int, np):
