@@ -37,3 +37,12 @@ def test_vendor_proposes_and_customer_accepts(env, monkeypatch):  # noqa: F811
     assert row["spec"]["design"]["dimensions"]["width"] == 1.8 and row["spec"]["quantity"] == 2
     assert row["design_version_id"] != task["design_version_id"]
     assert client.post(f"/api/proposals/{proposal['id']}/decision", json={"accept": False}).status_code == 409
+
+    # A new version of the file: the vendor's own upload becomes the proposed design's base model.
+    task2 = client.post(f"/api/designs/{bed['id']}/request", json={"quantity": 1}).json()
+    new_file = f"{FILES}/{VENDOR}/p/new-version.glb"
+    assert client.post(f"/api/tasks/{task2['id']}/proposals", headers=as_vendor, json={**body, "model_url": f"{FILES}/{ALICE}/x.glb"}).status_code == 422
+    sent2 = client.post(f"/api/tasks/{task2['id']}/proposals", headers=as_vendor, json={**body, "model_url": new_file})
+    assert sent2.status_code == 201, sent2.text
+    row2 = next(p for p in fake.tables["task_proposals"] if p["id"] == sent2.json()["id"])
+    assert row2["data"]["item"]["source"]["glb_url"] == new_file

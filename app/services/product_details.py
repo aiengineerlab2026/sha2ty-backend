@@ -24,7 +24,7 @@ from app.services.generation_prompt import object_description
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "product-details-v4"  # bump with PROMPT or the schema: invalidates the cache
+SCHEMA_VERSION = "product-details-v5"  # bump with PROMPT or the schema: invalidates the cache
 NAME_MAX = 80
 DESCRIPTION_MAX = 400
 ARABIC = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
@@ -49,6 +49,8 @@ SIZE_RANGE_M = (0.02, 6.0)  # outside this, an estimated size is noise
 PROMPT = """You are a furniture and product modeller looking at a vendor's product photo. The vendor says it is {what}.
 Describe the main object as JSON so it can be modelled in 3D.
 - object_type: what it is, specifically. matches_category: false if the photo shows something else.
+- category: its catalogue type: furniture (sofas, beds, chairs, storage), table, wardrobe, door, tv, lighting
+  (floor / table lamps), ceiling_light, air_conditioner or wall_art.
 - bbox: the main object's boundary; components: every visible part with its bbox, material and colour.
   Boxes are normalised to the image (x_min, y_min, x_max, y_max; 0..1, origin top-left).
 - orientation of the camera to the object; proportions width : depth : height with the largest = 1.

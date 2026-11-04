@@ -463,3 +463,67 @@ def test_generate_and_measure_pass_the_listing_language(tmp_path, monkeypatch):
     finally:
         app.dependency_overrides.clear()
     assert seen == ["en", "ar"]  # English when asked, Arabic by default
+
+
+def test_photo_only_generation_takes_the_type_from_the_reading(tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, **kwargs):
+        calls.append((category, kwargs.get("kind")))
+        return product_details.clean(ProductDetails.model_validate({**SOFA, "category": "furniture"}))
+
+    class FakeMeshy:
+        async def create_image_to_3d_task(self, _options, **kwargs):
+            return "task-1"
+
+    async def one_try(*_args):
+        return 4
+
+    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "take_try", one_try)
+    app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
+    app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    try:
+        with TestClient(app) as client:
+            png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+            response = client.post("/api/vendor/generate", files={"image": ("p.png", png, "image/png")}, data={"category": "auto"})
+            pending = next(iter(app.state.pending_cdn.values()))
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200, response.text
+    assert calls == [("auto", None)]  # read once, before generating
+    assert pending["category"] == "furniture" and pending["kind"] == "three-seat sofa"
+    assert response.json()["details"]["category"] == "furniture"
+
+
+def test_typed_furniture_type_goes_into_the_meshy_prompt(tmp_path, monkeypatch):
+    calls = {}
+
+    async def fake_details(image, mime, category, title, _settings, _client, model, db=None, **kwargs):
+        calls["read"] = (category, kwargs.get("kind"))
+        return product_details.clean(ProductDetails.model_validate({**SOFA, "category": "furniture"}))
+
+    class FakeMeshy:
+        async def create_image_to_3d_task(self, _options, **kwargs):
+            calls["prompt"] = kwargs["texture_prompt"]
+            return "task-2"
+
+    async def one_try(*_args):
+        return 4
+
+    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "take_try", one_try)
+    app.dependency_overrides[vendor.current_user] = lambda: "user-1"
+    app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    try:
+        with TestClient(app) as client:
+            png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+            response = client.post("/api/vendor/generate", files={"image": ("p.png", png, "image/png")}, data={"category": "auto", "kind": "corner sofa"})
+            pending = app.state.pending_cdn["task-2"]
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200, response.text
+    assert calls["read"] == ("auto", "corner sofa")
+    assert "corner sofa" in calls["prompt"] and pending["kind"] == "corner sofa"

@@ -25,6 +25,10 @@ class Component(BaseModel):
 class ProductDetails(BaseModel):
     object_type: str = Field(description="What the main object is, e.g. 'three-seat sofa'")
     matches_category: bool = Field(default=True, description="False when the photo shows something else than the vendor's category")
+    # The catalogue type it belongs to (backend generation_prompt.OBJECTS): filled in when the vendor did not say.
+    category: Literal["furniture", "table", "wardrobe", "door", "wall_art", "tv", "lighting", "ceiling_light", "air_conditioner"] | None = Field(
+        default=None, description="Which catalogue type the object is"
+    )
     # The catalogue listing, used when the vendor leaves the model's name or description empty.
     name: str = Field(default="", description="In the requested listing language: a short catalogue name for the product")
     description: str = Field(default="", description="In the requested listing language: one or two plain sentences for a shop listing (style, materials, colours, notable parts); only what is visible")

@@ -30,6 +30,7 @@ from app.services.product_details import extract_product_details, in_language
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services.meshy_service import MeshyError, MeshyService
+from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
@@ -143,13 +144,18 @@ async def current_user(
 class QuotaResponse(BaseModel):
     limit: int
     remaining: dict[str, int]
+    provider: Provider = "meshy"  # the generator in use (the admin's choice)
 
 
 @router.get("/generation-quota", response_model=QuotaResponse)
 async def generation_quota(request: Request, user_id: Annotated[str, Depends(current_user)]) -> QuotaResponse:
     settings = get_settings()
     used = await generation_usage(user_id, settings, request.app.state.auth_http)
-    return QuotaResponse(limit=settings.generation_limit, remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()})
+    return QuotaResponse(
+        limit=settings.generation_limit,
+        remaining={p: tries_left(settings.generation_limit, n) for p, n in used.items()},
+        provider=await generator_setting.current(settings, request.app.state.auth_http),
+    )
 
 
 def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "") -> str:
@@ -262,7 +268,8 @@ async def generate_model(
     user_id: Annotated[str, Depends(current_user)],
     image: Annotated[UploadFile | None, File()] = None,
     image_url: Annotated[str | None, Form()] = None,
-    provider: Annotated[Provider, Form()] = "meshy",
+    # Ignored: the generator is the admin's choice (app/services/generator_setting.py). Kept so older clients work.
+    provider: Annotated[Provider | None, Form()] = None,
     model_id: Annotated[str | None, Form()] = None,
     should_texture: Annotated[str, Form()] = "true",
     category: Annotated[str, Form(max_length=40)] = "furniture",
@@ -270,6 +277,7 @@ async def generate_model(
     kind: Annotated[str, Form(max_length=60)] = "",  # furniture: the type the vendor typed ("corner sofa")
     lang: Annotated[Literal["ar", "en"], Form()] = "ar",  # the listing (name, description) in the vendor's interface language
 ) -> GenerateAccepted | GenerateReady:
+    provider = await generator_setting.current(settings, request.app.state.auth_http)
     raw = await image.read() if image is not None else b""
     public_url = (image_url or "").strip() or None
     if raw:
@@ -293,6 +301,14 @@ async def generate_model(
             details = await read_photo(request, settings, raw, mime, category, title, kind, lang) or details
         return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details, components=hit.get("components"), source_glb_url=hit.get("source_glb_url"))
 
+    # Only a photo (the app's camera): read it first and take the type from it (furniture: what it is exactly).
+    preread: ProductDetails | None = None
+    if category == "auto":
+        preread = await read_photo(request, settings, raw, mime, "auto", title, kind, lang) if raw else None
+        category = preread.category if preread and preread.category else "furniture"
+        # What the user typed wins (it goes into the Meshy / Astra prompt); else what the reading saw.
+        kind = (kind.strip() or (preread.object_type if preread and category == "furniture" else ""))[:60]
+
     async def remember(url: str, details: ProductDetails | None, components: dict | None = None, source_url: str | None = None) -> None:
         if cache_key:
             result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url}
@@ -305,7 +321,7 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Astra needs the photo file, not only a URL.")
         remaining = await take_try(request, user_id, "astra", settings)
         try:
-            details = await read_photo(request, settings, raw, mime, category, title, kind, lang)
+            details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None))
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
@@ -320,7 +336,7 @@ async def generate_model(
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
-    details = await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None
+    details = preread or (await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None)
     try:
         task_id = await meshy.create_image_to_3d_task(
             GenerationOptions(should_texture=textured, enable_pbr=False),

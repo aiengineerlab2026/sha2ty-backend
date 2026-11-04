@@ -50,7 +50,12 @@ def object_description(category: str | None, title: str | None = None, kind: str
     furniture description, so the vision model, Meshy and Astra know exactly what to measure and model."""
     custom = " ".join((kind or "").split())[:60]
     category = (category or "").strip()
-    what = f"a single {custom} (a piece of furniture)" if category in ("", "furniture") and custom else OBJECTS.get(category, OBJECTS["furniture"])
+    if category == "auto":  # only a photo (the app's camera): the reading decides its type; a typed type says what it is
+        return f"a single {custom}" if custom else "the single main product in the photo (furniture, a table, wardrobe, door, TV unit, lamp, ceiling light, air conditioner or wall art)"
+    if custom and category not in ("", "furniture"):  # typed in the app for a type read from the photo
+        what = f"{OBJECTS.get(category, OBJECTS['furniture'])}, specifically a {custom}"
+    else:
+        what = f"a single {custom} (a piece of furniture)" if custom else OBJECTS.get(category, OBJECTS["furniture"])
     name = (title or "").strip()
     return f"{what}{f' — the product “{name[:80]}”' if name else ''}"
 
