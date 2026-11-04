@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -21,7 +22,10 @@ from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import vision
-from app.services.generation_prompt import astra_prompt, meshy_texture_prompt
+from app.services.generation_prompt import astra_prompt, furniture_family, meshy_texture_prompt, split_prompt
+from app.services.glb_parts import inspect_glb, segment_glb, write_names
+from app.services.part_names import name_components
+from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
@@ -29,6 +33,7 @@ from app.services.meshy_service import MeshyError, MeshyService
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
+logger = logging.getLogger(__name__)
 GLB_CACHE_VERSION = "vendor-glb-v1"
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
@@ -49,6 +54,8 @@ class GenerateReady(BaseModel):
     glb_url: str
     remaining: int | None = None
     details: ProductDetails | None = None
+    components: dict | None = None  # meshes that actually exist in the GLB (glb_parts.inspect_glb)
+    source_glb_url: str | None = None  # the untouched generated GLB, when glb_url is its split (modular) version
 
 
 class TaskStatusResponse(BaseModel):
@@ -58,6 +65,8 @@ class TaskStatusResponse(BaseModel):
     glb_url: str | None = None
     error: str | None = None
     retry_after_seconds: float | None = None
+    components: dict | None = None
+    source_glb_url: str | None = None
 
 
 def sniff_image_mime(data: bytes) -> str | None:
@@ -193,13 +202,54 @@ async def product_details(
 
 
 async def take_try(request: Request, user_id: str, provider: Provider, settings: Settings) -> int:
-    """Reserve one generation try; 429 when the vendor has used them all. Returns tries left."""
+    """Reserve one generation try; 429 when the vendor has used them all. Returns tries left.
+    The platform's own catalogue (admins as Sha2ty) has no limit."""
+    if await is_platform(user_id, settings, request.app.state.auth_http):
+        return settings.generation_limit
     used = await use_generation(user_id, provider, 1, settings, request.app.state.auth_http)
     if used is None:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(QuotaExhausted(provider, settings.generation_limit)))
     left = tries_left(settings.generation_limit, used)
     await bus.publish(GenerationStarted(user_id, provider, left), request.app.state)
     return left
+
+
+def modular(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, bytes | None, dict]:
+    """The GLB to save, the untouched generated one when it was split (else None), and its component document.
+
+    The meshes the file really has are listed first (Astra can write separate parts; Meshy's image-to-3D has no
+    part option and usually returns one mesh). One mesh: split from its geometry where it can be
+    (glb_parts.segment_glb); otherwise it stays one editable object and the document says so. The part names
+    follow the furniture type the vendor selected, never what the photo reading says."""
+    family = furniture_family(category, kind or None)
+    info = inspect_glb(glb, family)
+    if info.get("separated"):
+        return glb, None, info
+    split = segment_glb(glb, family)
+    if split is None:
+        return glb, None, info
+    modular_glb, doc = split
+    return modular_glb, glb, doc
+
+
+async def named(request: Request, glb: bytes, doc: dict, category: str | None, kind: str | None) -> tuple[bytes, dict]:
+    """Descriptive part names (services/part_names.py), saved in the component document and in the GLB itself."""
+    settings = get_settings()
+    model = await vision.current_model(settings, request.app.state.auth_http)
+
+    async def ask(prompt: str, schema: dict) -> str | None:
+        if not vision.configured(settings, model):
+            return None
+        return await vision.ask_json([{"type": "input_text", "text": prompt}], schema, "part_names", settings, vision.client_for(request.app.state, model), model)
+
+    doc = await name_components(doc, furniture_family(category, kind or None), ask)
+    if not doc.get("separated"):
+        return glb, doc
+    try:
+        return await run_in_threadpool(write_names, glb, doc["components"]), doc
+    except (ValueError, KeyError) as exc:
+        logger.warning("Could not write part names into the GLB: %s", exc)
+        return glb, doc
 
 
 @router.post("/generate")
@@ -241,11 +291,11 @@ async def generate_model(
         # (the reading is cached per language, and costs no generation try).
         if details is None or not all(in_language(t, lang) for t in (details.name, details.description) if t):
             details = await read_photo(request, settings, raw, mime, category, title, kind, lang) or details
-        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details)
+        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details, components=hit.get("components"), source_glb_url=hit.get("source_glb_url"))
 
-    async def remember(url: str, details: ProductDetails | None) -> None:
+    async def remember(url: str, details: ProductDetails | None, components: dict | None = None, source_url: str | None = None) -> None:
         if cache_key:
-            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None}
+            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
     if provider == "astra":
@@ -257,12 +307,15 @@ async def generate_model(
         try:
             details = await read_photo(request, settings, raw, mime, category, title, kind, lang)
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None))
+            glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
+            glb, components = await named(request, glb, components, category, kind)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
-            await remember(url, details)
+            source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
+            await remember(url, details, components, source_url)
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, "astra"), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
-        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining, details=details)
+        return GenerateReady(task_id=object_id, provider="astra", glb_url=url, remaining=remaining, details=details, components=components, source_glb_url=source_url)
 
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
@@ -282,6 +335,10 @@ async def generate_model(
     request.app.state.pending_cdn[task_id] = {
         "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
         "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
+        "category": category,
+        "kind": kind,
+        "split": split_prompt(category, kind or None) if settings.meshy_auto_split else None,  # Auto Split parts
+        "textured": textured,
     }
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
@@ -311,17 +368,35 @@ async def get_task(
             progress=progress,
             error=str(err),
         )
+    pending = request.app.state.pending_cdn.get(task_id) or {}
+    if pending.get("user_id") and pending["user_id"] != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
+    splitting = bool(pending.get("split"))
     if status_value != "SUCCEEDED":
         return TaskStatusResponse(
             task_id=task_id,
             status=status_value,
-            progress=progress,
+            progress=progress * 9 // 10 if splitting else progress,  # the last 10% is the part split
             retry_after_seconds=retry_after or 5,
         )
 
-    pending = request.app.state.pending_cdn.get(task_id) or {}
-    if pending.get("user_id") and pending["user_id"] != user_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
+    # Meshy image-to-3D returns one mesh; Auto Split cuts it into the vendor's furniture parts. Any split
+    # failure keeps the generated model (split from its geometry by `modular`, or left whole).
+    split_glb_url = None
+    if splitting:
+        try:
+            if not pending.get("split_task_id"):
+                pending["split_task_id"] = await meshy.create_split_task(task_id, pending["split"], bool(pending.get("textured")))
+            split = await meshy.get_split_task(pending["split_task_id"])
+        except MeshyError as exc:
+            logger.warning("Meshy Auto Split for %s failed: %s", task_id, exc.message)
+            pending["split"] = None
+        else:
+            split_status = str(split.get("status"))
+            if split_status in {"PENDING", "IN_PROGRESS"}:
+                return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 10, retry_after_seconds=5)
+            split_glb_url = (split.get("model_urls") or {}).get("glb") if split_status == "SUCCEEDED" else None
+            logger.info("Meshy Auto Split %s: status=%s part_count=%s prompt_ignored=%s error=%s", pending["split_task_id"], split_status, split.get("part_count"), split.get("prompt_ignored"), split.get("task_error"))
     owner = pending.get("user_id") or user_id
     object_id = pending.get("model_id") or task_id
     model_urls = task.get("model_urls") or {}
@@ -331,14 +406,27 @@ async def get_task(
     dest = request.app.state.storage.models_dir / f"{task_id}.glb"
     try:
         await meshy.download_file(glb_url, dest, get_settings().max_model_bytes)
-        url = cdn.upload(f"{owner}/{object_id}.glb", dest.read_bytes(), "model/gltf-binary")
+        data = dest.read_bytes()
+        components = None
+        if split_glb_url:
+            split_dest = dest.with_suffix(".split.glb")
+            await meshy.download_file(split_glb_url, split_dest, get_settings().max_model_bytes)
+            info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
+            logger.info("Meshy Auto Split GLB for %s: separated=%s components=%s", task_id, info.get("separated"), [c["name"] for c in info.get("components", [])])
+            if info.get("separated"):  # independently editable meshes in the file, not just a reported count
+                data, source_glb, components = split_dest.read_bytes(), data, info
+        if components is None:
+            data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
+        data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
+        source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
     if pending.get("cache_key"):
-        result = {"glb_url": url, "model_id": object_id, "details": pending.get("details")}
+        result = {"glb_url": url, "model_id": object_id, "details": pending.get("details"), "components": components, "source_glb_url": source_url}
         await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
     request.app.state.pending_cdn.pop(task_id, None)
-    return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url)
+    return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url, components=components, source_glb_url=source_url)
 
 
 MAX_CARPET_PHOTO = 15 * 1024 * 1024

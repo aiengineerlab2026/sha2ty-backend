@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     meshy_base_url: str = "https://api.meshy.ai/openapi/v1"
     meshy_request_timeout_seconds: float = 120.0
     meshy_download_timeout_seconds: float = 300.0
+    # The platform's own vendor (admin-added catalogue models): its system user's email (services/platform.py).
+    platform_vendor_email: str = "studio@sha2ty.app"
+    # After image-to-3D, split the model into its named parts with Meshy Auto Split (10 credits a task).
+    meshy_auto_split: bool = True
 
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"

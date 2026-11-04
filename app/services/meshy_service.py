@@ -14,6 +14,16 @@ from app.schemas.vendor import GenerationOptions
 logger = logging.getLogger(__name__)
 
 IMAGE_TO_3D_PATH = "/image-to-3d"
+SPLIT_PATH = "/print/split"  # Auto Split (https://docs.meshy.ai/en/api/auto-split)
+
+
+def _loggable(payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload as logged: the photo replaced by its kind and size (never its data or a signed URL's query)."""
+    out = dict(payload)
+    image = out.get("image_url")
+    if isinstance(image, str):
+        out["image_url"] = f"<data URI, {len(image)} chars>" if image.startswith("data:") else image.split("?", 1)[0]
+    return out
 
 
 class MeshyError(Exception):
@@ -128,11 +138,28 @@ class MeshyService:
                 # What the object is and "keep the photo's colours" (see generation_prompt).
                 payload["texture_prompt"] = texture_prompt
 
-        response = await self._request("POST", IMAGE_TO_3D_PATH, json=payload)
+        return await self._create(IMAGE_TO_3D_PATH, payload)
+
+    async def _create(self, path: str, payload: dict[str, Any]) -> str:
+        logger.info("Meshy POST %s fields=%s payload=%s", path, sorted(payload), _loggable(payload))
+        response = await self._request("POST", path, json=payload)
         task_id = response.json().get("result")
+        logger.info("Meshy POST %s -> %s task_id=%s", path, response.status_code, task_id)
         if not isinstance(task_id, str) or not task_id:
             raise MeshyError(502, "Meshy returned an unexpected response (missing task ID).")
         return task_id
+
+    async def create_split_task(self, input_task_id: str, parts: str, keep_texture: bool) -> str:
+        """Cut a finished image-to-3D model into the named parts; each part is its own object in the GLB."""
+        payload = {"input_task_id": input_task_id, "mode": "by_parts", "prompt": parts[:600], "keep_texture": keep_texture}
+        return await self._create(SPLIT_PATH, payload)
+
+    async def get_split_task(self, task_id: str) -> dict[str, Any]:
+        response = await self._request("GET", f"{SPLIT_PATH}/{task_id}")
+        task = response.json()
+        if not isinstance(task, dict) or "status" not in task:
+            raise MeshyError(502, "Meshy returned an unexpected task object.")
+        return task
 
     async def get_image_to_3d_task(self, task_id: str) -> tuple[dict[str, Any], float | None]:
         response = await self._request("GET", f"{IMAGE_TO_3D_PATH}/{task_id}")

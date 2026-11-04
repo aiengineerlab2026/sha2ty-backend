@@ -68,3 +68,34 @@ def test_rotation_matches_threejs_convention():
     xs, zs = poly.exterior.xy
     far = max(zip(xs, zs), key=lambda p: p[0])
     assert abs(far[0] - 1.299) < 0.01 and far[1] < -0.7
+
+
+def test_room_of_any_shape_has_one_wall_per_side():
+    from app.services.plan.geometry_builder import polygon_room
+
+    room = polygon_room([[0, 0], [4, 0], [5.5, 3], [0, 6]], 2.8, 0.15)
+    assert [round(w["length"], 3) for w in room["walls"]] == [4.0, round((1.5**2 + 9) ** 0.5, 3), round((5.5**2 + 9) ** 0.5, 3), 6.0]
+    assert room["rooms"][0]["width"] == 5.5 and room["rooms"][0]["depth"] == 6
+    assert len(build_room_glb(room)) > 0
+
+
+def test_every_corner_of_an_angled_room_is_closed():
+    from shapely.geometry import Polygon
+    from app.services.plan.geometry_builder import polygon_room, wall_joints
+
+    room = polygon_room([[0, 0], [4, 0], [1, 3]], 2.8, 0.2)  # a triangle: sharp corners
+    joints = wall_joints(room["walls"], 0.2, 2.8)
+    assert len(joints) == 3 and all(h == 2.8 for _, h in joints)
+    # Each corner post covers the outside gap between the two wall ends meeting there.
+    for (hull, _), (x, z) in zip(joints, [[0, 0], [4, 0], [1, 3]]):
+        assert Polygon(hull).buffer(1e-9).contains(Polygon(hull).centroid) and Polygon(hull).distance(Polygon([[x, z], [x + 1e-3, z], [x, z + 1e-3]])) == 0
+
+
+def test_impossible_rooms_are_refused():
+    import pytest
+    from app.services.plan.geometry_builder import polygon_room
+
+    with pytest.raises(ValueError):
+        polygon_room([[0, 0], [4, 0], [0, 4], [4, 4]])  # walls cross (a bow tie)
+    with pytest.raises(ValueError):
+        polygon_room([[0, 0], [4, 0], [8, 0.01]])  # no floor

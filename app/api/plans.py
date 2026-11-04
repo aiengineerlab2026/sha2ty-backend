@@ -24,7 +24,7 @@ from app.services import vision
 from app.services.cdn import Cdn, CdnError
 from app.services.plan.cad_converter import convert_to_glb
 from app.services.plan.cad_exporter import export_plan_dxf
-from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, rectangular_room, room_extents
+from app.services.plan.geometry_builder import DEFAULT_HEIGHT, DEFAULT_THICKNESS, build_room_glb, polygon_room, rectangular_room, room_extents
 from app.services.plan.image_processor import plan_from_image, plan_from_state, preview_data_url
 from app.services.plan.vision_analysis import SCHEMA_VERSION, analyze_plan
 from app.services.plan.placement import validate_placement
@@ -41,8 +41,11 @@ PLAN_CACHE_VERSION = f"plan-3d-v1/{SCHEMA_VERSION}"
 
 
 class DimensionsBody(BaseModel):
-    width: float = Field(gt=0, le=200)
-    depth: float = Field(gt=0, le=200)
+    width: float = Field(default=4, gt=0, le=200)
+    depth: float = Field(default=5, gt=0, le=200)
+    # A room of any shape: its floor outline in metres, one wall per side in order (the width and depth are then
+    # its extents). Without it, a width × depth rectangle.
+    polygon: list[tuple[float, float]] | None = Field(default=None, min_length=3, max_length=24)
     height: float = Field(default=DEFAULT_HEIGHT, gt=0, le=20)
     wall_thickness: float = Field(default=DEFAULT_THICKNESS, gt=0, le=2)
     name: str = "Room"
@@ -120,7 +123,16 @@ async def list_models(
 
 @router.post("/from-dimensions")
 async def from_dimensions(body: DimensionsBody) -> dict[str, Any]:
-    payload = rectangular_room(body.width, body.depth, body.height, body.wall_thickness, body.name)
+    if body.polygon:
+        xs, ys = [p[0] for p in body.polygon], [p[1] for p in body.polygon]
+        if max(xs) - min(xs) > 200 or max(ys) - min(ys) > 200:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The room is larger than 200 m.")
+        try:
+            payload = polygon_room([list(p) for p in body.polygon], body.height, body.wall_thickness, body.name)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    else:
+        payload = rectangular_room(body.width, body.depth, body.height, body.wall_thickness, body.name)
     width, depth, height = room_extents(payload)
     payload["extents"] = {"width": width, "depth": depth, "height": height}
     return payload

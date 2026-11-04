@@ -22,6 +22,7 @@ from app.domain.events import VendorStatusChanged
 from app.domain.vendor import VendorStatus
 from app.services import vision
 from app.services.auth import service_headers
+from app.services.platform import ensure_platform_vendor, is_platform, platform_session
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -92,6 +93,8 @@ class StatusBody(BaseModel):
 async def set_status(vendor_id: UUID, body: StatusBody, request: Request) -> dict[str, object]:
     settings = get_settings()
     client: httpx.AsyncClient = request.app.state.auth_http
+    if body.status != "approved" and await is_platform(str(vendor_id), settings, client):
+        raise HTTPException(status.HTTP_409_CONFLICT, "The Sha2ty catalogue vendor stays approved.")
     response = await client.patch(
         f"{_rest(settings)}?id=eq.{vendor_id}",
         headers={**service_headers(settings), "Prefer": "return=representation"},
@@ -102,6 +105,25 @@ async def set_status(vendor_id: UUID, body: StatusBody, request: Request) -> dic
         raise HTTPException(status.HTTP_404_NOT_FOUND if response.status_code < 400 else status.HTTP_502_BAD_GATEWAY, "Vendor not found.")
     await bus.publish(VendorStatusChanged(str(vendor_id), body.status), request.app.state)
     return {"vendor": rows[0]}
+
+
+@router.post("/studio-session", dependencies=[Depends(require_admin)])
+async def studio_session(request: Request) -> dict[str, object]:
+    """Sign the admin's browser in as the Sha2ty vendor, to add and edit the platform's own catalogue models."""
+    return await platform_session(get_settings(), request.app.state.auth_http, request.app.state.cdn)
+
+
+@router.get("/studio", dependencies=[Depends(require_admin)])
+async def studio(request: Request) -> dict[str, object]:
+    """The Sha2ty vendor (created on first use) and how many models it lists."""
+    settings = get_settings()
+    vendor = await ensure_platform_vendor(settings, request.app.state.auth_http, request.app.state.cdn)
+    response = await request.app.state.auth_http.get(
+        f"{settings.supabase_url.rstrip('/')}/rest/v1/models?vendor_id=eq.{vendor['id']}&select=id,status",
+        headers=service_headers(settings),
+    )
+    models = response.json() if response.status_code < 400 else []
+    return {"vendor": {k: vendor.get(k) for k in ("id", "name", "logo_url", "status")}, "models": len(models), "ready": sum(m.get("status") == "ready" for m in models)}
 
 
 class VisionBody(BaseModel):
