@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
@@ -20,7 +20,7 @@ from app.core.config import Settings, get_settings
 from app.core.events import bus
 from app.domain.events import VendorStatusChanged
 from app.domain.vendor import VendorStatus
-from app.services import vision
+from app.services import generator_setting, vision
 from app.services.auth import service_headers
 from app.services.platform import ensure_platform_vendor, is_platform, platform_session
 
@@ -128,6 +128,33 @@ async def studio(request: Request) -> dict[str, object]:
 
 class VisionBody(BaseModel):
     model: str
+
+
+class GeneratorBody(BaseModel):
+    provider: Literal["meshy", "astra"]
+
+
+@router.get("/generator", dependencies=[Depends(require_admin)])
+async def get_generator(request: Request) -> dict[str, object]:
+    """The service that turns vendors' photos into 3D models (vendors no longer choose), and which have a key."""
+    settings = get_settings()
+    return {
+        "provider": await generator_setting.current(settings, request.app.state.auth_http),
+        "options": [{"id": p, "label": label, "configured": generator_setting.configured(settings, p)} for p, label in generator_setting.LABELS.items()],
+    }
+
+
+@router.put("/generator", dependencies=[Depends(require_admin)])
+async def put_generator(body: GeneratorBody, request: Request) -> dict[str, object]:
+    settings = get_settings()
+    if not generator_setting.configured(settings, body.provider):
+        key = "MESHY_API_KEY" if body.provider == "meshy" else "OPENAI_API_KEY"
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{generator_setting.LABELS[body.provider]} needs {key} on the server.")
+    try:
+        provider = await generator_setting.set_current(settings, request.app.state.auth_http, body.provider)
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"provider": provider}
 
 
 @router.get("/vision", dependencies=[Depends(require_admin)])

@@ -30,6 +30,9 @@ class ProposalBody(BaseModel):
     glb_url: str | None = Field(default=None, max_length=2000)
     thumbnail_url: str | None = Field(default=None, max_length=2000)
     note: str = Field(default="", max_length=2000)
+    # A new version of the model file the vendor uploaded (their own upload): it becomes the design's base file,
+    # and `item`'s parts and edits are on it.
+    model_url: str | None = Field(default=None, max_length=2000)
 
 
 class DecisionBody(BaseModel):
@@ -59,6 +62,8 @@ async def _write(request: Request, method: str, path: str, what: str, json: Any 
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not {what}.") from exc
     if response.status_code >= 400:
+        if "task_proposals" in response.text:  # the table is missing: say what to run
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Proposals are not set up yet: run backend/supabase/proposals.sql in Supabase.")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not {what}.")
     return response.json() if response.content else []
 
@@ -114,7 +119,10 @@ async def propose(task_id: UUID, body: ProposalBody, request: Request, user_id: 
     task = await _vendor_task(request, task_id, user_id)
     base = await store.version(task["design_id"], version_id=task["design_version_id"])
     check_textures(body.item)
-    item = {**body.item.model_dump(mode="json", exclude_none=True), "source": base["data"]["item"]["source"]}
+    source = dict(base["data"]["item"]["source"])
+    if body.model_url:
+        source.update(glb_url=own_file(body.model_url, user_id, "new model file"), source_glb_url=None)
+    item = {**body.item.model_dump(mode="json", exclude_none=True), "source": source}
     data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(item)})
     row = {
         "task_id": str(task_id), "vendor_id": user_id, "base_version_id": task["design_version_id"], "data": data,
