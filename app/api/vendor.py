@@ -22,7 +22,8 @@ from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import vision
-from app.services.generation_prompt import astra_prompt, furniture_family, meshy_texture_prompt, split_prompt
+from app.services.generation_prompt import astra_prompt, furniture_family, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.part_names import name_components
 from app.services.platform import is_platform
@@ -35,7 +36,7 @@ from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 logger = logging.getLogger(__name__)
-GLB_CACHE_VERSION = "vendor-glb-v2"  # v2: chair / sofa parts, part prompts
+GLB_CACHE_VERSION = "vendor-glb-v3"  # v3: remeshed, under 8 MB (v2: chair / sofa parts, part prompts)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -239,6 +240,15 @@ def modular(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, 
     return modular_glb, glb, doc
 
 
+async def sized(glb: bytes, source_glb: bytes | None, components: dict) -> tuple[bytes, bytes | None, dict]:
+    """The GLB within MAX_GLB_BYTES (glb_size: textures and vertex data compacted, parts untouched), or GlbTooLarge.
+    The untouched original is compacted too where it can be, but kept whatever its size (it is the backup)."""
+    glb, report = await run_in_threadpool(enforce, glb)
+    if source_glb:
+        source_glb, _ = await run_in_threadpool(fit_glb, source_glb)
+    return glb, source_glb, {**components, "file": {"bytes": report["after"], "originalBytes": report["before"], "optimised": report["steps"]}}
+
+
 async def named(request: Request, glb: bytes, doc: dict, category: str | None, kind: str | None) -> tuple[bytes, dict]:
     """Descriptive part names (services/part_names.py), saved in the component document and in the GLB itself."""
     settings = get_settings()
@@ -326,9 +336,13 @@ async def generate_model(
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None)
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
+            glb, source_glb, components = await sized(glb, source_glb, components)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
             await remember(url, details, components, source_url)
+        except GlbTooLarge as exc:
+            await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
@@ -345,6 +359,7 @@ async def generate_model(
             mime_type=mime,
             image_url=public_url,
             texture_prompt=meshy_texture_prompt(category, title, details, kind or None),
+            target_polycount=target_polycount(category, kind or None),
         )
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
@@ -435,8 +450,14 @@ async def get_task(
         if components is None:
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        data, source_glb, components = await sized(data, source_glb, components)
         url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
+    except GlbTooLarge as exc:
+        # Over the limit even after optimising: not saved; the try is given back once and polling stops.
+        if request.app.state.pending_cdn.pop(task_id, None) is not None:
+            await bus.publish(GenerationFailed(owner, "meshy"), request.app.state)
+        return TaskStatusResponse(task_id=task_id, status="FAILED", progress=100, error=str(exc))
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
     if pending.get("cache_key"):

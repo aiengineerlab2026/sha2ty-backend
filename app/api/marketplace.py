@@ -89,6 +89,8 @@ async def request_target(design: dict[str, Any], version: dict[str, Any], client
     settings = get_settings()
     base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
     source = ((version.get("data") or {}).get("item") or {}).get("source") or {}
+    if source.get("source_type") == "user":  # the customer's own model: no vendor owns it, every vendor may bid
+        return {"audience": "open", "vendor": None, "available": True}
     vendor_id = source.get("vendor_id")
     if not vendor_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "The original vendor of this model is not known, so it cannot be requested.")

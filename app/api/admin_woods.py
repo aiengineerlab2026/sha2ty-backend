@@ -19,7 +19,7 @@ from app.services.platform import ensure_platform_vendor
 router = APIRouter(prefix="/api/admin/woods", tags=["admin"], dependencies=[Depends(require_admin)])
 
 # frontend/lib/designs/materials.ts WOOD_TYPES
-WOOD_TYPES = {"oak", "beech", "pine", "walnut", "teak", "ash", "mahogany", "mdf", "hdf", "plywood", "particleboard", "blockboard", "melamine", "veneer", "laminate"}
+WOOD_TYPES = {"oak", "beech", "pine", "walnut", "teak", "ash", "mahogany", "mdf", "hdf", "plywood", "particleboard", "blockboard", "melamine", "veneer", "laminate", "lacquer"}
 UNITS = {"m2", "m3", "sheet"}
 IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 MAX_IMAGE = 15 * 1024 * 1024

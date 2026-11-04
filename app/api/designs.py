@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.schemas.design import (
     DesignData,
     DuplicateBody,
-    FromModelBody,
+    FromModelBody, FromUserModelBody,
     FromPlanBody,
     ItemDesign,
     ItemEdits,
@@ -197,6 +197,29 @@ async def from_model(body: FromModelBody, user_id: User, store: Designs) -> dict
         data, body.note or ("Saved" if body.item is not None else "Started from the catalogue"),
         client_token=body.client_token,
         glb_url=own_file(body.glb_url, user_id, "model file"), thumbnail_url=own_file(body.thumbnail_url, user_id, "thumbnail"),
+    )
+
+
+@router.post("/from-user-model", status_code=status.HTTP_201_CREATED)
+async def from_user_model(body: FromUserModelBody, user_id: User, store: Designs) -> dict[str, Any]:
+    """Customise the user's own model (user_models) like a catalogue one: sizes, parts and materials, then request
+    it from vendors (open to all: the model is the customer's, no vendor owns it). The private model is never changed."""
+    model = await store.user_model(body.user_model_id, user_id)
+    w, h, d = (_num(model.get(k)) for k in ("width_m", "height_m", "depth_m"))
+    item = ItemDesign(
+        source=SourceModel(
+            model_id=model["id"], title=model.get("title") or "", vendor_id=None, source_type="user",
+            glb_url=model["glb_url"], source_glb_url=model.get("source_glb_url"), width_m=w, height_m=h, depth_m=d,
+        ),
+        dimensions={"width": w, "height": h, "depth": d} if w and h and d else None,
+        components=PartDocument.model_validate(model["components"]) if isinstance(model.get("components"), dict) else None,
+    )
+    data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(item.model_dump(mode="json", exclude_none=True))})
+    return await _create(
+        store, user_id,
+        # source_model_id stays empty: it references catalogue listings, and this model is not one.
+        {"kind": "item", "title": body.title.strip() or model.get("title") or "", "thumbnail_url": model.get("thumbnail_url") or model.get("source_image_url")},
+        data, "Started from my model",
     )
 
 

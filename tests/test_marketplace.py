@@ -214,3 +214,29 @@ def test_spec_carries_each_parts_wood_and_fabric_and_their_estimated_total() -> 
     assert spec_from_version({"id": "d"}, {"id": "v", "number": 1, "data": {"item": item}}, ["legs"])["design"]["materials_total"] == 1160
     edits["legs"]["material"] = {**oak, "total": None}
     assert spec_from_version({"id": "d"}, {"id": "v", "number": 1, "data": {"item": item}})["design"]["materials_total"] is None
+
+
+MY_MODEL = str(uuid.UUID(int=91))
+
+
+def test_a_customers_own_model_is_customised_and_open_to_every_vendor(env):
+    fake, client = env
+    fake.tables["user_models"] = [
+        {"id": MY_MODEL, "owner_id": ALICE, "title": "Grandma's chair", "status": "ready", "glb_url": f"{FILES}/{ALICE}/mine.glb", "width_m": 0.5, "height_m": 0.9, "depth_m": 0.55},
+        {"id": str(uuid.UUID(int=92)), "owner_id": ALICE, "title": "Half done", "status": "generating", "glb_url": None},
+    ]
+    chair = client.post("/api/designs/from-user-model", json={"user_model_id": MY_MODEL})
+    assert chair.status_code == 201
+    chair = chair.json()
+    source = chair["current"]["data"]["item"]["source"]
+    assert source["source_type"] == "user" and source["model_id"] == MY_MODEL and chair["title"] == "Grandma's chair"
+    assert chair["current"]["data"]["item"]["dimensions"] == {"width": 0.5, "height": 0.9, "depth": 0.55}
+    # Resized like any customised model, then requested: open to every vendor (no one owns the model).
+    version = client.post(f"/api/designs/{chair['id']}/versions", json={"item": {"dimensions": {"width": 0.6, "height": 0.9, "depth": 0.55}}, "note": "wider"})
+    assert version.status_code == 201
+    assert client.get(f"/api/designs/{chair['id']}/request-target").json() == {"audience": "open", "vendor": None, "available": True}
+    task = client.post(f"/api/designs/{chair['id']}/request", json={"quantity": 4}).json()
+    assert task["audience"] == "open" and task["exclusive_vendor_id"] is None and task["spec"]["quantity"] == 4
+    # Never someone else's model, never an unfinished one.
+    assert client.post("/api/designs/from-user-model", json={"user_model_id": MY_MODEL}, headers={"x-test-user": BOB}).status_code == 404
+    assert client.post("/api/designs/from-user-model", json={"user_model_id": str(uuid.UUID(int=92))}).status_code == 422
