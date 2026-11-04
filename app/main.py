@@ -7,6 +7,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
+from app.api.admin_paint_colors import router as admin_paint_colors_router
+from app.api.admin_woods import router as admin_woods_router
+from app.api.designs import router as designs_router
+from app.api.marketplace import router as marketplace_router
+from app.api.proposals import router as proposals_router
 from app.api.match import router as match_router
 from app.api.plans import router as plans_router
 from app.api.vendor import router as vendor_router
@@ -69,6 +74,11 @@ app.include_router(vendor_router)
 app.include_router(plans_router)
 app.include_router(match_router)
 app.include_router(admin_router)
+app.include_router(admin_woods_router)
+app.include_router(admin_paint_colors_router)
+app.include_router(designs_router)
+app.include_router(marketplace_router)
+app.include_router(proposals_router)
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])

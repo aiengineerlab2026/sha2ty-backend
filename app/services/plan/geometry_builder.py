@@ -29,8 +29,27 @@ def rectangular_room(
     if wall_thickness <= 0 or wall_thickness * 2 >= min(width, depth):
         raise ValueError("Wall thickness is too large for this room.")
 
+    return polygon_room([[0.0, 0.0], [width, 0.0], [width, depth], [0.0, depth]], height, wall_thickness, name)
+
+
+def polygon_room(polygon: list[list[float]], height: float = DEFAULT_HEIGHT, wall_thickness: float = DEFAULT_THICKNESS, name: str = "Room") -> dict[str, Any]:
+    """One room of any shape: its floor outline in metres, one wall per side (in order)."""
+    if len(polygon) < 3 or height <= 0:
+        raise ValueError("A room needs at least 3 walls and a height above zero.")
+    from shapely.geometry import Polygon
+
+    shape = Polygon(polygon)
+    # Closed by construction (the last wall ends where the first starts); refused when its walls cross or it has no
+    # floor, so an impossible room is never built.
+    if not shape.is_valid or shape.area < 0.25:
+        raise ValueError("These walls do not close into a room: they cross each other or enclose no floor.")
+    pts = _close(polygon)
+    sides = [float(np.hypot(b[0] - a[0], b[1] - a[1])) for a, b in zip(pts, pts[1:])]
+    if wall_thickness <= 0 or wall_thickness * 2 >= min(sides):
+        raise ValueError("Wall thickness is too large for this room.")
+    xs, ys = [p[0] for p in polygon], [p[1] for p in polygon]
+    width, depth = max(xs) - min(xs), max(ys) - min(ys)
     room_id = str(uuid4())
-    polygon = [[0.0, 0.0], [width, 0.0], [width, depth], [0.0, depth]]
     walls = _walls_from_polygon(polygon, height, wall_thickness)
     return {
         "rooms": [
@@ -210,6 +229,33 @@ def _railings(zones: list[dict], exterior: list[list[float]], thickness: float) 
     return out
 
 
+def wall_joints(walls: list[dict[str, Any]], thickness: float = DEFAULT_THICKNESS, height: float = DEFAULT_HEIGHT) -> list[tuple[list[list[float]], float]]:
+    """Where two or more full walls (from the floor) meet: the outline filling the joint (the convex hull of their
+    end faces) and its height (the lowest of them). frontend/lib/plan/wallJoints.ts draws the same posts."""
+    from shapely.geometry import MultiPoint
+
+    ends: dict[tuple[float, float], list[tuple[list[float], float]]] = {}
+    for wall in walls:
+        if float(wall.get("elevation") or 0) > 0:
+            continue  # lintels and sills sit above doors and windows, not at corners
+        (x0, z0), (x1, z1) = wall["start"], wall["end"]
+        length = float(np.hypot(x1 - x0, z1 - z0))
+        if length < 1e-6:
+            continue
+        t = float(wall.get("thickness") or thickness)
+        nx, nz = -(z1 - z0) / length * t / 2, (x1 - x0) / length * t / 2
+        for x, z in ((x0, z0), (x1, z1)):
+            ends.setdefault((round(x, 3), round(z, 3)), []).append(([[x + nx, z + nz], [x - nx, z - nz]], float(wall.get("height") or height)))
+    joints = []
+    for (x, z), meeting in ends.items():
+        if len(meeting) < 2:
+            continue
+        hull = MultiPoint([p for corners, _ in meeting for p in corners] + [[x, z]]).convex_hull
+        if hull.geom_type == "Polygon" and hull.area > 1e-8:
+            joints.append(([list(c) for c in hull.exterior.coords[:-1]], min(h for _, h in meeting)))
+    return joints
+
+
 def _prism(poly, bottom: float, top: float) -> trimesh.Trimesh | None:
     """Plan polygon (x, z) as a solid from `bottom` to `top` (world y): floor triangulation top and
     bottom, one quad per outline edge (no extra triangulation dependency)."""
@@ -355,6 +401,13 @@ def build_room_glb(payload: dict[str, Any]) -> bytes:
                 side = "west" if mx < c.x else "east"
             name = f"wall_{slug}_{side}"
         scene.add_geometry(mesh, node_name=unique(name), geom_name=unique(f"{name}_mesh"))
+    # Corners: each wall is a straight box ending at the corner point, so where walls meet at an angle the outside
+    # of the joint is open. A post filling the space between the wall ends closes every corner, at any angle.
+    for k, (hull, top) in enumerate(wall_joints(payload.get("walls") or [], thickness, height)):
+        post = _prism(Polygon(hull), 0.0, top)
+        if post is not None:
+            _paint(post, FACADE)
+            scene.add_geometry(post, node_name=unique(f"wall_corner_{k + 1}"))
     for f in payload.get("fixtures") or []:
         w, d, h = f["size"]
         if w <= 0 or d <= 0:
