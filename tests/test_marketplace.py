@@ -240,3 +240,11 @@ def test_a_customers_own_model_is_customised_and_open_to_every_vendor(env):
     # Never someone else's model, never an unfinished one.
     assert client.post("/api/designs/from-user-model", json={"user_model_id": MY_MODEL}, headers={"x-test-user": BOB}).status_code == 404
     assert client.post("/api/designs/from-user-model", json={"user_model_id": str(uuid.UUID(int=92))}).status_code == 422
+
+
+def test_brands_say_which_vendor_is_sha2tys_own_and_share_no_private_details(env):
+    fake, client = env
+    _with_platform_model(fake)
+    brands = {b["id"]: b for b in client.get(f"/api/vendors/brands?ids={VENDOR},{PLATFORM}").json()}
+    assert brands[VENDOR] == {"id": VENDOR, "name": "Oslo Studio", "logo_url": None, "platform": False}
+    assert brands[PLATFORM]["platform"] is True
