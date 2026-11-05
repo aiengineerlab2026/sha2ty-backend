@@ -38,6 +38,8 @@ class PlanStore:
             params.append(f"vendor_id=eq.{vendor_id}")
         if model_id:
             params.append(f"id=eq.{model_id}")
+            # One model (the editor customising it): its part list too, with each part's variants.
+            params[0] += ",components"
         if query:
             params.append(f"title=ilike.{quote('%' + query + '%')}")
         response = await self.client.get(f"{self.base}/models?{'&'.join(params)}", headers=self._headers())
@@ -87,6 +89,7 @@ class PlanStore:
                     "company_id": company_id,
                     "company": groups[company_id]["name"],
                     "company_logo": groups[company_id]["logo_url"],
+                    **({"components": row.get("components")} if model_id else {}),
                 }
             )
         return {"companies": list(groups.values()), "count": len(rows)}
