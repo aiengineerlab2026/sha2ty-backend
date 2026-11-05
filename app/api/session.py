@@ -93,7 +93,9 @@ class SessionCookies(BaseHTTPMiddleware):
         headers = [(k, v) for k, v in headers if not (k == b"authorization" and v == anon)]
         refreshed: dict[str, Any] | None = None
         expired = False
-        if not any(k == b"authorization" for k, _ in headers):
+        # Signing out must not get fresh cookies written over the ones it clears.
+        signing_out = request.url.path in ("/api/auth/logout", "/api/auth/admin-logout")
+        if not signing_out and not any(k == b"authorization" for k, _ in headers):
             access = request.cookies.get(ACCESS_COOKIE)
             if not access or jwt_expiry(access) <= time.time() + SKEW:
                 access = None
@@ -179,6 +181,7 @@ async def logout(request: Request) -> Response:
             pass
     out = JSONResponse({"ok": True})
     clear_tokens(out)
+    out.delete_cookie(ADMIN_COOKIE, path="/")  # signing out ends an admin's session too
     return out
 
 

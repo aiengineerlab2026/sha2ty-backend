@@ -110,3 +110,14 @@ def test_the_database_passthrough_sends_the_users_token_and_a_readable_body(monk
     res = c.patch("/api/sb/rest/v1/models?id=eq.m1", headers={"Authorization": "Bearer anon", "Accept-Encoding": "br, zstd"}, json={"status": "ready"})
     assert res.json() == [{"id": "m1"}] and "content-encoding" not in res.headers
     assert seen == {"authorization": f"Bearer {FRESH}", "cookie": None}  # the user's token, never the browser's cookies
+
+
+def test_logout_clears_every_session_cookie_even_with_an_expired_token(monkeypatch):
+    c = client(monkeypatch)
+    c.cookies.set(session.ACCESS_COOKIE, OLD)  # expired: the middleware would refresh it on any other route
+    c.cookies.set(session.REFRESH_COOKIE, "r1")
+    c.cookies.set(session.ADMIN_COOKIE, "adm")
+    res = c.post("/api/auth/logout")
+    cookies = res.headers.get_list("set-cookie")
+    assert all("Max-Age=0" in v or 'expires=' in v.lower() for v in cookies) and len(cookies) == 3
+    assert not any("r2" in v for v in cookies)  # no refreshed token written back
