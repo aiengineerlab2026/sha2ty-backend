@@ -14,7 +14,9 @@ from starlette.background import BackgroundTask
 from app.core.config import get_settings
 
 router = APIRouter(prefix="/api/sb", tags=["database (temporary)"])
-HOP = {"connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "cookie"}
+# Not passed on: hop-by-hop headers, the browser's cookies, and its Accept-Encoding (Supabase's compressed body is
+# decoded here and sent as is, so the browser must not be told it is compressed).
+HOP = {"connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "accept-encoding", "host", "cookie"}
 
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], include_in_schema=False)
@@ -31,4 +33,4 @@ async def passthrough(path: str, request: Request):
         stream=True,
     )
     out = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP}
-    return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, headers=out, background=BackgroundTask(upstream.aclose))
+    return StreamingResponse(upstream.aiter_bytes(), status_code=upstream.status_code, headers=out, background=BackgroundTask(upstream.aclose))

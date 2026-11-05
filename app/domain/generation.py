@@ -10,7 +10,7 @@ PROVIDER_NAME: dict[str, str] = {"meshy": "Meshy", "astra": "GPT Astra", "sol": 
 
 class QuotaExhausted(DomainError):
     def __init__(self, provider: Provider, limit: int) -> None:
-        super().__init__(f"You have used all {limit} {PROVIDER_NAME[provider]} generations for this account.")
+        super().__init__(f"You have used all {limit} 3D generations for this account.")  # no AI provider names for vendors
 
 
 def remaining(limit: int, used: int) -> int:

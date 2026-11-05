@@ -47,17 +47,28 @@ def test_only_the_platform_account_generates(monkeypatch):
     assert caught.value.status_code == 403
 
 
+def noisy_png(side: int = 1536) -> bytes:
+    import io, os
+    from PIL import Image
+    out = io.BytesIO()
+    Image.frombytes("RGB", (side, side), os.urandom(side * side * 3)).save(out, "PNG")  # noise: barely compressible
+    return out.getvalue()
+
+
+PNG = noisy_png()
+
+
 def test_photos_name_the_real_materials_and_one_shot_can_be_made_again(monkeypatch):
     seen = []
 
     async def edit(self, prompt, refs, size=None, quality=None):
         seen.append((prompt, size, quality))
-        return b"png"
+        return PNG
     monkeypatch.setattr(fd.ImageMatcher, "edit", edit)
     looks = fd.finishes({"Legs": {"color": "#222222", "material": "brass"}})
     images, errors = asyncio.run(fd.photos("bed", "سرير", b"r", Settings(), None, "art deco", looks))
     assert sorted(images) == list(range(len(fd.SHOTS))) and not errors
-    assert all(q == "high" for _, _, q in seen) and "brushed brass in #222222" in seen[0][0] and "bedroom" in seen[2][0]
+    assert all(q == "low" for _, _, q in seen) and sum(len(i) for i in images.values()) <= 3 * 1024 * 1024 and "brushed brass in #222222" in seen[0][0] and "bedroom" in seen[2][0] and "سرير" not in seen[0][0]
     seen.clear()
     images, _ = asyncio.run(fd.photos("bed", "سرير", b"r", Settings(), None, which=2))
     assert list(images) == [2] and seen[0][1] == "1536x1024"

@@ -68,8 +68,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
     allow_origin_regex=get_settings().cors_origin_regex,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
     allow_headers=["*"],
+    allow_credentials=True,  # the web app calls this API directly with its session cookies
     expose_headers=["Retry-After"],
 )
 

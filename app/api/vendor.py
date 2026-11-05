@@ -17,7 +17,7 @@ from app.core.config import Settings, get_settings
 from app.core.events import bus
 from app.domain.errors import DomainError
 from app.domain.events import GenerationFailed, GenerationStarted, UserRegistered
-from app.domain.generation import PROVIDER_NAME, Provider, QuotaExhausted, remaining as tries_left
+from app.domain.generation import Provider, QuotaExhausted, remaining as tries_left
 from app.domain.vendor import Vendor
 from app.services.astra_service import AstraError, AstraService
 from app.services.auth import create_confirmed_user, user_id_from_bearer
@@ -332,7 +332,7 @@ async def generate_model(
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
         if not raw:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{PROVIDER_NAME[provider]} needs the photo file, not only a URL.")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "The photo file is needed, not only its URL.")
         remaining = await take_try(request, user_id, provider, settings)
         try:
             details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
@@ -545,4 +545,4 @@ async def furniture_photos(
         images, errors = await furniture_design.photos(kind, title, reference_png(data), get_settings(), request.app.state.openai_http, style, furniture_design.finishes(parts), which)
     except ImageMatchError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
-    return {"images": {str(i): base64.b64encode(image).decode("ascii") for i, image in images.items()}, "shots": len(furniture_design.SHOTS), "errors": errors}
+    return {"images": {str(i): base64.b64encode(image).decode("ascii") for i, image in images.items()}, "shots": len(furniture_design.SHOTS), "mime": "image/jpeg", "errors": errors}
