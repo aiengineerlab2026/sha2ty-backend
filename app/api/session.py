@@ -43,19 +43,35 @@ def jwt_expiry(jwt: str) -> int:
         return 0
 
 
-def _secure(request: Request, settings: Settings) -> bool:
-    return settings.cookie_secure or request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+def _site(host: str) -> str:
+    """The registrable part of a host, roughly (its last two labels): sha2ty.net for www.sha2ty.net."""
+    # ponytail: two labels; a two-part suffix (co.uk, com.eg) needs the public suffix list.
+    return ".".join(host.split(":")[0].lower().split(".")[-2:])
+
+
+def cookie_args(request: Request) -> dict[str, Any]:
+    """httpOnly session cookie attributes. The site calling from another site (www.sha2ty.net → *.run.app) only gets
+    its cookies sent with SameSite=None, which needs Secure; Partitioned keeps them (per site) where third-party cookies
+    are blocked. Same site (local development): SameSite=Lax."""
+    settings = get_settings()
+    origin = request.headers.get("origin") or ""
+    cross = bool(origin) and _site(origin.split("://", 1)[-1]) != _site(request.headers.get("host", request.url.netloc))
+    https = settings.cookie_secure or request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    if cross and https:
+        return {"httponly": True, "secure": True, "samesite": "none", "partitioned": True, "path": "/"}
+    return {"httponly": True, "secure": https, "samesite": "lax", "path": "/"}
 
 
 def set_tokens(response: Response, request: Request, tokens: dict[str, Any]) -> None:
-    secure = _secure(request, get_settings())
-    response.set_cookie(ACCESS_COOKIE, tokens["access_token"], max_age=int(tokens.get("expires_in") or 3600), httponly=True, secure=secure, samesite="lax", path="/")
-    response.set_cookie(REFRESH_COOKIE, tokens["refresh_token"], max_age=REFRESH_MAX_AGE, httponly=True, secure=secure, samesite="lax", path="/")
+    args = cookie_args(request)
+    response.set_cookie(ACCESS_COOKIE, tokens["access_token"], max_age=int(tokens.get("expires_in") or 3600), **args)
+    response.set_cookie(REFRESH_COOKIE, tokens["refresh_token"], max_age=REFRESH_MAX_AGE, **args)
 
 
-def clear_tokens(response: Response) -> None:
-    for name in (ACCESS_COOKIE, REFRESH_COOKIE):
-        response.delete_cookie(name, path="/")
+def clear_tokens(response: Response, request: Request, names: tuple[str, ...] = (ACCESS_COOKIE, REFRESH_COOKIE)) -> None:
+    """Deleted with the attributes they were set with (a partitioned cookie is only removed by a partitioned delete)."""
+    for name in names:
+        response.delete_cookie(name, **cookie_args(request))
 
 
 async def auth_api(client: httpx.AsyncClient, path: str, method: str = "GET", token: str | None = None, body: dict | None = None) -> httpx.Response:
@@ -117,7 +133,7 @@ class SessionCookies(BaseHTTPMiddleware):
         if refreshed:
             set_tokens(response, request, refreshed)
         elif expired:
-            clear_tokens(response)
+            clear_tokens(response, request)
         return response
 
 
@@ -134,7 +150,7 @@ async def me(request: Request) -> Response:
     res = await auth_api(request.app.state.auth_http, "/user", token=token)
     if res.status_code >= 400:
         out = JSONResponse({"user": None})
-        clear_tokens(out)
+        clear_tokens(out, request)
         return out
     return JSONResponse({"user": res.json()}, headers={"Cache-Control": "no-store"})
 
@@ -180,8 +196,7 @@ async def logout(request: Request) -> Response:
         except httpx.HTTPError:
             pass
     out = JSONResponse({"ok": True})
-    clear_tokens(out)
-    out.delete_cookie(ADMIN_COOKIE, path="/")  # signing out ends an admin's session too
+    clear_tokens(out, request, (ACCESS_COOKIE, REFRESH_COOKIE, ADMIN_COOKIE))  # signing out ends an admin's session too
     return out
 
 
@@ -238,8 +253,7 @@ async def admin_login(request: Request) -> Response:
     except Exception as exc:  # noqa: BLE001 - HTTPException carries the message and status
         return fail(str(getattr(exc, "detail", "Could not sign in.")), getattr(exc, "status_code", 401))
     out = JSONResponse({"ok": True})
-    out.set_cookie(ADMIN_COOKIE, str(issued["token"]), max_age=max(60, int(issued["expires_at"]) - int(time.time())),
-                   httponly=True, secure=_secure(request, get_settings()), samesite="lax", path="/")
+    out.set_cookie(ADMIN_COOKIE, str(issued["token"]), max_age=max(60, int(issued["expires_at"]) - int(time.time())), **cookie_args(request))
     return out
 
 
@@ -262,7 +276,7 @@ async def admin_studio(request: Request) -> Response:
 
 
 @router.post("/admin-logout")
-async def admin_logout() -> Response:
+async def admin_logout(request: Request) -> Response:
     out = JSONResponse({"ok": True})
-    out.delete_cookie(ADMIN_COOKIE, path="/")
+    clear_tokens(out, request, (ADMIN_COOKIE,))
     return out
