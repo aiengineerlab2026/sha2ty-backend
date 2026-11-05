@@ -129,6 +129,26 @@ async def list_models(request: Request) -> dict[str, object]:
     return {"models": rows}
 
 
+@router.get("/tasks", dependencies=[Depends(require_admin)])
+async def list_tasks(request: Request) -> dict[str, object]:
+    """The newest implementation requests with their customer and number of offers (each has a PDF report)."""
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    base = settings.supabase_url.rstrip("/") + "/rest/v1"
+    response = await client.get(
+        f"{base}/freelance_tasks?select=id,title,status,audience,budget_max,created_at,customer_id,task_bids(count)&order=created_at.desc&limit=100",
+        headers=service_headers(settings),
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not load the requests. Run supabase/tasks.sql.")
+    users = await _users(settings, client)
+    return {"tasks": [
+        {**{k: v for k, v in t.items() if k != "task_bids"}, "offers": ((t.get("task_bids") or [{}])[0] or {}).get("count", 0),
+         "customer": users.get(str(t.get("customer_id")), {}).get("name") or users.get(str(t.get("customer_id")), {}).get("email") or ""}
+        for t in response.json()
+    ]}
+
+
 class StatusBody(BaseModel):
     status: VendorStatus
 
