@@ -1,0 +1,83 @@
+"""The one-page PDF report of an implementation request (services/request_report.py), for whoever may see the
+request: its customer, the vendors it is open to (or who made an offer), and admins."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+from uuid import UUID
+
+import httpx
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
+
+from app.api.admin import token_valid
+from app.core.config import get_settings
+from app.services import request_report
+from app.services.auth import service_headers, user_id_from_bearer
+
+router = APIRouter(prefix="/api/tasks", tags=["requests"])
+MAX_PICTURE = 8 * 1024 * 1024
+
+
+async def _rows(client: httpx.AsyncClient, path: str) -> list[dict[str, Any]]:
+    settings = get_settings()
+    try:
+        response = await client.get(f"{settings.supabase_url.rstrip('/')}/rest/v1/{path}", headers=service_headers(settings))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read the request.") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read the request.")
+    return response.json()
+
+
+def may_see(task: dict[str, Any], user_id: str, vendor: dict[str, Any] | None, bids: list[dict[str, Any]]) -> bool:
+    """The customer; an approved vendor it is open to (published, open or theirs alone) or who made an offer."""
+    if task.get("customer_id") == user_id:
+        return True
+    if not vendor or vendor.get("status", "approved") != "approved":
+        return False
+    if any(b.get("vendor_id") == user_id for b in bids):
+        return True
+    return task.get("status") == "published" and (task.get("audience") != "vendor_exclusive" or task.get("exclusive_vendor_id") == user_id)
+
+
+async def _picture(client: httpx.AsyncClient, url: str | None) -> bytes | None:
+    """The model's thumbnail, only from the platform's own storage (never an arbitrary URL)."""
+    prefix = f"{get_settings().supabase_url.rstrip('/')}/storage/v1/object/public/"
+    if not url or not url.startswith(prefix) or ".." in url:
+        return None
+    try:
+        response = await client.get(url, timeout=15)
+    except httpx.HTTPError:
+        return None
+    return response.content if response.status_code < 400 and len(response.content) <= MAX_PICTURE else None
+
+
+@router.get("/{task_id}/report")
+async def report(
+    task_id: UUID,
+    request: Request,
+    lang: Annotated[Literal["ar", "en"], Query()] = "ar",
+    authorization: Annotated[str | None, Header()] = None,
+    x_admin_token: Annotated[str | None, Header()] = None,
+) -> Response:
+    client: httpx.AsyncClient = request.app.state.auth_http
+    admin = bool(x_admin_token and token_valid(x_admin_token, get_settings()))
+    user_id = None if admin else await user_id_from_bearer(authorization, get_settings(), client)
+    task = (await _rows(client, f"freelance_tasks?id=eq.{task_id}&select=*") or [None])[0]
+    bids = await _rows(client, f"task_bids?task_id=eq.{task_id}&select=vendor_id,price,days,status") if task else []
+    if not task:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")
+    if not admin:
+        vendor = (await _rows(client, f"vendors?id=eq.{user_id}&select=id,status") or [None])[0]
+        if not may_see(task, user_id, vendor, bids):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")  # 404, not 403: it stays unseen
+    ids = sorted({str(b["vendor_id"]) for b in bids if b.get("vendor_id")})
+    names = {str(v["id"]): v.get("name") or "" for v in (await _rows(client, f"vendors?id=in.({','.join(ids)})&select=id,name") if ids else [])}
+    picture = await _picture(client, ((task.get("spec") or {}).get("design") or {}).get("thumbnail_url"))
+    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang)
+    return Response(pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="sha2ty-request-{str(task_id)[:8]}.pdf"',
+        "Cache-Control": "no-store",
+    })

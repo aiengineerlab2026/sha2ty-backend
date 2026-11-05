@@ -17,3 +17,7 @@ pytest>=8.0
 # OCR: macOS Vision via pyobjc (no PaddleOCR wheel on Python 3.14). Elsewhere install one of
 # paddleocr, rapidocr, or pytesseract + the tesseract binary. With none, scale must be entered manually.
 pyobjc-framework-Vision>=10; sys_platform == "darwin"
+# Implementation request reports (PDF, Arabic text shaping)
+reportlab>=4.2
+arabic-reshaper>=3.0
+python-bidi>=0.6
