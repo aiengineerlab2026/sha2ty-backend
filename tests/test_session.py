@@ -121,3 +121,12 @@ def test_logout_clears_every_session_cookie_even_with_an_expired_token(monkeypat
     cookies = res.headers.get_list("set-cookie")
     assert all("Max-Age=0" in v or 'expires=' in v.lower() for v in cookies) and len(cookies) == 3
     assert not any("r2" in v for v in cookies)  # no refreshed token written back
+
+
+def test_a_site_on_another_domain_gets_cookies_it_can_send_cross_site(monkeypatch):
+    c = client(monkeypatch)
+    cross = {"Origin": "https://www.sha2ty.net", "Host": "sha2ty-1.europe-west1.run.app", "X-Forwarded-Proto": "https"}
+    for cookie in c.post("/api/auth/login", json={"email": "a@b.c", "password": "pw"}, headers=cross).headers.get_list("set-cookie"):
+        assert "SameSite=none" in cookie and "Secure" in cookie and "Partitioned" in cookie and "HttpOnly" in cookie
+    same = c.post("/api/auth/login", json={"email": "a@b.c", "password": "pw"}, headers={"Origin": "http://localhost:3000"})
+    assert all("SameSite=lax" in v and "Partitioned" not in v for v in same.headers.get_list("set-cookie"))
