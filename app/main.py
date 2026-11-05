@@ -14,6 +14,8 @@ from app.api.marketplace import router as marketplace_router
 from app.api.proposals import router as proposals_router
 from app.api.match import router as match_router
 from app.api.plans import router as plans_router
+from app.api.sb_proxy import router as sb_router
+from app.api.session import SessionCookies, router as session_router
 from app.api.vendor import router as vendor_router
 from app import handlers  # noqa: F401  subscribes the event handlers
 from app.core.config import get_settings
@@ -70,6 +72,11 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 
+# Cookie sessions → bearer token for every route (the browser's only way in: frontend next.config rewrites /api/*).
+app.add_middleware(SessionCookies)
+
+app.include_router(session_router)
+app.include_router(sb_router)
 app.include_router(vendor_router)
 app.include_router(plans_router)
 app.include_router(match_router)

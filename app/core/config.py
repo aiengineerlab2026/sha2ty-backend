@@ -50,6 +50,8 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_anon_key: SecretStr = SecretStr("")
+    # Session cookies are Secure when the request came over HTTPS (X-Forwarded-Proto); true forces it.
+    cookie_secure: bool = False
     supabase_service_role_key: SecretStr = SecretStr("")
     database_url: SecretStr = SecretStr("")
 
