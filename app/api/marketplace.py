@@ -183,13 +183,14 @@ async def vendor_brands(request: Request, ids: str = "") -> list[dict[str, Any]]
     client: httpx.AsyncClient = request.app.state.auth_http
     try:
         response = await client.get(
-            f"{settings.supabase_url.rstrip('/')}/rest/v1/vendors?id=in.({','.join(wanted)})&select=id,name,logo_url,status",
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/vendors?id=in.({','.join(wanted)})&select=*",
             headers=service_headers(settings),
         )
     except httpx.HTTPError:
         return []
     rows = response.json() if response.status_code < 400 else []
-    return [{"id": r["id"], "name": r.get("name") or "", "logo_url": r.get("logo_url")} for r in rows if r.get("status", "approved") == "approved"]
+    # `platform`: Sha2ty's own studio (the admins' catalogue), so lists can leave its items out where only vendors' belong.
+    return [{"id": r["id"], "name": r.get("name") or "", "logo_url": r.get("logo_url"), "platform": bool(r.get("platform"))} for r in rows if r.get("status", "approved") == "approved"]
 
 
 @router.get("/vendors/{vendor_id}/profile")
