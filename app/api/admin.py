@@ -201,6 +201,33 @@ async def put_generator(body: GeneratorBody, request: Request) -> dict[str, obje
     return {"provider": provider}
 
 
+class MatchModelBody(BaseModel):
+    provider: Literal["astra", "sol"]
+
+
+@router.get("/match-model", dependencies=[Depends(require_admin)])
+async def get_match_model(request: Request) -> dict[str, object]:
+    """The GPT that combines the model's photo and the other item's photo into one room (Match)."""
+    settings = get_settings()
+    key = generator_setting.MATCH
+    return {
+        "provider": await generator_setting.current(settings, request.app.state.auth_http, key),
+        "options": [{"id": p, "label": label, "configured": generator_setting.configured(settings, p)} for p, label in generator_setting.MATCH_LABELS.items()],
+    }
+
+
+@router.put("/match-model", dependencies=[Depends(require_admin)])
+async def put_match_model(body: MatchModelBody, request: Request) -> dict[str, object]:
+    settings = get_settings()
+    if not generator_setting.configured(settings, body.provider):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{generator_setting.MATCH_LABELS[body.provider]} needs OPENAI_API_KEY on the server.")
+    try:
+        provider = await generator_setting.set_current(settings, request.app.state.auth_http, body.provider, generator_setting.MATCH)
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"provider": provider}
+
+
 @router.get("/vision", dependencies=[Depends(require_admin)])
 async def get_vision(request: Request) -> dict[str, object]:
     """The model that reads floor plans and vendor product photos, and which ones have an API key."""

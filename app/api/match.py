@@ -1,5 +1,5 @@
 """POST /api/match: a photorealistic room with the catalogue model and the shopper's item, made by
-OpenAI image editing from both photos (see app/services/image_match.py)."""
+the admin's GPT (Astra or Sol) from both photos (see app/services/image_match.py)."""
 
 from __future__ import annotations
 
@@ -10,14 +10,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 
 from app.api.plans import store
 from app.core.config import get_settings
 from app.services import image_match as im
-from app.services.auth import service_headers
+from app.services import generator_setting
+from app.services.auth import service_headers, user_id_from_bearer
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 
@@ -38,13 +39,43 @@ PLACEMENT_LABEL = {
     ("wall_paint", "front"): "Wall facing the model painted",
 }
 
-OTHER_TYPE = {"model": "furniture", "carpet": "carpet", "wall": "wall_paint"}
+OTHER_TYPE = {"model": "furniture", "design": "furniture", "user_model": "furniture", "carpet": "carpet", "wall": "wall_paint"}
 DEFAULT_WALL_CM = (300.0, 260.0)  # ponytail: a paint has no wall size; a typical wall stands in
 
 
-async def other_item(request: Request, kind: str, item_id: str) -> dict[str, Any]:
-    """A catalogue item from the shopper's cart or purchases: its photo (or colour) and real size in cm,
-    so the shopper doesn't upload or measure anything."""
+def _sized(url: str | None, w: Any, h: Any, d: Any, name: str | None = None) -> dict[str, Any]:
+    if not url or not (w and h):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "That item has no photo or size to match with.")
+    return {"url": url, "size": (float(w) * 100, float(h) * 100, float(d) * 100 if d else None), "name": name}
+
+
+async def other_item(request: Request, kind: str, item_id: str, user: str | None = None) -> dict[str, Any]:
+    """A catalogue item (cart, purchases, or picked from the catalogue), or one of the shopper's own customised or
+    uploaded models: its photo (or colour) and real size in cm, so the shopper doesn't upload or measure anything."""
+    if kind in ("design", "user_model"):
+        settings = get_settings()
+        rest = f"{settings.supabase_url.rstrip('/')}/rest/v1"
+        if kind == "design":
+            current = "current:design_versions!designs_current_version_fk(data,thumbnail_url)"
+            params = {"id": f"eq.{item_id}", "owner_id": f"eq.{user}", "deleted_at": "is.null", "select": f"title,thumbnail_url,{current}"}
+            table = "designs"
+        else:
+            params = {"id": f"eq.{item_id}", "owner_id": f"eq.{user}", "select": "*"}
+            table = "user_models"
+        response = await request.app.state.auth_http.get(f"{rest}/{table}", headers=service_headers(settings), params=params)
+        rows = response.json() if response.status_code < 400 else []
+        if not rows:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "That model is not one of yours.")
+        row = rows[0]
+        if kind == "user_model":
+            return _sized(row.get("thumbnail_url") or row.get("source_image_url"), row.get("width_m"), row.get("height_m"), row.get("depth_m"), row.get("title"))
+        version = row.get("current") or {}
+        item = (version.get("data") or {}).get("item") or {}
+        dims, source = item.get("dimensions") or {}, item.get("source") or {}
+        return _sized(
+            version.get("thumbnail_url") or row.get("thumbnail_url"),
+            dims.get("width") or source.get("width_m"), dims.get("height") or source.get("height_m"), dims.get("depth") or source.get("depth_m"), row.get("title") or source.get("title"),
+        )
     if kind == "model":
         catalog = await store(request).catalog(model_id=item_id, limit=1, require_3d=False)
         found = [m for c in catalog.get("companies", []) for m in c.get("models", [])]
@@ -100,18 +131,28 @@ async def create_match(
     modelHeight: Annotated[float | None, Form(gt=0, le=5000)] = None,
     uploadedImage: Annotated[UploadFile | None, File()] = None,
     # Match with an item from the cart / purchases instead of an upload: its photo and size come from the catalogue.
-    otherKind: Annotated[Literal["model", "carpet", "wall"] | None, Form()] = None,
+    otherKind: Annotated[Literal["model", "design", "user_model", "carpet", "wall"] | None, Form()] = None,
     otherId: Annotated[UUID | None, Form()] = None,
+    # The item shown with the other one: a catalogue model, or (from the 3D editor) the shopper's design or own model.
+    modelKind: Annotated[Literal["model", "design", "user_model"], Form()] = "model",
+    authorization: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
     """Model sizes (modelWidth/Depth/Height, same unit) are only used when the catalogue has none.
     Answers with NDJSON progress lines, then the result (see `stream`)."""
     settings = get_settings()
     if not settings.astra_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image generation is not configured (OPENAI_API_KEY).")
+    user: list[str] = []
+
+    async def owner() -> str:  # the shopper's own models need who is asking; catalogue items don't
+        if not user:
+            user.append(await user_id_from_bearer(authorization, settings, request.app.state.auth_http))
+        return user[0]
+
     data: bytes | None = None
     other_cm: tuple[float, float, float | None] | None = None
     if otherKind and otherId:
-        other = await other_item(request, otherKind, str(otherId))
+        other = await other_item(request, otherKind, str(otherId), await owner() if otherKind in ("design", "user_model") else None)
         matchType = OTHER_TYPE[otherKind]  # type: ignore[assignment]
         other_cm = other["size"]
         color = other.get("color")
@@ -137,8 +178,13 @@ async def create_match(
     if matchType == "carpet":
         position = None
 
-    catalog = await store(request).catalog(model_id=modelId, limit=1, require_3d=False)  # photo-only models match too
-    models = [model for company in catalog.get("companies", []) for model in company.get("models", [])]
+    if modelKind == "model":
+        catalog = await store(request).catalog(model_id=modelId, limit=1, require_3d=False)  # photo-only models match too
+        models = [model for company in catalog.get("companies", []) for model in company.get("models", [])]
+    else:  # its saved photo and (edited) size, in the catalogue's shape
+        mine = await other_item(request, modelKind, modelId, await owner())
+        w, h, d = mine["size"]
+        models = [{"title": mine["name"], "thumbnail": mine["url"], "width_m": w / 100, "height_m": h / 100, "depth_m": d / 100 if d else None}]
     if not models:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This model is not in the catalogue.")
     model = models[0]
@@ -177,7 +223,8 @@ async def create_match(
         warnings.append("A solid paint colour is shown from different camera angles; the colour itself is the same in every image.")
     tile = other.get("tile") if other_cm else (im.to_cm(tileSize, unit) if tileSize else None)
     prompts = [im.build_prompt(matchType, position, existing, item, i, color, tile) for i in range(variationsCount)]
-    matcher = im.ImageMatcher(settings, request.app.state.openai_http)
+    gpt = await generator_setting.current(settings, request.app.state.auth_http, generator_setting.MATCH)
+    matcher = im.ImageMatcher(settings, request.app.state.openai_http, settings.openai_astra_model if gpt == "astra" else settings.openai_sol_model)
     label = PLACEMENT_LABEL.get((matchType, position), "")
 
     async def stream():

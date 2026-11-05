@@ -11,3 +11,4 @@ alter table public.app_settings enable row level security;
 
 insert into public.app_settings (key, value) values ('vision_model', '"gemini-3.1-pro-preview"')
 on conflict (key) do nothing;
+insert into public.app_settings (key, value) values ('match_model', '"sol"') on conflict (key) do nothing; -- Match: GPT Astra or GPT Sol

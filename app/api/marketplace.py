@@ -42,7 +42,16 @@ def spec_from_version(design: dict[str, Any], version: dict[str, Any], part_ids:
     source = item.get("source") or {}
     removed = set(item.get("removed_parts") or [])
     # Removed parts are not part of the model any more: vendors never see them.
-    names = {c.get("id"): c.get("name") for c in ((item.get("components") or {}).get("components") or []) if c.get("id") not in removed}
+    components = [c for c in ((item.get("components") or {}).get("components") or []) if c.get("id") not in removed]
+    names = {c.get("id"): c.get("name") for c in components}
+    # The vendor's variant the customer picked for a part (its own shape and price difference), when any.
+    chosen = item.get("part_variants") or {}
+    variants = {
+        c["id"]: v
+        for c in components
+        for v in (c.get("variants") or [])
+        if isinstance(v, dict) and chosen.get(c.get("id")) == v.get("id")
+    }
     if part_ids is not None:
         unknown = [p for p in part_ids if p not in names]
         if unknown or not part_ids:
@@ -74,7 +83,11 @@ def spec_from_version(design: dict[str, Any], version: dict[str, Any], part_ids:
             "dimensions": dims,
             "resize_mode": item.get("resize_mode"),
             "scale": item.get("scale"),
-            "parts": [{"id": k, "name": v, "requested": k in wanted} for k, v in names.items()],
+            "parts": [
+                {"id": k, "name": v, "requested": k in wanted,
+                 **({"variant": {key: variants[k].get(key) for key in ("id", "name", "glb_url", "price_delta")}} if k in variants else {})}
+                for k, v in names.items()
+            ],
             "whole_model": part_ids is None or wanted == set(names),
             "materials": materials,
             "materials_total": materials_total,

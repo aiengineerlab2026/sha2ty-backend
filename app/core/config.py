@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     openai_image_quality: str = "low"  # low | medium | high (cost and time grow with it)
     openai_image_input_fidelity: str = ""  # "high" keeps reference details on models that support it (gpt-image-1.x); gpt-image-2 rejects it
     openai_image_timeout_seconds: float = 300.0
+    # Admin "Generate furniture" product photos: catalogue images, so high quality (slower and dearer than Match).
+    openai_product_photo_quality: str = "high"
     openai_image_expected_seconds: float = 30.0  # typical time per image, for the progress percentage
 
     supabase_url: str = ""

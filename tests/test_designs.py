@@ -285,3 +285,15 @@ def test_a_customised_model_keeps_one_version_and_the_ones_requests_use(env):
     client.post(f"/api/designs/{made['id']}/versions", json={"item": {"dimensions": {"width": 2.3, "height": 1.1, "depth": 2.1}}})
     ids = {v["id"] for v in fake.tables["design_versions"] if v["design_id"] == made["id"]}
     assert versions[0]["id"] in ids and len(ids) == 2 and first not in ids
+
+
+def test_a_customer_can_build_their_design_on_their_own_3d_file(env):
+    fake, client = env
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL}).json()
+    mine = f"{FILES}/{ALICE}/designs/{made['id']}/base/new.glb"
+    saved = client.post(f"/api/designs/{made['id']}/versions", json={"item": {"base_glb_url": mine}})
+    assert saved.status_code == 201 and saved.json()["data"]["item"]["base_glb_url"] == mine
+    assert saved.json()["data"]["item"]["source"]["glb_url"].endswith("bed.glb")  # the listing it came from stays
+    # Someone else's file (or any other URL) is refused.
+    for url in (f"{FILES}/{BOB}/x.glb", "https://evil/x.glb"):
+        assert client.post(f"/api/designs/{made['id']}/versions", json={"item": {"base_glb_url": url}}).status_code == 422

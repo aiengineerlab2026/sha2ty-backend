@@ -216,6 +216,21 @@ def test_spec_carries_each_parts_wood_and_fabric_and_their_estimated_total() -> 
     assert spec_from_version({"id": "d"}, {"id": "v", "number": 1, "data": {"item": item}})["design"]["materials_total"] is None
 
 
+def test_spec_names_the_part_variant_the_customer_picked() -> None:
+    from app.api.marketplace import spec_from_version
+    from app.schemas.design import ItemEdits
+
+    tapered = {"id": "v2", "name": "Tapered legs", "glb_url": "https://x/tapered.glb", "price_delta": 300}
+    parts = {"components": [{"id": "legs", "name": "Legs", "variants": [{"id": "v1", "name": "Turned legs", "glb_url": "https://x/t.glb"}, tapered]}, {"id": "seat", "name": "Seat"}]}
+    item = ItemEdits.model_validate({"components": parts, "part_variants": {"legs": "v2"}}).model_dump(mode="json", exclude_none=True)
+    assert item["components"]["components"][0]["variants"][1] == tapered  # the vendor's variants are kept with the parts
+    spec = spec_from_version({"id": "d"}, {"id": "v", "number": 1, "data": {"item": item}})["design"]
+    assert {p["id"]: p.get("variant") for p in spec["parts"]} == {"legs": tapered, "seat": None}
+    # A choice whose variant the vendor has since removed is not shown as picked.
+    item["part_variants"] = {"legs": "gone"}
+    assert "variant" not in spec_from_version({"id": "d"}, {"id": "v", "number": 1, "data": {"item": item}})["design"]["parts"][0]
+
+
 MY_MODEL = str(uuid.UUID(int=91))
 
 

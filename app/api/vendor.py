@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import logging
 from dataclasses import replace
 from typing import Annotated, Literal
@@ -21,7 +23,8 @@ from app.services.astra_service import AstraError, AstraService
 from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
-from app.services import vision
+from app.services import furniture_design, vision
+from app.services.image_match import ImageMatchError, reference_png
 from app.services.generation_prompt import astra_prompt, furniture_family, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
@@ -487,3 +490,59 @@ async def extract_carpet_image(
     except CarpetNotFound as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return Response(content=png, media_type="image/png")
+
+
+# ---- Admin: Generate furniture (services/furniture_design.py) ----
+
+
+async def platform_user(request: Request, user_id: Annotated[str, Depends(current_user)]) -> str:
+    """Only the Sha2ty account (an admin signed in from the admin console) generates furniture."""
+    if not await is_platform(user_id, get_settings(), request.app.state.auth_http):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admins can generate furniture.")
+    return user_id
+
+
+class FurnitureBody(BaseModel):
+    kind: furniture_design.Kind
+
+
+@router.post("/furniture/design", response_model=furniture_design.FurnitureSpec)
+async def design_furniture(body: FurnitureBody, request: Request, _admin: Annotated[str, Depends(platform_user)]) -> furniture_design.FurnitureSpec:
+    """A new random design of that type (nothing is saved: the admin reviews it first)."""
+    settings = get_settings()
+    if not settings.openai_api_key.get_secret_value():
+        raise HTTPException(status.HTTP_409_CONFLICT, "Add OPENAI_API_KEY on the server to use GPT Sol.")
+    try:
+        return await furniture_design.design(body.kind, settings, request.app.state.openai_http)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+MAX_RENDER = 10 * 1024 * 1024
+
+
+@router.post("/furniture/photos")
+async def furniture_photos(
+    request: Request,
+    _admin: Annotated[str, Depends(platform_user)],
+    render: Annotated[UploadFile, File()],
+    kind: Annotated[furniture_design.Kind, Form()],
+    title: Annotated[str, Form(max_length=120)] = "",
+    style: Annotated[str, Form(max_length=200)] = "",
+    looks: Annotated[str, Form(max_length=3000)] = "{}",  # the design's {part: {color, material}}
+    which: Annotated[int | None, Form(ge=0, lt=len(furniture_design.SHOTS))] = None,
+) -> dict[str, object]:
+    """Product photos of the generated model from its render (studio, front, in a room, detail; or only shot `which`).
+    Returned, not saved."""
+    data = await render.read(MAX_RENDER + 1)
+    if len(data) > MAX_RENDER:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "The render is larger than 10 MB.")
+    try:
+        parts = {k: v for k, v in json.loads(looks).items() if isinstance(v, dict)}
+    except (ValueError, AttributeError):
+        parts = {}
+    try:
+        images, errors = await furniture_design.photos(kind, title, reference_png(data), get_settings(), request.app.state.openai_http, style, furniture_design.finishes(parts), which)
+    except ImageMatchError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    return {"images": {str(i): base64.b64encode(image).decode("ascii") for i, image in images.items()}, "shots": len(furniture_design.SHOTS), "errors": errors}
