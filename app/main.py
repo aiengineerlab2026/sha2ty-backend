@@ -66,8 +66,9 @@ app = FastAPI(title="Shatably Vendor API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_origins,
-    allow_origin_regex=get_settings().cors_origin_regex,
+    # ponytail: every origin for now (".*" echoes the caller's origin: a literal "*" is refused by browsers when cookies
+    # are sent). Back to settings.cors_origins / cors_origin_regex before launch.
+    allow_origin_regex=".*",
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
     allow_headers=["*"],
     allow_credentials=True,  # the web app calls this API directly with its session cookies
