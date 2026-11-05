@@ -88,6 +88,9 @@ class SessionCookies(BaseHTTPMiddleware):
         admin = request.cookies.get(ADMIN_COOKIE)
         if admin and not any(k == b"x-admin-token" for k, _ in headers):
             headers.append((b"x-admin-token", admin.encode()))
+        # supabase-js always sends the public anon key as its bearer: that is no session, so the cookie's token is used.
+        anon = f"Bearer {get_settings().supabase_anon_key.get_secret_value()}".encode()
+        headers = [(k, v) for k, v in headers if not (k == b"authorization" and v == anon)]
         refreshed: dict[str, Any] | None = None
         expired = False
         if not any(k == b"authorization" for k, _ in headers):

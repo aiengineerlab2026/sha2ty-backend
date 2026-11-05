@@ -83,3 +83,30 @@ def test_an_explicit_header_wins_and_the_admin_cookie_becomes_the_admin_header(m
     c.cookies.set(session.ADMIN_COOKIE, "adm")
     out = c.get("/api/test-echo", headers={"Authorization": "Bearer app"}).json()
     assert out == {"authorization": "Bearer app", "admin": "adm"}
+
+
+def test_the_public_anon_key_is_replaced_by_the_signed_in_users_token(monkeypatch):
+    c = client(monkeypatch)
+    c.cookies.set(session.ACCESS_COOKIE, FRESH)
+    assert c.get("/api/test-echo", headers={"Authorization": "Bearer anon"}).json()["authorization"] == f"Bearer {FRESH}"
+
+
+def test_the_database_passthrough_sends_the_users_token_and_a_readable_body(monkeypatch):
+    import gzip
+
+    from app.api import sb_proxy
+
+    seen = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers.get("authorization")
+        seen["cookie"] = request.headers.get("cookie")
+        return httpx.Response(200, content=gzip.compress(b'[{"id":"m1"}]'), headers={"content-encoding": "gzip", "content-type": "application/json"})
+
+    c = client(monkeypatch)
+    monkeypatch.setattr(sb_proxy, "get_settings", session.get_settings)
+    app.state.auth_http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    c.cookies.set(session.ACCESS_COOKIE, FRESH)
+    res = c.patch("/api/sb/rest/v1/models?id=eq.m1", headers={"Authorization": "Bearer anon", "Accept-Encoding": "br, zstd"}, json={"status": "ready"})
+    assert res.json() == [{"id": "m1"}] and "content-encoding" not in res.headers
+    assert seen == {"authorization": f"Bearer {FRESH}", "cookie": None}  # the user's token, never the browser's cookies

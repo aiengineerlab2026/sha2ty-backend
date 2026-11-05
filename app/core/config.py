@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     openai_image_quality: str = "low"  # low | medium | high (cost and time grow with it)
     openai_image_input_fidelity: str = ""  # "high" keeps reference details on models that support it (gpt-image-1.x); gpt-image-2 rejects it
     openai_image_timeout_seconds: float = 300.0
-    # Admin "Generate furniture" product photos: catalogue images, so high quality (slower and dearer than Match).
-    openai_product_photo_quality: str = "high"
+    # Admin "Generate furniture" product photos: low quality (fast and cheap); all of them together stay under
+    # product_photos_max_bytes (each is a JPEG of at most its share).
+    openai_product_photo_quality: str = "low"
+    product_photos_max_bytes: int = 3 * 1024 * 1024
     openai_image_expected_seconds: float = 30.0  # typical time per image, for the progress percentage
 
     supabase_url: str = ""
@@ -69,7 +71,8 @@ class Settings(BaseSettings):
     supabase_storage_bucket: str = "cads"
 
     cors_origins: list[str] = []
-    cors_origin_regex: str | None = r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+    # Local development, also over the LAN (the mobile app's web view). Production: set CORS_ORIGINS to the site.
+    cors_origin_regex: str | None = r"^http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$"
     storage_dir: Path = BACKEND_DIR / "storage"
 
     max_image_bytes: int = 20 * 1024 * 1024

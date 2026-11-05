@@ -7,10 +7,12 @@ of that model into product photos (image_match.ImageMatcher). Nothing is saved h
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import random
 from typing import Literal
 
+from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import Settings
@@ -185,7 +187,7 @@ ROOM_DETAILS = {
 
 def photo_prompt(kind: Kind, title: str, style: str, materials: str, shot: str) -> str:
     return "\n".join([
-        f"Image 1 is a plain 3D render of a {NAMES[kind]} (“{title}”) with flat, untextured surfaces.",
+        f"Image 1 is a plain 3D render of a {NAMES[kind]} with flat, untextured surfaces.",  # no name: it must never appear in the photo
         "Turn it into a real, high-end photograph of exactly this piece, indistinguishable from a professional "
         "furniture-brand photo shoot: the same silhouette, proportions, parts and colours, but with real materials, "
         "realistic textures (fabric weave, wood grain, stitching, soft natural creases in upholstery), physically "
@@ -197,6 +199,18 @@ def photo_prompt(kind: Kind, title: str, style: str, materials: str, shot: str) 
         DRESSING[kind],
         shot.format(room=f"{ROOMS[kind]} with {ROOM_DETAILS[kind]}", style=style or "its own style"),
     ])
+
+
+def compressed(image: bytes, limit: int) -> bytes:
+    """A JPEG of at most `limit` bytes: lower quality first, then smaller, until it fits."""
+    picture = Image.open(io.BytesIO(image)).convert("RGB")
+    while True:
+        for quality in (85, 75, 65, 55, 45):
+            out = io.BytesIO()
+            picture.save(out, "JPEG", quality=quality, optimize=True, progressive=True)
+            if out.tell() <= limit:
+                return out.getvalue()
+        picture = picture.resize((max(1, int(picture.width * 0.8)), max(1, int(picture.height * 0.8))), Image.LANCZOS)
 
 
 async def photos(kind: Kind, title: str, render: bytes, settings: Settings, client, style: str = "", materials: str = "", which: int | None = None) -> tuple[dict[int, bytes], list[str]]:
@@ -215,7 +229,8 @@ async def photos(kind: Kind, title: str, render: bytes, settings: Settings, clie
         elif isinstance(result, BaseException):
             raise result
         else:
-            images[i] = result
+            # Each photo gets an equal share of the limit, so the whole set fits it whichever are made again.
+            images[i] = compressed(result, settings.product_photos_max_bytes // len(SHOTS))
     if not images and errors:
         raise ImageMatchError(errors[0])
     return images, errors

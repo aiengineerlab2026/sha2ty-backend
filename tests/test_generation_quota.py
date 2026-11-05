@@ -30,7 +30,7 @@ def test_take_try_returns_remaining_and_blocks_at_limit(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(vendor.take_try(request, "v1", "meshy", settings))
     assert exc.value.status_code == 429
-    assert "2 Meshy" in exc.value.detail
+    assert "all 2 3D generations" in exc.value.detail and "Meshy" not in exc.value.detail
 
 
 def test_the_platform_catalogue_has_no_generation_limit(monkeypatch):
