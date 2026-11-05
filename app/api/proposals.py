@@ -119,6 +119,9 @@ async def propose(task_id: UUID, body: ProposalBody, request: Request, user_id: 
     task = await _vendor_task(request, task_id, user_id)
     base = await store.version(task["design_id"], version_id=task["design_version_id"])
     check_textures(body.item)
+    # The customer's own 3D file stays usable as it is; any other replacement must be the vendor's upload.
+    if body.item.base_glb_url != base["data"]["item"].get("base_glb_url"):
+        own_file(body.item.base_glb_url, user_id, "model file")
     source = dict(base["data"]["item"]["source"])
     if body.model_url:
         source.update(glb_url=own_file(body.model_url, user_id, "new model file"), source_glb_url=None)

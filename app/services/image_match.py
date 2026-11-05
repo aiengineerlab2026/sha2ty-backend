@@ -1,5 +1,5 @@
-"""Match through OpenAI image editing: the catalogue model's photo and the shopper's photo go to
-POST /v1/images/edits as two reference images, with a prompt carrying both items' real sizes, a
+"""Match through OpenAI: the catalogue model's photo and the shopper's photo go to POST /v1/responses with
+the admin's GPT (Astra or Sol, generator_setting.MATCH) and its image_generation tool, with a prompt carrying both items' real sizes, a
 room size that fits them with walking clearance, the placement rule and a per-variation camera.
 
 The model is asked to keep both products' designs; it is a generative model, so fidelity and
@@ -24,7 +24,7 @@ from app.core.config import Settings
 
 MatchType = Literal["carpet", "wall_paint", "furniture"]
 Position = Literal["front", "left", "right", "behind"]
-EDITS_URL = "https://api.openai.com/v1/images/edits"
+RESPONSES_URL = "https://api.openai.com/v1/responses"
 REF_SIDE = 1536  # reference images are downscaled to this long side (uploads stay small)
 CLEARANCE = 90  # cm of walking space kept around the furniture
 CEILING = 270  # cm
@@ -172,19 +172,26 @@ def _openai_message(response: httpx.Response) -> str:
 
 
 class ImageMatcher:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient):
+    def __init__(self, settings: Settings, client: httpx.AsyncClient, model: str | None = None):
         self.settings = settings
         self.client = client
+        self.model = model or settings.openai_sol_model
 
-    async def edit(self, prompt: str, references: list[bytes]) -> bytes:
-        """One generated image from the prompt and the reference images (PNG bytes)."""
+    async def edit(self, prompt: str, references: list[bytes], size: str | None = None, quality: str | None = None) -> bytes:
+        """One generated image from the prompt and the reference images (PNG bytes); size / quality default to the settings'."""
         s = self.settings
-        data = {"model": s.openai_image_model, "prompt": prompt, "size": s.openai_image_size, "quality": s.openai_image_quality, "n": "1"}
+        tool = {"type": "image_generation", "model": s.openai_image_model, "size": size or s.openai_image_size, "quality": quality or s.openai_image_quality}
         if s.openai_image_input_fidelity:
-            data["input_fidelity"] = s.openai_image_input_fidelity
-        files = [("image[]", (f"reference-{i + 1}.png", ref, "image/png")) for i, ref in enumerate(references)]
+            tool["input_fidelity"] = s.openai_image_input_fidelity
+        images = [{"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(ref).decode("ascii")} for ref in references]
+        payload = {
+            "model": self.model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}, *images]}],
+            "tools": [tool],
+            "tool_choice": {"type": "image_generation"},
+        }
         try:
-            response = await self.client.post(EDITS_URL, data=data, files=files, timeout=s.openai_image_timeout_seconds)
+            response = await self.client.post(RESPONSES_URL, json=payload, timeout=s.openai_image_timeout_seconds)
         except httpx.TimeoutException as exc:
             raise ImageMatchError("Image generation timed out. Try again, or ask for fewer variations.", 504) from exc
         except httpx.HTTPError as exc:
@@ -194,7 +201,7 @@ class ImageMatcher:
             status = 422 if response.status_code == 400 else 429 if response.status_code == 429 else 502
             raise ImageMatchError(f"Image generation failed: {message}", status)
         try:
-            b64 = response.json()["data"][0]["b64_json"]
+            b64 = next(o["result"] for o in response.json()["output"] if o.get("type") == "image_generation_call" and o.get("result"))
             return base64.b64decode(b64)
         except Exception as exc:  # noqa: BLE001
             raise ImageMatchError("Image generation returned no image.", 502) from exc

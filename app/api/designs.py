@@ -70,6 +70,12 @@ def own_file(url: str | None, user_id: str, what: str) -> str | None:
     return url
 
 
+def check_files(edits: ItemEdits, user_id: str) -> None:
+    """The customer's replacement 3D file must be their own upload."""
+    own_file(edits.base_glb_url, user_id, "model file")
+    check_textures(edits)
+
+
 def check_textures(edits: ItemEdits) -> None:
     """Texture images: any file in the platform's storage (the user's uploads or a vendor's texture library).
     Browser-only blob: URLs would not survive a reload, so they are refused."""
@@ -187,7 +193,7 @@ async def from_model(body: FromModelBody, user_id: User, store: Designs) -> dict
     )
     fields = item.model_dump(mode="json", exclude_none=True)
     if body.item is not None:  # the first save carries the customer's edits: v1 is what they saved
-        check_textures(body.item)
+        check_files(body.item, user_id)
         fields = {**fields, **body.item.model_dump(mode="json", exclude_none=True), "source": fields["source"]}
     data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(fields)})
     return await _create(
@@ -246,7 +252,7 @@ async def save_version(design_id: UUID, body: SaveVersionBody, user_id: User, st
     if design["kind"] == "item":
         if body.item is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Send the item's edits.")
-        check_textures(body.item)
+        check_files(body.item, user_id)
         # The catalogue source stays as it was when the design started.
         item = {**body.item.model_dump(mode="json", exclude_none=True), "source": previous["item"]["source"]}
         data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(item)})

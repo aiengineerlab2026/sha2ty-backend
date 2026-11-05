@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 
 import httpx
 import pytest
@@ -61,21 +62,26 @@ def test_reference_images_become_bounded_pngs_and_colours_become_swatches():
 
 def matcher(handler) -> im.ImageMatcher:
     settings = Settings(openai_api_key="sk-test", openai_image_model="gpt-image-test")
-    return im.ImageMatcher(settings, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return im.ImageMatcher(settings, httpx.AsyncClient(transport=httpx.MockTransport(handler)), "gpt-test-sol")
 
 
-def test_edit_sends_both_reference_images_to_the_image_edit_endpoint():
+def generated(image: bytes) -> dict:
+    return {"output": [{"type": "message"}, {"type": "image_generation_call", "result": base64.b64encode(image).decode()}]}
+
+
+def test_edit_sends_both_reference_images_to_the_chosen_gpt_with_image_generation():
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = request.content
+        body = json.loads(request.content)
         seen["url"] = str(request.url)
-        seen["images"] = body.count(b'name="image[]"')
-        seen["model"] = b"gpt-image-test" in body
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+        seen["images"] = sum(c["type"] == "input_image" for c in body["input"][0]["content"])
+        seen["model"] = body["model"]
+        seen["tool"] = body["tools"][0]["type"] == body["tool_choice"]["type"] == "image_generation"
+        return httpx.Response(200, json=generated(png()))
 
     out = asyncio.run(matcher(handler).edit("a room", [png(), png(color=(0, 0, 200))]))
-    assert seen == {"url": im.EDITS_URL, "images": 2, "model": True}
+    assert seen == {"url": im.RESPONSES_URL, "images": 2, "model": "gpt-test-sol", "tool": True}
     assert Image.open(io.BytesIO(out)).size == (64, 48)
 
 
@@ -86,7 +92,7 @@ def test_failures_are_reported_and_partial_results_kept():
         calls["n"] += 1
         if b"second" in request.content:
             return httpx.Response(400, json={"error": {"message": "Your request was rejected."}})
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+        return httpx.Response(200, json=generated(png()))
 
     images, errors = asyncio.run(matcher(handler).variations(["first", "second", "third"], [png(), png()]))
     assert [i for i, _ in images] == [0, 2] and len(errors) == 1 and "rejected" in errors[0]
@@ -123,7 +129,7 @@ def test_progress_percent_rises_but_never_claims_done_early():
 def test_progress_stream_ends_with_the_result():
     async def run():
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+            return httpx.Response(200, json=generated(png()))
 
         events = [e async for e in matcher(handler).variations_with_progress(["a", "b"], [png(), png()], tick=0.01)]
         return events

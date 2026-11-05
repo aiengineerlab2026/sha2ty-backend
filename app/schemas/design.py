@@ -146,6 +146,10 @@ class ItemEdits(BaseModel):
     part_poses: dict[str, PartPose] | None = None
     # Parts the customer removed from the model (left out of its GLB, thumbnail and requests).
     removed_parts: list[str] | None = Field(default=None, max_length=500)
+    # The vendor's part variant picked per part (part id → variant id, from components[].variants).
+    part_variants: dict[str, str] | None = Field(default=None, max_length=500)
+    # The customer's own .glb this design is built on instead of the source's file (their upload: checked on save).
+    base_glb_url: str | None = Field(default=None, max_length=2000)
     # How the overall size was last changed: one factor for all axes, or each axis on its own (stretches parts).
     resize_mode: Literal["proportional", "independent"] | None = None
     # dimensions ÷ the catalogue size per axis; written by the server from `dimensions` (a sent value is replaced).
