@@ -13,10 +13,13 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.admin import token_valid
 from app.core.config import get_settings
-from app.services import request_report
+import logging
+
+from app.services import part_sizes, request_report
 from app.services.auth import service_headers, user_id_from_bearer
 
 router = APIRouter(prefix="/api/tasks", tags=["requests"])
+logger = logging.getLogger(__name__)
 MAX_PICTURE = 8 * 1024 * 1024
 
 
@@ -54,6 +57,25 @@ async def _picture(client: httpx.AsyncClient, url: str | None) -> bytes | None:
     return response.content if response.status_code < 400 and len(response.content) <= MAX_PICTURE else None
 
 
+MAX_GLB = 40 * 1024 * 1024
+
+
+async def _sizes(client: httpx.AsyncClient, design: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Each part's size from the request's 3D file (platform storage only); None when it cannot be read: the report
+    still goes out, without sizes."""
+    url = design.get("glb_url")
+    if not url or not url.startswith(f"{get_settings().supabase_url.rstrip('/')}/storage/v1/object/public/") or ".." in url:
+        return None
+    try:
+        response = await client.get(url, timeout=30)
+        if response.status_code >= 400 or len(response.content) > MAX_GLB:
+            return None
+        return await run_in_threadpool(part_sizes.measure, response.content, design.get("parts") or [], design.get("dimensions"))
+    except Exception:  # noqa: BLE001 - a file that cannot be measured leaves the sizes out, never the report
+        logger.warning("Could not measure the parts of %s", url[:120], exc_info=True)
+        return None
+
+
 @router.get("/{task_id}/report")
 async def report(
     task_id: UUID,
@@ -78,7 +100,9 @@ async def report(
     picture = await _picture(client, ((task.get("spec") or {}).get("design") or {}).get("thumbnail_url"))
     # The 3D file: the customer and admins; a vendor only once the customer accepted their offer.
     download = admin or task.get("customer_id") == user_id or any(b.get("vendor_id") == user_id and b.get("status") == "accepted" for b in bids)
-    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang, None, download)
+    design = (task.get("spec") or {}).get("design") or {}
+    sizes = await _sizes(client, design)
+    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang, None, download, sizes)
     return Response(pdf, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="sha2ty-request-{str(task_id)[:8]}.pdf"',
         "Cache-Control": "no-store",
