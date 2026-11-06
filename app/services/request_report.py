@@ -36,7 +36,7 @@ LABELS: dict[str, dict[str, str]] = {
     "en": {
         "report": "Implementation request report", "ref": "Request", "created": "Created", "deadline": "Deadline", "budget": "Budget",
         "quantity": "Quantity", "location": "Location", "status": "Status", "audience": "Sent to", "open": "All approved vendors",
-        "model": "Model", "size": "Size (W × H × D)", "based": "Based on", "wood": "Wood (the whole model)", "model_wood": "The model's wood",
+        "model": "Model", "size": "Size (W × H × D)", "based": "Based on", "wood": "Wood (the whole model)", "model_wood": "The model's wood", "part_size": "Size (W × H × D)",
         "file": "3D model file", "download": "Download GLB", "parts": "Parts to make", "part": "Part", "material": "Material / colour",
         "whole": "The whole model", "more": "+ {n} more", "notes": "Customer notes", "none": "None",
         "offers": "Offers", "no_offers": "No offers yet.", "accepted": "Accepted", "days": "{n} days", "generated": "Generated {at}",
@@ -47,7 +47,7 @@ LABELS: dict[str, dict[str, str]] = {
     "ar": {
         "report": "تقرير طلب تنفيذ", "ref": "الطلب", "created": "تاريخ الطلب", "deadline": "الموعد النهائي", "budget": "الميزانية",
         "quantity": "الكمية", "location": "الموقع", "status": "الحالة", "audience": "مرسل إلى", "open": "كل البائعين المعتمدين",
-        "model": "الموديل", "size": "المقاس (عرض × ارتفاع × عمق)", "based": "مبني على", "wood": "الخشب (للموديل بالكامل)", "model_wood": "خشب الموديل",
+        "model": "الموديل", "size": "المقاس (عرض × ارتفاع × عمق)", "based": "مبني على", "wood": "الخشب (للموديل بالكامل)", "model_wood": "خشب الموديل", "part_size": "المقاس (عرض × ارتفاع × عمق)",
         "file": "ملف الموديل ثلاثي الأبعاد", "download": "تنزيل GLB", "parts": "الأجزاء المطلوب تنفيذها", "part": "الجزء", "material": "الخامة / اللون",
         "whole": "الموديل بالكامل", "more": "+ {n} أخرى", "notes": "ملاحظات العميل", "none": "لا يوجد",
         "offers": "العروض", "no_offers": "لا توجد عروض بعد.", "accepted": "مقبول", "days": "{n} يوم", "generated": "أُنشئ في {at}",
@@ -172,9 +172,10 @@ def material_text(edit: dict[str, Any] | None, lang: Lang = "en") -> str:
     return material.get("name") or ("" if edit.get("color") else "—")
 
 
-def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, str], picture: bytes | None, lang: Lang = "ar", now: datetime | None = None, download: bool = True) -> bytes:
+def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, str], picture: bytes | None, lang: Lang = "ar", now: datetime | None = None, download: bool = True, sizes: list[dict[str, Any]] | None = None) -> bytes:
     """The PDF (bytes). `bids`: task_bids rows; `vendors`: vendor id → name; `picture`: the model's thumbnail;
-    `download`: the 3D file link is included (the customer, admins, the vendor whose offer was accepted)."""
+    `download`: the 3D file link is included (the customer, admins, the vendor whose offer was accepted); `sizes`: each
+    part's measured size (services/part_sizes.py; soft furnishings have none)."""
     L = LABELS[lang]
     out = io.BytesIO()
     c = Canvas(out, pagesize=A4, pageCompression=1)
@@ -259,7 +260,8 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
     y -= 8
     edits = {m.get("part_id"): m for m in design.get("materials") or []}
     parts = [part for part in design.get("parts") or [] if part.get("requested", True)]
-    cols = [(L["part"], 0.4), (L["material"], 0.6)]
+    cols = [(L["part"], 0.3), (L["material"], 0.38), (L["part_size"], 0.32)]
+    size_of = {s["name"]: s for s in sizes or []}
     row_h, max_rows = 17, 11
     p.box(M, y - row_h, content, row_h, fill=NAVY, stroke=None, radius=4)
     cx = M
@@ -272,7 +274,9 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
         if i % 2:
             p.box(M, y - row_h, content, row_h, fill=SOFT, stroke=None, radius=0)
         edit = edits.get(part.get("id")) or {}
-        values = [part.get("name") or part.get("id") or "", material_text(edit or None, lang)]
+        size = size_of.get(part.get("name") or "")
+        values = [part.get("name") or part.get("id") or "", material_text(edit or None, lang),
+                  f"{_cm(size['width'])} × {_cm(size['height'])} × {_cm(size['depth'])} cm" + (f" (×{size['count']})" if size["count"] > 1 else "") if size else "—"]
         cx = M
         color = None if (edit.get("material") or {}).get("kind") == "wood" else edit.get("color")
         for col, ((_, share), value) in enumerate(zip(cols, values)):
