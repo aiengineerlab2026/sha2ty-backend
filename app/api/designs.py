@@ -7,6 +7,7 @@ the database, never from the client. Saving, restoring and duplicating only ever
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -76,11 +77,17 @@ def check_files(edits: ItemEdits, user_id: str) -> None:
     check_textures(edits)
 
 
+# The site's built-in wood textures (frontend public/woods), e.g. /woods/mdf.jpg.
+BUILT_IN_TEXTURE = re.compile(r"/woods/[a-z0-9_-]+\.(?:jpg|png|webp)")
+
+
 def check_textures(edits: ItemEdits) -> None:
-    """Texture images: any file in the platform's storage (the user's uploads or a vendor's texture library).
-    Browser-only blob: URLs would not survive a reload, so they are refused."""
+    """Texture images: any file in the platform's storage (the user's uploads or a vendor's texture library), or one
+    of the site's built-in wood textures. Browser-only blob: URLs would not survive a reload, so they are refused."""
     for part, edit in edits.material_edits.items():
-        if edit.mapUrl is not None and (not edit.mapUrl.startswith(_public_prefix()) or ".." in edit.mapUrl):
+        if edit.mapUrl is None or BUILT_IN_TEXTURE.fullmatch(edit.mapUrl):
+            continue
+        if not edit.mapUrl.startswith(_public_prefix()) or ".." in edit.mapUrl:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The texture of part {part!r} must be uploaded first.")
 
 

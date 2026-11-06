@@ -297,3 +297,13 @@ def test_a_customer_can_build_their_design_on_their_own_3d_file(env):
     # Someone else's file (or any other URL) is refused.
     for url in (f"{FILES}/{BOB}/x.glb", "https://evil/x.glb"):
         assert client.post(f"/api/designs/{made['id']}/versions", json={"item": {"base_glb_url": url}}).status_code == 422
+
+
+def test_the_sites_built_in_wood_textures_are_accepted(env):
+    fake, client = env
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL}).json()
+    wood = {"item": {"material_edits": {"headboard": {"mapUrl": "/woods/mdf.jpg", "tile": 1.22}}}}
+    assert client.post(f"/api/designs/{made['id']}/versions", json=wood).status_code == 201
+    for bad in ("/woods/../secret.jpg", "/other/x.jpg", "https://evil/x.jpg"):
+        edits = {"item": {"material_edits": {"headboard": {"mapUrl": bad}}}}
+        assert client.post(f"/api/designs/{made['id']}/versions", json=edits).status_code == 422, bad
