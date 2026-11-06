@@ -36,9 +36,9 @@ LABELS: dict[str, dict[str, str]] = {
     "en": {
         "report": "Implementation request report", "ref": "Request", "created": "Created", "deadline": "Deadline", "budget": "Budget",
         "quantity": "Quantity", "location": "Location", "status": "Status", "audience": "Sent to", "open": "All approved vendors",
-        "model": "Model", "size": "Size (W × H × D)", "based": "Based on", "estimate": "Materials estimate", "on_request": "Priced on request",
+        "model": "Model", "size": "Size (W × H × D)", "based": "Based on", "wood": "Wood (the whole model)", "model_wood": "The model's wood",
         "file": "3D model file", "download": "Download GLB", "parts": "Parts to make", "part": "Part", "material": "Material / colour",
-        "variant": "Variant", "whole": "The whole model", "more": "+ {n} more", "notes": "Customer notes", "none": "None",
+        "whole": "The whole model", "more": "+ {n} more", "notes": "Customer notes", "none": "None",
         "offers": "Offers", "no_offers": "No offers yet.", "accepted": "Accepted", "days": "{n} days", "generated": "Generated {at}",
         "page": "Page 1 of 1", "no_picture": "No picture", "egp": "EGP",
         "published": "Open for offers", "awarded": "Awarded", "in_progress": "In progress", "completed": "Completed", "cancelled": "Cancelled",
@@ -47,9 +47,9 @@ LABELS: dict[str, dict[str, str]] = {
     "ar": {
         "report": "تقرير طلب تنفيذ", "ref": "الطلب", "created": "تاريخ الطلب", "deadline": "الموعد النهائي", "budget": "الميزانية",
         "quantity": "الكمية", "location": "الموقع", "status": "الحالة", "audience": "مرسل إلى", "open": "كل البائعين المعتمدين",
-        "model": "الموديل", "size": "المقاس (عرض × ارتفاع × عمق)", "based": "مبني على", "estimate": "تقدير الخامات", "on_request": "السعر عند الطلب",
+        "model": "الموديل", "size": "المقاس (عرض × ارتفاع × عمق)", "based": "مبني على", "wood": "الخشب (للموديل بالكامل)", "model_wood": "خشب الموديل",
         "file": "ملف الموديل ثلاثي الأبعاد", "download": "تنزيل GLB", "parts": "الأجزاء المطلوب تنفيذها", "part": "الجزء", "material": "الخامة / اللون",
-        "variant": "البديل", "whole": "الموديل بالكامل", "more": "+ {n} أخرى", "notes": "ملاحظات العميل", "none": "لا يوجد",
+        "whole": "الموديل بالكامل", "more": "+ {n} أخرى", "notes": "ملاحظات العميل", "none": "لا يوجد",
         "offers": "العروض", "no_offers": "لا توجد عروض بعد.", "accepted": "مقبول", "days": "{n} يوم", "generated": "أُنشئ في {at}",
         "page": "صفحة 1 من 1", "no_picture": "لا توجد صورة", "egp": "ج.م",
         "published": "متاح للعروض", "awarded": "تم الترسية", "in_progress": "قيد التنفيذ", "completed": "مكتمل", "cancelled": "ملغي",
@@ -161,21 +161,20 @@ def _cm(value: float | None) -> str:
     return "—" if not value else f"{value * 100:.0f}"
 
 
-def material_text(edit: dict[str, Any] | None) -> str:
+def material_text(edit: dict[str, Any] | None, lang: Lang = "en") -> str:
+    """The material used on a part, by name only (no amounts or prices). A wooden part is the model's one wood."""
     if not edit:
         return "—"
     material = edit.get("material") or {}
-    parts = [material.get("name") or ""]
-    if material.get("finish"):
-        parts.append(material["finish"].get("name") or "")
-    if material.get("thickness_mm"):
-        parts.append(f"{material['thickness_mm']} mm")
+    if material.get("kind") == "wood":
+        return LABELS[lang]["model_wood"]
     # The colour is drawn as a swatch beside this text (a hex code beside Arabic would be reordered).
-    return " · ".join(p for p in parts if p) or ("" if edit.get("color") else "—")
+    return material.get("name") or ("" if edit.get("color") else "—")
 
 
-def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, str], picture: bytes | None, lang: Lang = "ar", now: datetime | None = None) -> bytes:
-    """The PDF (bytes). `bids`: task_bids rows; `vendors`: vendor id → name; `picture`: the model's thumbnail."""
+def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, str], picture: bytes | None, lang: Lang = "ar", now: datetime | None = None, download: bool = True) -> bytes:
+    """The PDF (bytes). `bids`: task_bids rows; `vendors`: vendor id → name; `picture`: the model's thumbnail;
+    `download`: the 3D file link is included (the customer, admins, the vendor whose offer was accepted)."""
     L = LABELS[lang]
     out = io.BytesIO()
     c = Canvas(out, pagesize=A4, pageCompression=1)
@@ -217,7 +216,7 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
         p.text(M, y, f"{L['location']}: {fit(task['location'], 'Sans', 8.5, content - 80)}", 8.5, color=MUTED)
         y -= 16
 
-    # The model: its picture beside its size, source and estimate.
+    # The model: its picture beside its size, source and wood.
     pic_w, pic_h = 200, 150
     p.box(M, y - pic_h, pic_w, pic_h, fill=HexColor("#FFFFFF"))
     if picture:
@@ -233,21 +232,22 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
         p.text(M + pic_w / 2 - 25, y - pic_h / 2, L["no_picture"], 8, color=MUTED)
     dims = design.get("dimensions") or {}
     source = design.get("source") or {}
-    total = design.get("materials_total")
+    # One wood for the whole model (the editor puts it on every wooden part); each part's own material goes on it.
+    wood = next(((m.get("material") or {}) for m in design.get("materials") or [] if (m.get("material") or {}).get("kind") == "wood"), None)
     info_x, info_w = M + pic_w + 18, content - pic_w - 18
     rows = [
         (L["model"], design.get("title") or "—"),
         (L["size"], f"{_cm(dims.get('width'))} × {_cm(dims.get('height'))} × {_cm(dims.get('depth'))} cm"
          + (f" ({L[design['resize_mode']]})" if design.get("resize_mode") in ("proportional", "independent") else "")),
         (L["based"], source.get("title") or "—"),
-        (L["estimate"], _money(total, lang) if total is not None else L["on_request"]),
+        *([(L["wood"], wood.get("name") or "—")] if wood else []),
     ]
     ry = y - 10
     for label, value in rows:
         p.text(info_x, ry, label, 7.5, color=MUTED)
         p.text(info_x, ry - 12, fit(value, "Sans-Bold", 9.5, info_w), 9.5, bold=True)
         ry -= 30
-    if design.get("glb_url"):
+    if design.get("glb_url") and download:
         p.text(info_x, ry, L["file"], 7.5, color=MUTED)
         p.text(info_x, ry - 12, L["download"], 9.5, bold=True, color=HexColor("#2563EB"))
         link_w = pdfmetrics.stringWidth(shaped(L["download"]), "Sans-Bold", 9.5)
@@ -259,7 +259,7 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
     y -= 8
     edits = {m.get("part_id"): m for m in design.get("materials") or []}
     parts = [part for part in design.get("parts") or [] if part.get("requested", True)]
-    cols = [(L["part"], 0.34), (L["material"], 0.42), (L["variant"], 0.24)]
+    cols = [(L["part"], 0.4), (L["material"], 0.6)]
     row_h, max_rows = 17, 11
     p.box(M, y - row_h, content, row_h, fill=NAVY, stroke=None, radius=4)
     cx = M
@@ -271,11 +271,10 @@ def build(task: dict[str, Any], bids: list[dict[str, Any]], vendors: dict[str, s
     for i, part in enumerate(shown):
         if i % 2:
             p.box(M, y - row_h, content, row_h, fill=SOFT, stroke=None, radius=0)
-        variant = part.get("variant") or {}
-        values = [part.get("name") or part.get("id") or "", material_text(edits.get(part.get("id"))),
-                  (variant.get("name") or "—") + (f" ({'+' if variant['price_delta'] > 0 else ''}{variant['price_delta']:,.0f})" if variant.get("price_delta") else "")]
+        edit = edits.get(part.get("id")) or {}
+        values = [part.get("name") or part.get("id") or "", material_text(edit or None, lang)]
         cx = M
-        color = (edits.get(part.get("id")) or {}).get("color")
+        color = None if (edit.get("material") or {}).get("kind") == "wood" else edit.get("color")
         for col, ((_, share), value) in enumerate(zip(cols, values)):
             text = fit(value, "Sans", 8.5, content * share - (30 if col == 1 and color else 12))
             p.text(cx + 7, y - 12, text, 8.5)

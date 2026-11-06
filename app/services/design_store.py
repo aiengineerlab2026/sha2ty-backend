@@ -96,6 +96,26 @@ class DesignStore:
         })
         return row[0] if isinstance(row, list) else row
 
+    async def follow_requests(self, design: dict[str, Any], version: dict[str, Any]) -> int:
+        """The design's active requests (open, awarded, in progress) move to its newest version: vendors always see the
+        model as the customer last saved it. Each keeps its parts (those still in the model; else the whole model),
+        quantity and audience. Returns how many were updated."""
+        from app.api.marketplace import OPEN, spec_from_version  # the request spec's single source
+
+        tasks = await self._call("GET", f"freelance_tasks?design_id=eq.{design['id']}&status=in.({','.join(OPEN)})&select=id,spec,design_version_id", "load the requests")
+        updated = 0
+        for task in tasks or []:
+            if task.get("design_version_id") == version["id"]:
+                continue
+            old = task.get("spec") or {}
+            wanted = None if (old.get("design") or {}).get("whole_model", True) else [p["id"] for p in (old.get("design") or {}).get("parts") or [] if p.get("requested")]
+            names = {c.get("id") for c in (((version.get("data") or {}).get("item") or {}).get("components") or {}).get("components") or []}
+            parts = [p for p in wanted or [] if p in names] or None
+            spec = {**old, **spec_from_version(design, version, parts)}
+            await self._call("PATCH", f"freelance_tasks?id=eq.{task['id']}", "update the request", json={"design_version_id": version["id"], "spec": spec})
+            updated += 1
+        return updated
+
     async def prune_versions(self, design_id: str, keep_id: str) -> None:
         """Only the latest version stays: older ones go, except those a request was made from (the request keeps
         showing exactly what was sent)."""

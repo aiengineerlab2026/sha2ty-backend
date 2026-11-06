@@ -76,7 +76,9 @@ async def report(
     ids = sorted({str(b["vendor_id"]) for b in bids if b.get("vendor_id")})
     names = {str(v["id"]): v.get("name") or "" for v in (await _rows(client, f"vendors?id=in.({','.join(ids)})&select=id,name") if ids else [])}
     picture = await _picture(client, ((task.get("spec") or {}).get("design") or {}).get("thumbnail_url"))
-    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang)
+    # The 3D file: the customer and admins; a vendor only once the customer accepted their offer.
+    download = admin or task.get("customer_id") == user_id or any(b.get("vendor_id") == user_id and b.get("status") == "accepted" for b in bids)
+    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang, None, download)
     return Response(pdf, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="sha2ty-request-{str(task_id)[:8]}.pdf"',
         "Cache-Control": "no-store",

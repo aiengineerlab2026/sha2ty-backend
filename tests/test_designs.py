@@ -45,6 +45,8 @@ class FakeSupabase:
                 return False
             if op == "not" and value.startswith("in.(") and str(row.get(key)) in value[4:-1].split(","):
                 return False
+            if op == "in" and str(row.get(key)) not in value[1:-1].split(","):
+                return False
         return True
 
     def _rpc(self, body):
@@ -307,3 +309,19 @@ def test_the_sites_built_in_wood_textures_are_accepted(env):
     for bad in ("/woods/../secret.jpg", "/other/x.jpg", "https://evil/x.jpg"):
         edits = {"item": {"material_edits": {"headboard": {"mapUrl": bad}}}}
         assert client.post(f"/api/designs/{made['id']}/versions", json=edits).status_code == 422, bad
+
+
+def test_saving_a_customised_model_updates_its_active_requests(env):
+    fake, client = env
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL, "title": "Bed"}).json()
+    sent = made["current"]["id"]
+    spec = {"quantity": 2, "audience": "open", "vendor": None, "design": {"whole_model": True, "dimensions": {"width": 1.8}}}
+    fake.tables["freelance_tasks"] += [
+        {"id": "open", "design_id": made["id"], "design_version_id": sent, "status": "published", "spec": spec},
+        {"id": "done", "design_id": made["id"], "design_version_id": sent, "status": "completed", "spec": spec},
+    ]
+    saved = client.post(f"/api/designs/{made['id']}/versions", json={"item": {"dimensions": {"width": 2.4, "height": 1.1, "depth": 2.1}}}).json()
+    open_, done = fake.tables["freelance_tasks"][-2:]
+    assert open_["design_version_id"] == saved["id"] and open_["spec"]["design"]["dimensions"]["width"] == 2.4
+    assert open_["spec"]["quantity"] == 2 and open_["spec"]["audience"] == "open"  # the customer's request choices stay
+    assert done["design_version_id"] == sent  # a finished job keeps what it was made from
