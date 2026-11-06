@@ -130,3 +130,17 @@ def test_a_site_on_another_domain_gets_cookies_it_can_send_cross_site(monkeypatc
         assert "SameSite=none" in cookie and "Secure" in cookie and "Partitioned" in cookie and "HttpOnly" in cookie
     same = c.post("/api/auth/login", json={"email": "a@b.c", "password": "pw"}, headers={"Origin": "http://localhost:3000"})
     assert all("SameSite=lax" in v and "Partitioned" not in v for v in same.headers.get_list("set-cookie"))
+
+
+def test_only_a_valid_admin_session_counts_and_signing_in_as_a_user_ends_it(monkeypatch):
+    from app.api import admin
+
+    c = client(monkeypatch)
+    monkeypatch.setattr(admin, "token_valid", lambda token, settings: token == "good")
+    c.cookies.set(session.ADMIN_COOKIE, "forged")
+    res = c.get("/api/auth/admin-me")
+    assert res.json() == {"admin": False} and "sha2ty-admin=" in res.headers["set-cookie"]  # cleared
+    c.cookies.set(session.ADMIN_COOKIE, "good")
+    assert c.get("/api/auth/admin-me").json() == {"admin": True}
+    login = c.post("/api/auth/login", json={"email": "a@b.c", "password": "pw"})
+    assert any(v.startswith("sha2ty-admin=") and "Max-Age=0" in v for v in login.headers.get_list("set-cookie"))
