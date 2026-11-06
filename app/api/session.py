@@ -164,7 +164,16 @@ async def realtime(request: Request) -> Response:
 
 @router.get("/admin-me")
 async def admin_me(request: Request) -> Response:
-    return JSONResponse({"admin": bool(request.cookies.get(ADMIN_COOKIE))})
+    """Whether this browser has a valid admin session: the token is checked, not only the cookie's presence (an
+    expired or forged one is cleared)."""
+    from app.api.admin import token_valid
+
+    token = request.cookies.get(ADMIN_COOKIE)
+    admin = bool(token and token_valid(token, get_settings()))
+    out = JSONResponse({"admin": admin}, headers={"Cache-Control": "no-store"})
+    if token and not admin:
+        clear_tokens(out, request, (ADMIN_COOKIE,))
+    return out
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -184,6 +193,7 @@ async def login(request: Request) -> Response:
     tokens = res.json()
     out = JSONResponse({"user": tokens.get("user")})
     set_tokens(out, request, tokens)
+    clear_tokens(out, request, (ADMIN_COOKIE,))  # a customer or vendor signing in ends any admin session in this browser
     return out
 
 

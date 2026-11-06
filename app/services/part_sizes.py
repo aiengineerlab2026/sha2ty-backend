@@ -15,8 +15,16 @@ SOFT = re.compile(r"pillow|mattress|duvet|blanket|throw|bedding|bed ?sheet|quilt
 MAX_FACES = 400_000  # ponytail: bigger parts are measured as one box
 
 
+UPHOLSTERED = re.compile(r"upholster|cushion|fabric|تنجيد|منجد|قماش|وسائد", re.I)
+
+
 def is_soft(name: str) -> bool:
     return bool(SOFT.search(name or ""))
+
+
+def fabric_covered(name: str, material: dict[str, Any] | None) -> bool:
+    """Covered in fabric: by the customer's choice, or upholstered by name (its frame is sized, not the cover)."""
+    return bool(UPHOLSTERED.search(name or "")) or (material or {}).get("kind") == "fabric"
 
 
 def _pieces(vertices: np.ndarray, faces: np.ndarray) -> list[np.ndarray]:
@@ -52,7 +60,7 @@ def size_of(boxes: list[np.ndarray]) -> dict[str, float]:
     return {"width": float(s[0]), "height": float(s[1]), "depth": float(s[2]), "count": len(main) if alike else 1}
 
 
-def measure(glb: bytes, parts: list[dict[str, Any]], dimensions: dict[str, float] | None) -> list[dict[str, Any]]:
+def measure(glb: bytes, parts: list[dict[str, Any]], dimensions: dict[str, float] | None, materials: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """[{name, width, height, depth, count}] in metres for each part, in the file's order; parts are named from the
     request's part list (by id, else by order). Scaled per axis so the whole model is the requested size."""
     scene = trimesh.load(io.BytesIO(glb), file_type="glb", force="scene")
@@ -70,10 +78,12 @@ def measure(glb: bytes, parts: list[dict[str, Any]], dimensions: dict[str, float
     want = np.array([(dimensions or {}).get(k) or 0 for k in ("width", "height", "depth")], dtype=float)
     scale = np.where((want > 0) & (extent > 1e-9), want / np.maximum(extent, 1e-9), 1.0)
     names = {p.get("id"): p.get("name") for p in parts}
+    ids = {p.get("name"): p.get("id") for p in parts}
+    chosen = {m.get("part_id"): m.get("material") for m in materials or []}
     out = []
     for i, (node, vertices, faces) in enumerate(meshes):
         name = names.get(node) or (parts[i].get("name") if i < len(parts) else None) or node
-        if is_soft(name) or is_soft(node):
-            continue
+        if is_soft(name) or is_soft(node) or fabric_covered(name, chosen.get(ids.get(name, node))):
+            continue  # soft furnishings and parts covered in fabric get no size
         out.append({"name": name, **size_of(_pieces(vertices * scale, faces))})
     return out

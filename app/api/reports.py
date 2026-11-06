@@ -70,7 +70,7 @@ async def _sizes(client: httpx.AsyncClient, design: dict[str, Any]) -> list[dict
         response = await client.get(url, timeout=30)
         if response.status_code >= 400 or len(response.content) > MAX_GLB:
             return None
-        return await run_in_threadpool(part_sizes.measure, response.content, design.get("parts") or [], design.get("dimensions"))
+        return await run_in_threadpool(part_sizes.measure, response.content, design.get("parts") or [], design.get("dimensions"), design.get("materials"))
     except Exception:  # noqa: BLE001 - a file that cannot be measured leaves the sizes out, never the report
         logger.warning("Could not measure the parts of %s", url[:120], exc_info=True)
         return None

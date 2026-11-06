@@ -26,3 +26,11 @@ def test_parts_are_measured_with_repeated_pieces_once_and_soft_furnishings_left_
 def test_sizes_follow_the_requested_size():
     rows = {r["name"]: r for r in measure(glb(), [{"id": "legs", "name": "Legs"}, {"id": "frame", "name": "Frame"}], {"width": 1.0, "height": 0.875, "depth": 1.05})}
     assert round(rows["Frame"]["width"], 2) == 1.0 and round(rows["Legs"]["height"], 2) == 0.4
+
+
+def test_parts_covered_in_fabric_get_no_size():
+    parts = [{"id": "legs", "name": "Legs"}, {"id": "frame", "name": "Frame"}, {"id": "pillow", "name": "Pillow"}]
+    rows = measure(glb(), parts, None, [{"part_id": "frame", "material": {"kind": "fabric", "name": "Linen"}}])
+    assert [r["name"] for r in rows] == ["Legs"]
+    upholstered = measure(glb(), [{"id": "legs", "name": "Legs"}, {"id": "frame", "name": "Headboard Upholstery"}], None)
+    assert [r["name"] for r in upholstered] == ["Legs"]
