@@ -278,6 +278,8 @@ async def save_version(design_id: UUID, body: SaveVersionBody, user_id: User, st
         thumbnail_url=own_file(body.thumbnail_url, user_id, "thumbnail"), note=body.note, client_token=body.client_token,
     )
     if design["kind"] == "item":
+        # Its requests follow the saved model (vendors see the latest), then older versions go.
+        await store.follow_requests(design, {**saved, "data": data})
         await store.prune_versions(str(design_id), saved["id"])  # a customised model keeps one version: the latest
     return saved
 

@@ -84,11 +84,11 @@ def test_request_is_built_from_the_saved_version_and_not_duplicated(env):
     # Asking again for the same version returns the open request.
     assert client.post(f"/api/designs/{bed['id']}/request", json=body).json()["id"] == task["id"]
     assert len(fake.tables["freelance_tasks"]) == 1
-    # A new saved version may be requested separately; the first request keeps its own version.
+    # Saving the design again updates its open request (vendors see the latest); asking again returns that request.
     client.post(f"/api/designs/{bed['id']}/versions", json={"item": {"dimensions": {"width": 2.3, "height": 1.1, "depth": 2.1}}})
-    second = client.post(f"/api/designs/{bed['id']}/request", json=body).json()
-    assert second["id"] != task["id"] and second["spec"]["design"]["dimensions"]["width"] == 2.3
-    assert fake.tables["freelance_tasks"][0]["spec"]["design"]["dimensions"]["width"] == 2.1
+    assert fake.tables["freelance_tasks"][0]["spec"]["design"]["dimensions"]["width"] == 2.3
+    again = client.post(f"/api/designs/{bed['id']}/request", json=body).json()
+    assert again["id"] == task["id"] and len(fake.tables["freelance_tasks"]) == 1
 
 
 def test_only_the_owner_can_request_and_only_items(env):
