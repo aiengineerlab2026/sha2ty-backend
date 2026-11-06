@@ -180,6 +180,26 @@ async def request_implementation(design_id: UUID, body: RequestBody, request: Re
     return response.json()[0]
 
 
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_request(task_id: UUID, request: Request, user_id: User) -> None:
+    """The customer cancels their request while it is open for offers: it is deleted (its bids, chat and proposals go
+    with it, by the tables' cascades), so it is gone from every list. Their requests cancelled before are cleared too."""
+    settings = get_settings()
+    base = f"{settings.supabase_url.rstrip('/')}/rest/v1/freelance_tasks"
+    headers = {**service_headers(settings), "Prefer": "return=representation"}
+    client: httpx.AsyncClient = request.app.state.auth_http
+    try:
+        # One statement checks the owner and the status and deletes: nothing slips in between.
+        response = await client.delete(f"{base}?id=eq.{task_id}&customer_id=eq.{user_id}&status=in.(published,cancelled)", headers=headers)
+        await client.delete(f"{base}?customer_id=eq.{user_id}&status=eq.cancelled", headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not cancel the request.") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not cancel the request.")
+    if not response.json():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Only your own request that is still open for offers can be cancelled.")
+
+
 @router.get("/vendors/brands")
 async def vendor_brands(request: Request, ids: str = "") -> list[dict[str, Any]]:
     """Name and logo of approved vendors (customers cannot read the vendors table), e.g. for the fabrics and woods

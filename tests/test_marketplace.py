@@ -27,6 +27,12 @@ class Fake(FakeSupabase):
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         params = dict(request.url.params)
+        if request.method == "DELETE" and request.url.path.endswith("/freelance_tasks"):
+            def keep(r):
+                return not all(str(r.get(k)) in (v[4:-1].split(",") if v.startswith("in.(") else [v.removeprefix("eq.")]) for k, v in params.items())
+            gone = [r for r in self.tables["freelance_tasks"] if not keep(r)]
+            self.tables["freelance_tasks"] = [r for r in self.tables["freelance_tasks"] if keep(r)]
+            return httpx.Response(200, json=gone)
         status_in = params.get("status", "")
         if request.method == "GET" and status_in.startswith("in.("):
             wanted = status_in[4:-1].split(",")
@@ -263,3 +269,18 @@ def test_brands_say_which_vendor_is_sha2tys_own_and_share_no_private_details(env
     brands = {b["id"]: b for b in client.get(f"/api/vendors/brands?ids={VENDOR},{PLATFORM}").json()}
     assert brands[VENDOR] == {"id": VENDOR, "name": "Oslo Studio", "logo_url": None, "platform": False}
     assert brands[PLATFORM]["platform"] is True
+
+
+def test_cancelling_deletes_the_customers_open_request_and_their_cancelled_ones(env):
+    fake, client = env
+    fake.tables["freelance_tasks"] = [
+        {"id": str(uuid.uuid4()), "customer_id": ALICE, "status": "published"},
+        {"id": str(uuid.uuid4()), "customer_id": ALICE, "status": "cancelled"},
+        {"id": str(uuid.uuid4()), "customer_id": ALICE, "status": "awarded"},
+        {"id": str(uuid.uuid4()), "customer_id": BOB, "status": "published"},
+    ]
+    open_, _, awarded, bobs = (t["id"] for t in fake.tables["freelance_tasks"])
+    assert client.delete(f"/api/tasks/{bobs}").status_code == 404  # not hers
+    assert client.delete(f"/api/tasks/{awarded}").status_code == 404  # a vendor was hired: no longer cancellable
+    assert client.delete(f"/api/tasks/{open_}").status_code == 204
+    assert {t["id"] for t in fake.tables["freelance_tasks"]} == {awarded, bobs}  # the open one and the old cancelled one are gone
