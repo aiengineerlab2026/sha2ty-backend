@@ -9,9 +9,8 @@ TASK = {"id": "3f2a9c1e", "title": "سرير ورد الصباح", "status": "pu
 
 
 def test_the_report_is_always_one_page_in_both_languages():
-    bids = [{"vendor_id": f"v{i}", "price": 1000 + i, "days": 10, "status": "submitted"} for i in range(9)]
     for lang in ("ar", "en"):
-        pdf = rr.build(TASK, bids, {}, None, lang)  # 40 parts, 9 offers and a very long note still fit one page
+        pdf = rr.build(TASK, None, lang, customer="علاء حامد")  # 40 parts and a very long note still fit one page
         assert pdf.startswith(b"%PDF") and len(re.findall(rb"/Type\s*/Page\b(?!s)", pdf)) == 1, lang
 
 

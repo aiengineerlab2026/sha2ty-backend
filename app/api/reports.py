@@ -60,6 +60,19 @@ async def _picture(client: httpx.AsyncClient, url: str | None) -> bytes | None:
 MAX_GLB = 40 * 1024 * 1024
 
 
+async def _customer(client: httpx.AsyncClient, user_id: str | None) -> str | None:
+    """The name of who made the request (their account's name; no email), None when it cannot be read."""
+    settings = get_settings()
+    if not user_id:
+        return None
+    try:
+        response = await client.get(f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}", headers=service_headers(settings))
+    except httpx.HTTPError:
+        return None
+    meta = (response.json().get("user_metadata") or {}) if response.status_code < 400 else {}
+    return (meta.get("full_name") or meta.get("name") or "").strip() or None
+
+
 async def _sizes(client: httpx.AsyncClient, design: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Each part's size from the request's 3D file (platform storage only); None when it cannot be read: the report
     still goes out, without sizes."""
@@ -88,21 +101,20 @@ async def report(
     admin = bool(x_admin_token and token_valid(x_admin_token, get_settings()))
     user_id = None if admin else await user_id_from_bearer(authorization, get_settings(), client)
     task = (await _rows(client, f"freelance_tasks?id=eq.{task_id}&select=*") or [None])[0]
-    bids = await _rows(client, f"task_bids?task_id=eq.{task_id}&select=vendor_id,price,days,status") if task else []
+    bids = await _rows(client, f"task_bids?task_id=eq.{task_id}&select=vendor_id,status") if task else []
     if not task:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")
     if not admin:
         vendor = (await _rows(client, f"vendors?id=eq.{user_id}&select=id,status") or [None])[0]
         if not may_see(task, user_id, vendor, bids):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")  # 404, not 403: it stays unseen
-    ids = sorted({str(b["vendor_id"]) for b in bids if b.get("vendor_id")})
-    names = {str(v["id"]): v.get("name") or "" for v in (await _rows(client, f"vendors?id=in.({','.join(ids)})&select=id,name") if ids else [])}
     picture = await _picture(client, ((task.get("spec") or {}).get("design") or {}).get("thumbnail_url"))
     # The 3D file: the customer and admins; a vendor only once the customer accepted their offer.
     download = admin or task.get("customer_id") == user_id or any(b.get("vendor_id") == user_id and b.get("status") == "accepted" for b in bids)
     design = (task.get("spec") or {}).get("design") or {}
     sizes = await _sizes(client, design)
-    pdf = await run_in_threadpool(request_report.build, task, bids, names, picture, lang, None, download, sizes)
+    customer = await _customer(client, task.get("customer_id"))
+    pdf = await run_in_threadpool(request_report.build, task, picture, lang, None, download, sizes, customer)
     return Response(pdf, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="sha2ty-request-{str(task_id)[:8]}.pdf"',
         "Cache-Control": "no-store",
