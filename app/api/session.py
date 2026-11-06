@@ -165,11 +165,21 @@ async def realtime(request: Request) -> Response:
 @router.get("/admin-me")
 async def admin_me(request: Request) -> Response:
     """Whether this browser has a valid admin session: the token is checked, not only the cookie's presence (an
-    expired or forged one is cleared)."""
+    expired or forged one is cleared), and it belongs to whoever is signed in: with another account than the Sha2ty
+    one (an admin's), the admin session is over and cleared."""
     from app.api.admin import token_valid
+    from app.services.auth import user_id_from_bearer
+    from app.services.platform import is_platform
 
+    settings = get_settings()
     token = request.cookies.get(ADMIN_COOKIE)
-    admin = bool(token and token_valid(token, get_settings()))
+    admin = bool(token and token_valid(token, settings))
+    if admin and _bearer(request):
+        client = request.app.state.auth_http
+        try:
+            admin = await is_platform(await user_id_from_bearer(request.headers.get("authorization"), settings, client), settings, client)
+        except Exception:  # noqa: BLE001 - a session that cannot be read is not an admin's
+            admin = False
     out = JSONResponse({"admin": admin}, headers={"Cache-Control": "no-store"})
     if token and not admin:
         clear_tokens(out, request, (ADMIN_COOKIE,))
