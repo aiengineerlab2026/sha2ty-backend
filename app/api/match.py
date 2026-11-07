@@ -100,6 +100,15 @@ async def other_item(request: Request, kind: str, item_id: str, user: str | None
     return {"color": row["color"], "size": (*DEFAULT_WALL_CM, None)}
 
 
+async def read_image(upload: UploadFile) -> bytes:
+    if (upload.content_type or "").split(";")[0].lower() not in ALLOWED:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a JPG, PNG or WebP image.")
+    data = await upload.read(MAX_UPLOAD + 1)
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Images must be 15 MB or smaller.")
+    return data
+
+
 def out_dir() -> Path:
     path = get_settings().storage_dir / "match"
     path.mkdir(parents=True, exist_ok=True)
@@ -133,8 +142,10 @@ async def create_match(
     # Match with an item from the cart / purchases instead of an upload: its photo and size come from the catalogue.
     otherKind: Annotated[Literal["model", "design", "user_model", "carpet", "wall"] | None, Form()] = None,
     otherId: Annotated[UUID | None, Form()] = None,
-    # The item shown with the other one: a catalogue model, or (from the 3D editor) the shopper's design or own model.
-    modelKind: Annotated[Literal["model", "design", "user_model"], Form()] = "model",
+    # The item shown with the other one: a catalogue model, or (from the 3D editor) the shopper's design or own model,
+    # or "snapshot": the editor's picture of the model as it is now (saved or not), sized by modelWidth/Depth/Height.
+    modelKind: Annotated[Literal["model", "design", "user_model", "snapshot"], Form()] = "model",
+    modelImage: Annotated[UploadFile | None, File()] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
     """Model sizes (modelWidth/Depth/Height, same unit) are only used when the catalogue has none.
@@ -164,11 +175,7 @@ async def create_match(
     elif width is None or height is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Enter the item's width and height.")
     elif uploadedImage is not None:
-        if (uploadedImage.content_type or "").split(";")[0].lower() not in ALLOWED:
-            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload a JPG, PNG or WebP image.")
-        data = await uploadedImage.read(MAX_UPLOAD + 1)
-        if len(data) > MAX_UPLOAD:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Images must be 15 MB or smaller.")
+        data = await read_image(uploadedImage)
     if data is None and not (matchType == "wall_paint" and color):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Upload a texture or choose a paint colour." if matchType == "wall_paint" else "Upload an image to match.")
     if matchType == "furniture" and not position:
@@ -178,7 +185,13 @@ async def create_match(
     if matchType == "carpet":
         position = None
 
-    if modelKind == "model":
+    snapshot: bytes | None = None
+    if modelKind == "snapshot":
+        if modelImage is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This model has no photo to match against.")
+        snapshot = await read_image(modelImage)
+        models = [{"title": "product", "thumbnail": None, "width_m": None, "height_m": None, "depth_m": None}]
+    elif modelKind == "model":
         catalog = await store(request).catalog(model_id=modelId, limit=1, require_3d=False)  # photo-only models match too
         models = [model for company in catalog.get("companies", []) for model in company.get("models", [])]
     else:  # its saved photo and (edited) size, in the catalogue's shape
@@ -188,12 +201,14 @@ async def create_match(
     if not models:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This model is not in the catalogue.")
     model = models[0]
-    photo_url = model.get("thumbnail")
-    if not photo_url:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This model has no photo to match against.")
-    photo = await request.app.state.auth_http.get(photo_url)
-    if photo.status_code >= 400:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not download the model's photo.")
+    if snapshot is None:
+        photo_url = model.get("thumbnail")
+        if not photo_url:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This model has no photo to match against.")
+        photo = await request.app.state.auth_http.get(photo_url)
+        if photo.status_code >= 400:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not download the model's photo.")
+        snapshot = photo.content
 
     def model_cm(value: Any, override: float | None, name: str) -> float:
         if value:
@@ -214,7 +229,7 @@ async def create_match(
             item = im.Item(matchType, *other_cm)
         else:
             item = im.Item(matchType, im.to_cm(width, unit), im.to_cm(height, unit), im.to_cm(depth, unit) if depth else None)  # type: ignore[arg-type]
-        references = [im.reference_png(photo.content), im.reference_png(data) if data else im.swatch_png(color or "")]
+        references = [im.reference_png(snapshot), im.reference_png(data) if data else im.swatch_png(color or "")]
     except im.ImageMatchError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
 
