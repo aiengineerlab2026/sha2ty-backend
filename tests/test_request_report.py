@@ -24,3 +24,12 @@ def test_who_may_download_a_report():
     awarded = {**TASK, "status": "awarded"}
     assert may_see(awarded, "v2", approved, [{"vendor_id": "v2"}]) and not may_see(awarded, "v3", approved, [])
     assert not may_see(TASK, "stranger", None, [])
+
+
+def test_part_names_follow_the_report_language():
+    from app.services.request_report import part_name
+
+    assert part_name("Chair Back", "ar") == "ظهر الكرسي"
+    assert part_name("ظهر الكرسي", "en") == "Chair Back"
+    assert part_name("ظهر الكرسي", "ar") == "ظهر الكرسي"
+    assert part_name("Drawer", "ar") == "Drawer"  # a vendor's own name stays as written

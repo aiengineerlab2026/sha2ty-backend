@@ -43,7 +43,7 @@ LABELS: dict[str, dict[str, str]] = {
         "file": "3D model file", "download": "Download GLB", "parts": "Parts to make", "part": "Part", "material": "Material / colour",
         "whole": "The whole model", "more": "+ {n} more", "notes": "Customer notes", "none": "None",
         "generated": "Generated {at}",
-        "page": "Page 1 of 1", "no_picture": "No picture", "egp": "EGP",
+        "page": "Page 1 of 1", "no_picture": "No picture", "egp": "EGP", "cm": "cm",
         "published": "Open for offers", "awarded": "Awarded", "in_progress": "In progress", "completed": "Completed", "cancelled": "Cancelled",
         "proportional": "resized proportionally", "independent": "each side resized",
     },
@@ -54,11 +54,26 @@ LABELS: dict[str, dict[str, str]] = {
         "file": "ملف الموديل ثلاثي الأبعاد", "download": "تنزيل GLB", "parts": "الأجزاء المطلوب تنفيذها", "part": "الجزء", "material": "الخامة / اللون",
         "whole": "الموديل بالكامل", "more": "+ {n} أخرى", "notes": "ملاحظات العميل", "none": "لا يوجد",
         "generated": "أُنشئ في {at}",
-        "page": "صفحة 1 من 1", "no_picture": "لا توجد صورة", "egp": "ج.م",
+        "page": "صفحة 1 من 1", "no_picture": "لا توجد صورة", "egp": "ج.م", "cm": "سم",
         "published": "متاح للعروض", "awarded": "تم الترسية", "in_progress": "قيد التنفيذ", "completed": "مكتمل", "cancelled": "ملغي",
         "proportional": "تغيير المقاس بالتناسب", "independent": "تغيير كل بُعد على حدة",
     },
 }
+
+
+# The furniture builder's part names (frontend lib/vendor/furnitureBuilder.ts PART_AR): models made with it store them
+# in Arabic, older ones in English, so each report shows them in its own language.
+# ponytail: only the builder's parts; other models' part names are shown as their vendor wrote them.
+PART_AR = {
+    "Headboard": "لوح الرأس", "Mattress": "المرتبة", "Legs": "الأرجل", "Sides": "الجوانب", "Headboard Upholstery": "تنجيد لوح الرأس",
+    "Table Head": "سطح الطاولة", "Chair Base": "قاعدة الكرسي", "Chair Back": "ظهر الكرسي",
+    "Sofa Base": "قاعدة الكنبة", "Sofa Legs": "أرجل الكنبة", "Sofa Back": "ظهر الكنبة", "Sofa Back Upholstery": "تنجيد ظهر الكنبة",
+}
+PART_EN = {ar: en for en, ar in PART_AR.items()}
+
+
+def part_name(name: str, lang: Lang) -> str:
+    return (PART_AR if lang == "ar" else PART_EN).get(name.strip(), name)
 
 
 def shaped(text: str) -> str:
@@ -280,7 +295,7 @@ def build(task: dict[str, Any], picture: bytes | None, lang: Lang = "ar", now: d
         y -= 14
         p.text(ix, y, fit(" · ".join(sub), "Sans", 8.5, iw), 8.5, color=MUTED)
     y -= 22
-    size = f"{_cm(dims.get('width'))} × {_cm(dims.get('height'))} × {_cm(dims.get('depth'))} cm"
+    size = f"{_cm(dims.get('width'))} × {_cm(dims.get('height'))} × {_cm(dims.get('depth'))} {L['cm']}"
     mode = f" · {L[design['resize_mode']]}" if design.get("resize_mode") in ("proportional", "independent") else ""
     p.text(ix, y, L["size"], 7.5, color=MUTED)
     p.text(ix, y - 13, fit(size + mode, "Sans-Bold", 10, iw * 0.58), 10, bold=True)
@@ -344,8 +359,8 @@ def build(task: dict[str, Any], picture: bytes | None, lang: Lang = "ar", now: d
     for i, part in enumerate(shown):
         edit = edits.get(part.get("id")) or {}
         size = size_of.get(part.get("name") or "")
-        values = [part.get("name") or part.get("id") or "", material_text(edit or None, lang),
-                  f"{_cm(size['width'])} × {_cm(size['height'])} × {_cm(size['depth'])} cm" + (f" (×{size['count']})" if size["count"] > 1 else "") if size else "—"]
+        values = [part_name(part.get("name") or part.get("id") or "", lang), material_text(edit or None, lang),
+                  f"{_cm(size['width'])} × {_cm(size['height'])} × {_cm(size['depth'])} {L['cm']}" + (f" (×{size['count']})" if size["count"] > 1 else "") if size else "—"]
         color = None if (edit.get("material") or {}).get("kind") == "wood" else edit.get("color")
         cx = tx
         for col, ((_, share), value) in enumerate(zip(cols, values)):
