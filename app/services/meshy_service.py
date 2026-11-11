@@ -14,15 +14,26 @@ from app.schemas.vendor import GenerationOptions
 logger = logging.getLogger(__name__)
 
 IMAGE_TO_3D_PATH = "/image-to-3d"
+# Image to Image (https://docs.meshy.ai/en/api/image-to-image): the photo and a text prompt in one request; its result
+# goes to Image to 3D as `input_task_id` (Image to 3D itself takes no prompt, only a texture one).
+IMAGE_TO_IMAGE_PATH = "/image-to-image"
+IMAGE_TO_IMAGE_MODEL = "nano-banana"
 SPLIT_PATH = "/print/split"  # Auto Split (https://docs.meshy.ai/en/api/auto-split)
 
 
+def _redact(image: str) -> str:
+    return f"<data URI, {len(image)} chars>" if image.startswith("data:") else image.split("?", 1)[0]
+
+
 def _loggable(payload: dict[str, Any]) -> dict[str, Any]:
-    """The payload as logged: the photo replaced by its kind and size (never its data or a signed URL's query)."""
+    """The payload as logged: photos replaced by their kind and size (never their data or a signed URL's query); the
+    API key is a header, never in the payload."""
     out = dict(payload)
-    image = out.get("image_url")
-    if isinstance(image, str):
-        out["image_url"] = f"<data URI, {len(image)} chars>" if image.startswith("data:") else image.split("?", 1)[0]
+    for key in ("image_url", "texture_image_url"):
+        if isinstance(out.get(key), str):
+            out[key] = _redact(out[key])
+    if isinstance(out.get("reference_image_urls"), list):
+        out["reference_image_urls"] = [_redact(u) if isinstance(u, str) else u for u in out["reference_image_urls"]]
     return out
 
 
@@ -120,15 +131,13 @@ class MeshyService:
         image_url: str | None = None,
         texture_prompt: str | None = None,
         target_polycount: int | None = None,
+        input_task_id: str | None = None,
     ) -> str:
-        source = (image_url or "").strip()
-        if not source:
-            if not image:
-                raise MeshyError(400, "Provide a photo to convert.")
-            encoded = await anyio.to_thread.run_sync(base64.b64encode, image)
-            source = f"data:{mime_type};base64,{encoded.decode('ascii')}"
+        """`input_task_id`: a finished Image to Image task (the photo conditioned on the furniture type) in place of the
+        photo itself."""
+        source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
         payload: dict[str, Any] = {
-            "image_url": source,
+            **source,
             "ai_model": "latest",
             "target_formats": ["glb"],
             "should_texture": options.should_texture,
@@ -145,6 +154,33 @@ class MeshyService:
                 payload["texture_prompt"] = texture_prompt
 
         return await self._create(IMAGE_TO_3D_PATH, payload)
+
+    async def _image_source(self, image: bytes | None, mime_type: str, image_url: str | None) -> str:
+        source = (image_url or "").strip()
+        if source:
+            return source
+        if not image:
+            raise MeshyError(400, "Provide a photo to convert.")
+        encoded = await anyio.to_thread.run_sync(base64.b64encode, image)
+        return f"data:{mime_type};base64,{encoded.decode('ascii')}"
+
+    async def create_image_to_image_task(self, prompt: str, image: bytes | None = None, mime_type: str = "image/png", image_url: str | None = None) -> str:
+        """The photo and the prompt in one Image to Image request; one image out (no multi-view), as Image to 3D's
+        `input_task_id` requires."""
+        payload = {
+            "ai_model": IMAGE_TO_IMAGE_MODEL,
+            "prompt": prompt,
+            "reference_image_urls": [await self._image_source(image, mime_type, image_url)],
+            "remove_background": True,
+        }
+        return await self._create(IMAGE_TO_IMAGE_PATH, payload)
+
+    async def get_image_to_image_task(self, task_id: str) -> dict[str, Any]:
+        response = await self._request("GET", f"{IMAGE_TO_IMAGE_PATH}/{task_id}")
+        task = response.json()
+        if not isinstance(task, dict) or "status" not in task:
+            raise MeshyError(502, "Meshy returned an unexpected task object.")
+        return task
 
     async def _create(self, path: str, payload: dict[str, Any]) -> str:
         logger.info("Meshy POST %s fields=%s payload=%s", path, sorted(payload), _loggable(payload))
