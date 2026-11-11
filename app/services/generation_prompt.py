@@ -166,23 +166,48 @@ def split_prompt(category: str | None, kind: str | None = None) -> str | None:
     return _PARTS.get(furniture_family(category, kind))
 
 
+# What the product is called in Meshy's prompts when no furniture type was typed (by catalogue category).
+TYPE_NAMES = {
+    "furniture": "piece of furniture", "table": "table", "wardrobe": "wardrobe", "door": "door", "wall_art": "framed wall art",
+    "tv": "TV unit", "lighting": "lamp", "ceiling_light": "ceiling light", "air_conditioner": "air conditioner",
+}
+
+
+def furniture_type(category: str | None, kind: str | None = None, details=None) -> str:
+    """The furniture type for Meshy's prompts: what the vendor typed ("child wardrobe"), else what the photo reading
+    says it is, else the category's name."""
+    typed = " ".join((kind or "").split())[:60]
+    if typed:
+        return typed
+    read = _read_type(details)
+    return read or TYPE_NAMES.get((category or "").strip(), "piece of furniture")
+
+
+def meshy_prompt(category: str | None, kind: str | None = None, details=None) -> str:
+    """Meshy Image to Image `prompt`, sent with the vendor's photo in that one request. Meshy's Image to 3D has no
+    prompt field (docs.meshy.ai/en/api/image-to-3d: only `texture_prompt`, which guides the texture), so the type
+    shapes the model through the image: this edit's result is the image Image to 3D builds the geometry from."""
+    what = furniture_type(category, kind, details)
+    return (
+        f"Convert this {what} into a high-quality, realistic, modular 3D model. "
+        "Preserve the reference image's geometry, colors, textures, and proportions. "
+        # What is modelled is decided here (the image Image to 3D builds from), not in the texture prompt.
+        f"{focus_rule(f'the {what}', category)} Show it whole and centred, from the same viewpoint as the photo, on a plain white background."
+    )
+
+
 def meshy_texture_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
-    """Meshy image-to-3D `texture_prompt`: guides texturing; the geometry comes from the photo."""
-    what = _what(category, title, details, kind)
-    hint = f"{modular_hint(category, kind, details)} {size_rule(category, kind or _read_type(details))}".strip()
-    body = f"{colour_rule(what, category)} {details_text(details)}".strip()
-    # The part list and size rule stay even when the colour notes are long: Meshy caps this field at 800 characters.
-    if hint:
-        room = MESHY_TEXTURE_PROMPT_MAX - len(hint) - 1
-        if len(body) > room:
-            cut = body[:room]
-            body = (cut[: cut.rfind(".") + 1] or cut).strip()
-        text = f"{body} {hint}".strip()
-    else:
-        text = body
-    if len(text) <= MESHY_TEXTURE_PROMPT_MAX:
-        return text
-    cut = text[:MESHY_TEXTURE_PROMPT_MAX]
+    """Meshy Image to 3D `texture_prompt`: it guides the texture only (docs: "Text that guides the texture, up to 800
+    characters"), so it holds only what texturing can use: the type, the photo's colours and materials. Parts and
+    file size are not texture: they go to fields that act on them (Auto Split's part list, `target_polycount`)."""
+    what = _what(category, title, details, kind)  # the product as named: type, title, what the photo reading saw
+    body = (
+        f"This is {what}. Texture it with the reference image's exact colours, patterns, textures and materials: do not "
+        f"recolour, stylise, brighten or add colours that are not in the photo. {details_text(details)}"
+    ).strip()
+    if len(body) <= MESHY_TEXTURE_PROMPT_MAX:
+        return body
+    cut = body[:MESHY_TEXTURE_PROMPT_MAX]
     return cut[: cut.rfind(".") + 1] or cut  # whole sentences only
 
 

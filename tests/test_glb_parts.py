@@ -21,11 +21,14 @@ def test_separate_meshes_are_listed_and_a_single_mesh_is_not_split():
     assert one_info["limits"]
 
 
-def test_sofa_prompt_asks_for_parts_and_stays_within_meshy_limit():
+def test_sofa_parts_go_to_auto_split_not_to_the_texture_prompt():
+    """texture_prompt only guides the texture (docs.meshy.ai): the parts are Auto Split's prompt, which cuts them."""
+    from app.services.generation_prompt import split_prompt
+
     details = ProductDetails.model_validate(SOFA)
     prompt = meshy_texture_prompt("furniture", "Oslo sofa", details, "corner sofa")
-    assert "Separate named meshes" in prompt
-    assert "seat cushions" in prompt
+    assert "Separate named meshes" not in prompt and "corner sofa" in prompt
+    assert "seat cushions" in split_prompt("furniture", "corner sofa")
     assert len(prompt) <= MESHY_TEXTURE_PROMPT_MAX
 
 

@@ -25,7 +25,7 @@ from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
-from app.services.generation_prompt import astra_prompt, furniture_family, object_description, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, meshy_prompt, object_description, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
@@ -455,21 +455,25 @@ async def generate_model(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
     details = preread or (await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None)
+    # Meshy's Image to 3D takes no prompt (only `texture_prompt`, for the texture). The furniture type shapes the model
+    # through its image instead: Image to Image gets the photo and the prompt in one request, and its result is what
+    # Image to 3D builds from (`input_task_id`, polled in get_task). The task id the client polls is this first one.
+    kind_type = furniture_type(category, kind or None, details)
     try:
-        task_id = await meshy.create_image_to_3d_task(
-            # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
-            # file within its limit).
-            GenerationOptions(should_texture=textured, enable_pbr=textured),
-            image=None if public_url else raw,
-            mime_type=mime,
-            image_url=public_url,
-            texture_prompt=meshy_texture_prompt(category, title, details, kind or None),
-            target_polycount=target_polycount(category, kind or None),
-        )
+        task_id = await meshy.create_image_to_image_task(meshy_prompt(category, kind or None, details), image=None if public_url else raw, mime_type=mime, image_url=public_url)
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
+    logger.info("Meshy generation %s: furniture_type=%r category=%r", task_id, kind_type, category)
     request.app.state.pending_cdn[task_id] = {
+        "stage": "image",  # Image to Image; then "mesh" (Image to 3D, its id in mesh_task_id)
+        "mesh": {
+            "textured": textured,
+            "texture_prompt": meshy_texture_prompt(category, title, details, kind or None),
+            "target_polycount": target_polycount(category, kind or None),
+        },
+        "mime": mime,
+        "image_url": public_url,
         "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
         "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
         "category": category,
@@ -481,6 +485,46 @@ async def generate_model(
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
+IMAGE_STAGE = 20  # % of the progress bar the Image to Image step takes
+
+
+async def conditioned_image(request: Request, meshy: MeshyService, task_id: str, pending: dict) -> TaskStatusResponse | None:
+    """The Image to Image step: its progress while it runs; once done, Image to 3D started from its image (None: poll
+    the 3D task). If it failed, Image to 3D starts from the photo itself and the model's notes say so."""
+    try:
+        image = await meshy.get_image_to_image_task(task_id)
+    except MeshyError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    state = str(image.get("status") or "IN_PROGRESS")
+    if state in {"PENDING", "IN_PROGRESS"}:
+        return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=int(image.get("progress") or 0) * IMAGE_STAGE // 100, retry_after_seconds=4)
+    conditioned = state == "SUCCEEDED" and len(image.get("image_urls") or []) == 1  # Image to 3D needs exactly one image
+    if not conditioned:
+        err = image.get("task_error") or {}
+        reason = err.get("message") if isinstance(err, dict) else str(err)
+        logger.warning("Meshy Image to Image %s ended %s (%s): Image to 3D starts from the photo itself", task_id, state, reason)
+        pending["conditioning"] = "The furniture type could not shape this model (Meshy's image step failed); it was made from the photo alone."
+    mesh = pending["mesh"]
+    try:
+        pending["mesh_task_id"] = await meshy.create_image_to_3d_task(
+            # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
+            # file within its limit).
+            GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
+            image=None if conditioned or pending.get("image_url") else pending.get("photo"),
+            mime_type=pending.get("mime") or "image/png",
+            image_url=None if conditioned else pending.get("image_url"),
+            texture_prompt=mesh["texture_prompt"],
+            target_polycount=mesh["target_polycount"],
+            input_task_id=task_id if conditioned else None,
+        )
+    except MeshyError as exc:
+        if request.app.state.pending_cdn.pop(task_id, None) is not None:  # nothing more will come of it: the try is given back
+            await bus.publish(GenerationFailed(pending.get("user_id") or "", "meshy"), request.app.state)
+        return TaskStatusResponse(task_id=task_id, status="FAILED", progress=IMAGE_STAGE, error=exc.message)
+    pending["stage"] = "mesh"
+    return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5)
+
+
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
 async def get_task(
     task_id: str,
@@ -489,8 +533,16 @@ async def get_task(
     cdn: Annotated[Cdn, Depends(get_cdn)],
     user_id: Annotated[str, Depends(current_user)],
 ) -> TaskStatusResponse:
+    pending = request.app.state.pending_cdn.get(task_id) or {}
+    if pending.get("user_id") and pending["user_id"] != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
+    if pending.get("stage") == "image":
+        waiting = await conditioned_image(request, meshy, task_id, pending)
+        if waiting:
+            return waiting
+    mesh_id = pending.get("mesh_task_id") or task_id  # without a pending entry: an Image to 3D id from before the chain
     try:
-        task, retry_after = await meshy.get_image_to_3d_task(task_id)
+        task, retry_after = await meshy.get_image_to_3d_task(mesh_id)
     except MeshyError as exc:
         raise HTTPException(exc.status_code, exc.message) from exc
 
@@ -506,15 +558,14 @@ async def get_task(
             progress=progress,
             error=str(err),
         )
-    pending = request.app.state.pending_cdn.get(task_id) or {}
-    if pending.get("user_id") and pending["user_id"] != user_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
     splitting = bool(pending.get("split"))
     if status_value != "SUCCEEDED":
+        # The first 20% was the Image to Image step (when there was one); the last 10% is the part split.
+        base = IMAGE_STAGE if pending.get("mesh_task_id") else 0
         return TaskStatusResponse(
             task_id=task_id,
             status=status_value,
-            progress=progress * 9 // 10 if splitting else progress,  # the last 10% is the part split
+            progress=base + progress * ((90 if splitting else 100) - base) // 100,
             retry_after_seconds=retry_after or 5,
         )
 
@@ -524,7 +575,7 @@ async def get_task(
     if splitting:
         try:
             if not pending.get("split_task_id"):
-                pending["split_task_id"] = await meshy.create_split_task(task_id, pending["split"], bool(pending.get("textured")))
+                pending["split_task_id"] = await meshy.create_split_task(mesh_id, pending["split"], bool(pending.get("textured")))
             split = await meshy.get_split_task(pending["split_task_id"])
         except MeshyError as exc:
             logger.warning("Meshy Auto Split for %s failed: %s", task_id, exc.message)
@@ -556,6 +607,8 @@ async def get_task(
         if components is None:
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        if pending.get("conditioning"):  # said, not hidden: the type did not shape this model's image
+            components = {**components, "limits": " ".join(x for x in (components.get("limits"), pending["conditioning"]) if x)}
         data, source_glb, components = await sized(data, source_glb, components)
         components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), pending.get("photo"), (pending.get("details") or {}).get("bbox"))
         url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
