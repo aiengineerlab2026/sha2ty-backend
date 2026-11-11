@@ -167,7 +167,7 @@ def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title:
     """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
     other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
     if furniture_family(category, kind or None) == "wardrobe":
-        other += "|procedural-1"  # wardrobes are built from their layout now: the old fused meshes are not reused
+        other += "|procedural-2"  # 2: colours, decoration and the appearance check (1 made white wardrobes)
     return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
 
