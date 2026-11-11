@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -44,6 +45,7 @@ class Section(BaseModel):
         description="Decoration on this section's door or drawer fronts: arch = a raised arched outline (moulding), arch_inlay = a filled arch of another colour, frame = a raised rectangular outline",
     )
     decor_color: str | None = Field(default=None, pattern=HEX, description="The decoration's colour")
+    rail: bool | None = Field(default=None, description="A hanging rail inside (null: inferred: a tall door section without shelves is hanging space)")
 
 
 class Column(BaseModel):
@@ -80,6 +82,63 @@ open shelves, shelf_color for the shelves, handle_color for the handles; handle_
 chrome. Decorations on fronts go on their section: "arch" for a raised arched outline, "arch_inlay" for a filled arch
 of another colour, "frame" for a raised rectangular outline, with decor_color. handle: "knob" for round knobs, "bar"
 for bar pulls, "none" for push-to-open or cut-outs. Size in metres{size}."""
+
+
+# ---- the open state: what the photo of the wardrobe open shows inside ----
+
+class OpenSection(BaseModel):
+    shelves: int = Field(ge=0, le=8, description="Shelves inside this section, as the open photo shows them")
+    rail: bool = Field(description="A hanging rail inside this section")
+
+
+class OpenColumn(BaseModel):
+    sections: list[OpenSection] = Field(min_length=1, max_length=8, description="Bottom to top, as in the closed layout")
+
+
+class OpenReading(BaseModel):
+    same_wardrobe: bool = Field(description="False when the two photos show different wardrobes (other size, colours, layout or fronts)")
+    differences: str = Field(default="", description="When not the same: what differs")
+    columns: list[OpenColumn] = Field(min_length=1, max_length=6, description="Left to right, the same columns as the closed layout")
+    interior_color: str | None = Field(default=None, pattern=HEX, description="The inside back, as #rrggbb")
+    shelf_color: str | None = Field(default=None, pattern=HEX, description="The shelves, as #rrggbb")
+
+
+OPEN_PROMPT = """The first photo shows {what} closed; its layout, read from that photo, is this JSON (columns left to right,
+sections bottom to top):
+{layout}
+The second photo shows it open. First say whether both photos show the same wardrobe (same size, colours, layout,
+fronts); if not, what differs. Then, for every column and section of the layout above, in the same order, count the
+shelves inside and say whether there is a hanging rail, as the open photo shows them. Give the inside back's colour and
+the shelves' colour as #rrggbb, sampled from the open photo."""
+
+
+async def read_open(ask, spec: WardrobeSpec, what: str) -> OpenReading | None:
+    """`ask(prompt, schema)` sends the prompt with the closed photo, then the open one."""
+    layout = json.dumps({"columns": [{"sections": [{"kind": x.kind, "leaves": x.leaves} for x in c.sections]} for c in spec.columns]})
+    text = await ask(OPEN_PROMPT.format(what=what, layout=layout), OpenReading.model_json_schema())
+    try:
+        return OpenReading.model_validate(json.loads(text)) if text else None
+    except (ValueError, ValidationError) as exc:
+        logger.warning("Open wardrobe reading unreadable: %s", str(exc)[:300])
+        return None
+
+
+def with_inside(spec: WardrobeSpec, reading: OpenReading) -> tuple[WardrobeSpec, list[str]]:
+    """The closed layout with the inside the open photo shows (shelves, rails, colours). The inside is the same in
+    both states: closed doors hide it, they do not remove it. A reading of another shape keeps the closed one."""
+    s = spec.model_copy(deep=True)
+    notes = []
+    shape = [len(c.sections) for c in s.columns]
+    if [len(c.sections) for c in reading.columns] != shape:
+        notes.append("The open photo's layout does not match the closed one; the inside is inferred from the closed photo.")
+    else:
+        for col, seen in zip(s.columns, reading.columns):
+            for sec, inside in zip(col.sections, seen.sections):
+                if sec.kind != "drawer":
+                    sec.shelves, sec.rail = inside.shelves, inside.rail
+    s.interior_color = reading.interior_color or s.interior_color
+    s.shelf_color = reading.shelf_color or s.shelf_color
+    return s, notes
 
 
 def _child(kind: str | None) -> bool:
@@ -127,8 +186,8 @@ async def read_spec(ask, what: str, kind: str | None, details=None) -> WardrobeS
 # Display names: whole ids first, then numbered ones by their base ("drawer_2" → "درج 2").
 AR = {"wardrobe_body": "هيكل الدولاب", "back_panel": "اللوح الخلفي", "plinth": "القاعدة", "door": "الباب", "door_left": "الباب الأيسر", "door_right": "الباب الأيمن"}
 EN = {"wardrobe_body": "Wardrobe body", "back_panel": "Back panel", "plinth": "Plinth", "door": "Door", "door_left": "Left door", "door_right": "Right door"}
-AR_N = {"door": "باب", "drawer": "درج", "handle": "مقبض", "shelf": "رف", "leg": "رجل", "decor": "زخرفة"}
-EN_N = {"door": "Door", "drawer": "Drawer", "handle": "Handle", "shelf": "Shelf", "leg": "Leg", "decor": "Decoration"}
+AR_N = {"door": "باب", "drawer": "درج", "handle": "مقبض", "shelf": "رف", "leg": "رجل", "decor": "زخرفة", "rail": "قضيب تعليق"}
+EN_N = {"door": "Door", "drawer": "Drawer", "handle": "Handle", "shelf": "Shelf", "leg": "Leg", "decor": "Decoration", "rail": "Hanging rail"}
 
 
 def part_name(part_id: str, lang: str = "ar") -> str:
@@ -186,8 +245,16 @@ def _strip(points: list[tuple[float, float]], width: float, z0: float, z1: float
     return pieces
 
 
-def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
-    """The GLB (one node, mesh and material per part) and its parts as [{id, name}] in file order."""
+DOOR_OPEN = math.radians(95)  # how far an open door turns on its hinges
+DRAWER_PULL = 0.6  # share of a drawer's depth an open drawer comes out
+
+
+def build(spec: WardrobeSpec, lang: str = "ar", state: Literal["closed", "open"] = "closed") -> tuple[bytes, list[dict]]:
+    """The GLB (one node, mesh and material per part) and its parts as [{id, name}] in file order.
+
+    `state="open"`: the same panels, part names and origin, with each door turned on its hinge line (its outer front
+    edge) and each drawer pulled out, its handle and decoration moving with it. Never a closed model with its doors
+    hidden: every part is there in both states, so a part's id means the same panel in either."""
     import numpy as np
     import trimesh
     from trimesh.visual.material import PBRMaterial
@@ -229,6 +296,8 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
     x = -W / 2 + t
     fronts: list[tuple[str, float, float, float, float, str, Section]] = []  # kind, x0, x1, y0, y1, handle side, section
     shelves: list[tuple[float, float, float]] = []  # x0, x1, y
+    rails: list[tuple[float, float, float]] = []  # x0, x1, y
+    moves: dict[str, Any] = {}  # part → its open-state transform (doors, drawers and what they carry)
     for ci, col in enumerate(spec.columns):
         cw = usable * col.width
         x0, x1 = x, x + cw
@@ -252,6 +321,9 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
                 fronts.append(("drawer", x0, x1, s0, s1, "center", sec))
             for k in range(sec.shelves if sec.kind != "drawer" else 0):
                 shelves.append((x0, x1, s0 + sh * (k + 1) / (sec.shelves + 1)))
+            hanging = sec.rail if sec.rail is not None else (sec.kind == "door" and sec.shelves == 0 and sh > 0.7)
+            if sec.kind != "drawer" and hanging:
+                rails.append((x0, x1, s1 - 0.07))
             y = s1 + t
         x = x1 + t
 
@@ -268,6 +340,12 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
         cx, cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
         name = next(door_names) if kind == "door" else drawer_names[id(f)]
         box(name, fw, fh, t, cx, cy, z_front, sec.front_color or front)
+        if kind == "door":  # hinged on the edge away from its handle, at the front face
+            hinge_x, turn = (fx0 + GAP, -DOOR_OPEN) if side == "right" else (fx1 - GAP, DOOR_OPEN)
+            move = trimesh.transformations.rotation_matrix(turn, (0, 1, 0), point=(hinge_x, 0, D / 2))
+        else:
+            move = trimesh.transformations.translation_matrix((0, 0, DRAWER_PULL * (inner_d - 0.03)))
+        moves[name] = move
         if sec.decor != "none":  # on the front's face, its own part so it can be recoloured alone
             dn += 1
             m = max(0.025, 0.12 * min(fw, fh))
@@ -283,6 +361,7 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
                 pieces = [_slab(_arch(cx, yb, ys, r), z0, z0 + 0.002)]
             parts[f"decor_{dn}"] = pieces
             colors[f"decor_{dn}"] = (color, 0.5, 0.0)
+            moves[f"decor_{dn}"] = move
         if kind == "drawer":  # the drawer box behind its front: sides, back and bottom
             dd, dh, dw = inner_d - 0.03, fh * 0.7, fw - 0.03
             bz = z_front - t / 2 - dd / 2
@@ -293,6 +372,7 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
         if spec.handle == "none":
             continue
         hn += 1
+        moves[f"handle_{hn}"] = move
         hx = cx if side == "center" else (fx1 - GAP - 0.05 if side == "right" else fx0 + GAP + 0.05)
         hy = cy if kind == "drawer" else min(fy0 + 1.0, cy)  # doors: at hand height, never above the middle
         hz = D / 2 + 0.0125
@@ -306,10 +386,16 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
             box(f"handle_{hn}", 0.012 if vertical else 0.12, 0.12 if vertical else 0.012, 0.025, hx, hy, hz, handle, handle_rough, handle_metal)
     for i, (sx0, sx1, sy) in enumerate(sorted(shelves, key=lambda s: (s[0], s[2])), 1):
         box(f"shelf_{i}", sx1 - sx0 - 0.002, t, inner_d - 0.01, (sx0 + sx1) / 2, sy, (D - inner_d) / 2 - t, shelf_color)
+    for i, (rx0, rx1, ry) in enumerate(sorted(rails), 1):  # a round rod from side to side, mid-depth
+        rod = trimesh.creation.cylinder(radius=0.0125, height=rx1 - rx0 - 0.002, sections=24)
+        rod.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, (0, 1, 0)))
+        rod.apply_translation(((rx0 + rx1) / 2, ry, (D - inner_d) / 2 - t))
+        parts[f"rail_{i}"] = [rod]
+        colors[f"rail_{i}"] = (handle, handle_rough, handle_metal)
 
     scene = trimesh.Scene()
     out = []
-    groups = ("wardrobe_body", "back_panel", "plinth", "leg", "door", "drawer", "decor", "shelf", "handle")
+    groups = ("wardrobe_body", "back_panel", "plinth", "leg", "door", "drawer", "decor", "shelf", "rail", "handle")
 
     def order(name: str) -> tuple[int, int]:
         base, _, n = name.rpartition("_")
@@ -318,6 +404,8 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
 
     for name in sorted(parts, key=order):
         mesh = trimesh.util.concatenate(parts[name])
+        if state == "open" and name in moves:
+            mesh.apply_transform(moves[name])
         mesh.merge_vertices()
         color, rough, metal = colors[name]
         # Its own material per part: recolouring one part never reaches another.
