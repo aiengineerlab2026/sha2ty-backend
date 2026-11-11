@@ -14,8 +14,10 @@ from app.schemas.vendor import GenerationOptions
 logger = logging.getLogger(__name__)
 
 IMAGE_TO_3D_PATH = "/image-to-3d"
-# Image to Image (https://docs.meshy.ai/en/api/image-to-image): the photo and a text prompt in one request; its result
-# goes to Image to 3D as `input_task_id` (Image to 3D itself takes no prompt, only a texture one).
+# Meshy's photo-to-3D model (docs: `latest` is meshy-7.1). Named explicitly so a photo is never sent to an image editor.
+IMAGE_TO_3D_MODEL = "meshy-7.1"
+# Kept only so a conversion already in the old Image to Image step can finish. New conversions do not use it:
+# that API redraws a picture (nano-banana / GPT Image) and does not build a 3D model.
 IMAGE_TO_IMAGE_PATH = "/image-to-image"
 IMAGE_TO_IMAGE_MODEL = "nano-banana"
 SPLIT_PATH = "/print/split"  # Auto Split (https://docs.meshy.ai/en/api/auto-split)
@@ -133,12 +135,13 @@ class MeshyService:
         target_polycount: int | None = None,
         input_task_id: str | None = None,
     ) -> str:
-        """`input_task_id`: a finished Image to Image task (the photo conditioned on the furniture type) in place of the
-        photo itself."""
+        """`input_task_id`: only for a conversion that already finished the old image step. New conversions pass the photo."""
         source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
         payload: dict[str, Any] = {
             **source,
-            "ai_model": "latest",
+            "ai_model": IMAGE_TO_3D_MODEL,
+            # false keeps the photo as given. true restyles it before meshing, which is a different model than the one selected.
+            "image_enhancement": False,
             "target_formats": ["glb"],
             "should_texture": options.should_texture,
         }
