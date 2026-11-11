@@ -25,7 +25,7 @@ from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
-from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, meshy_prompt, object_description, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
@@ -455,23 +455,31 @@ async def generate_model(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
     details = preread or (await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None)
-    # Meshy's Image to 3D takes no prompt (only `texture_prompt`, for the texture). The furniture type shapes the model
-    # through its image instead: Image to Image gets the photo and the prompt in one request, and its result is what
-    # Image to 3D builds from (`input_task_id`, polled in get_task). The task id the client polls is this first one.
+    # Image to 3D is the selected Meshy model. Image to Image only redraws a 2D picture (nano-banana / GPT Image)
+    # and is not a 3D conversion. The uploaded bytes go in the request: a public URL Meshy cannot fetch never starts a task.
     kind_type = furniture_type(category, kind or None, details)
+    mesh = {
+        "textured": textured,
+        "texture_prompt": meshy_texture_prompt(category, title, details, kind or None),
+        "target_polycount": target_polycount(category, kind or None),
+    }
     try:
-        task_id = await meshy.create_image_to_image_task(meshy_prompt(category, kind or None, details), image=None if public_url else raw, mime_type=mime, image_url=public_url)
+        task_id = await meshy.create_image_to_3d_task(
+            GenerationOptions(should_texture=textured, enable_pbr=textured),
+            image=raw or None,
+            mime_type=mime,
+            image_url=None if raw else public_url,
+            texture_prompt=mesh["texture_prompt"] if textured else None,
+            target_polycount=mesh["target_polycount"],
+        )
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    logger.info("Meshy generation %s: furniture_type=%r category=%r", task_id, kind_type, category)
+    logger.info("Meshy image-to-3d %s: furniture_type=%r category=%r", task_id, kind_type, category)
     request.app.state.pending_cdn[task_id] = {
-        "stage": "image",  # Image to Image; then "mesh" (Image to 3D, its id in mesh_task_id)
-        "mesh": {
-            "textured": textured,
-            "texture_prompt": meshy_texture_prompt(category, title, details, kind or None),
-            "target_polycount": target_polycount(category, kind or None),
-        },
+        "stage": "mesh",
+        "mesh_task_id": task_id,
+        "mesh": mesh,
         "mime": mime,
         "image_url": public_url,
         "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
@@ -522,6 +530,7 @@ async def conditioned_image(request: Request, meshy: MeshyService, task_id: str,
             await bus.publish(GenerationFailed(pending.get("user_id") or "", "meshy"), request.app.state)
         return TaskStatusResponse(task_id=task_id, status="FAILED", progress=IMAGE_STAGE, error=exc.message)
     pending["stage"] = "mesh"
+    pending["image_step"] = True  # this task spent the first part of the bar on Image to Image
     return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5)
 
 
@@ -560,8 +569,8 @@ async def get_task(
         )
     splitting = bool(pending.get("split"))
     if status_value != "SUCCEEDED":
-        # The first 20% was the Image to Image step (when there was one); the last 10% is the part split.
-        base = IMAGE_STAGE if pending.get("mesh_task_id") else 0
+        # A task that started on the old image step already used the first 20%. A direct Image to 3D task has not.
+        base = IMAGE_STAGE if pending.get("image_step") else 0
         return TaskStatusResponse(
             task_id=task_id,
             status=status_value,

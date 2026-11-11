@@ -92,8 +92,8 @@ def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
         return product_details.clean(ProductDetails.model_validate(SOFA))
 
     class FakeMeshy:
-        async def create_image_to_image_task(self, prompt, **_kwargs):
-            calls["prompt"] = prompt  # the photo and the furniture type in one Meshy request
+        async def create_image_to_3d_task(self, _options, **kwargs):
+            calls["prompt"] = kwargs["texture_prompt"]  # the reading goes to Meshy's image-to-3D task
             return "task-1"
 
     async def one_try(*_args):
@@ -342,16 +342,10 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
         return product_details.clean(ProductDetails.model_validate(SOFA))
 
     class FakeMeshy:
-        async def create_image_to_image_task(self, _prompt, **_kwargs):
-            calls["meshy"] += 1
-            return f"task-{calls['meshy']}"
-
-        async def get_image_to_image_task(self, task_id):
-            return {"status": "SUCCEEDED", "progress": 100, "image_urls": ["https://meshy.test/i.png"]}
-
         async def create_image_to_3d_task(self, _options, **kwargs):
-            assert kwargs["input_task_id"].startswith("task-")  # built from the conditioned image
-            return "mesh-1"
+            calls["meshy"] += 1
+            assert kwargs["image"]  # the photo itself, not an image-editor task
+            return f"task-{calls['meshy']}"
 
         async def get_image_to_3d_task(self, task_id):
             return {"status": "SUCCEEDED", "progress": 100, "model_urls": {"glb": "https://meshy.test/m.glb"}}, None
@@ -366,8 +360,12 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
     async def one_try(*_args):
         return 4
 
+    async def admin_chose_meshy(*_args, **_kwargs):
+        return "meshy"
+
     monkeypatch.setattr(vendor, "extract_product_details", fake_details)
     monkeypatch.setattr(vendor, "take_try", one_try)
+    monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
     s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
@@ -377,13 +375,12 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
         with TestClient(app) as client:
             client.app.state.auth_http = db
             first = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data=form).json()
-            started = client.get(f"/api/vendor/tasks/{first['task_id']}").json()  # image done: Image to 3D starts
-            done = client.get(f"/api/vendor/tasks/{first['task_id']}").json()
+            done = client.get(f"/api/vendor/tasks/{first['task_id']}").json()  # the Image to 3D task, polled directly
             again = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data=form).json()
             other = client.post("/api/vendor/generate", files={"image": ("sofa.png", png, "image/png")}, data={**form, "category": "table"}).json()
     finally:
         app.dependency_overrides.clear()
-    assert first["status"] == "PENDING" and started["status"] == "IN_PROGRESS" and done["status"] == "SUCCEEDED"
+    assert first["status"] == "PENDING" and first["provider"] == "meshy" and done["status"] == "SUCCEEDED"
     assert again["status"] == "SUCCEEDED" and again["glb_url"] == done["glb_url"]  # served from the cache…
     assert again["details"]["object_type"] == "three-seat sofa"
     assert calls == {"meshy": 2, "details": 2}  # …no second Meshy job or vision call; another category is new
@@ -482,7 +479,7 @@ def test_photo_only_generation_takes_the_type_from_the_reading(tmp_path, monkeyp
         return product_details.clean(ProductDetails.model_validate({**SOFA, "category": "furniture"}))
 
     class FakeMeshy:
-        async def create_image_to_image_task(self, _prompt, **_kwargs):
+        async def create_image_to_3d_task(self, _options, **_kwargs):
             return "task-1"
 
     async def one_try(*_args):
@@ -514,8 +511,9 @@ def test_typed_furniture_type_goes_into_the_meshy_prompt(tmp_path, monkeypatch):
         return product_details.clean(ProductDetails.model_validate({**SOFA, "category": "furniture"}))
 
     class FakeMeshy:
-        async def create_image_to_image_task(self, prompt, **_kwargs):
-            calls["prompt"] = prompt
+        async def create_image_to_3d_task(self, _options, **kwargs):
+            calls["prompt"] = kwargs["texture_prompt"]
+            calls["image"] = kwargs["image"]
             return "task-2"
 
     async def one_try(*_args):
@@ -535,5 +533,4 @@ def test_typed_furniture_type_goes_into_the_meshy_prompt(tmp_path, monkeypatch):
         app.dependency_overrides.clear()
     assert response.status_code == 200, response.text
     assert calls["read"] == ("auto", "corner sofa")
-    assert calls["prompt"].startswith("Convert this corner sofa into a high-quality, realistic, modular 3D model.") and pending["kind"] == "corner sofa"
-    assert "corner sofa" in pending["mesh"]["texture_prompt"]  # and the texture guidance for Image to 3D
+    assert "corner sofa" in calls["prompt"] and calls["image"] and pending["stage"] == "mesh" and pending["kind"] == "corner sofa"

@@ -17,6 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
+from app.api.proposals import _spec as proposal_spec  # a proposal as the customer and vendor see it
 from app.core.config import Settings, get_settings
 from app.core.events import bus
 from app.domain.events import VendorStatusChanged
@@ -147,6 +148,65 @@ async def list_tasks(request: Request) -> dict[str, object]:
          "customer": users.get(str(t.get("customer_id")), {}).get("name") or users.get(str(t.get("customer_id")), {}).get("email") or ""}
         for t in response.json()
     ]}
+
+
+async def _user(settings, client: httpx.AsyncClient, user_id: str | None) -> dict[str, str]:
+    """One account's name, email and phone (Supabase Auth admin API, service key); empty when unknown."""
+    if not user_id:
+        return {}
+    response = await client.get(f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}", headers=service_headers(settings))
+    if response.status_code >= 400:
+        return {}
+    u = response.json()
+    meta = u.get("user_metadata") or {}
+    return {"id": user_id, "name": (meta.get("full_name") or meta.get("name") or "").strip(), "email": u.get("email") or "", "phone": u.get("phone") or meta.get("phone") or ""}
+
+
+@router.get("/tasks/{task_id}", dependencies=[Depends(require_admin)])
+async def task_detail(task_id: UUID, request: Request) -> dict[str, object]:
+    """One request seen from both sides: what the customer asked for and who they are, and for every vendor who
+    took part their offer, proposed changes to the model and their conversation with the customer."""
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    base = settings.supabase_url.rstrip("/") + "/rest/v1"
+
+    async def rows(path: str, required: bool = False) -> list[dict]:
+        response = await client.get(f"{base}/{path}", headers=service_headers(settings))
+        if response.status_code >= 400:
+            if required:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not load the request. Run supabase/tasks.sql.")
+            return []  # proposals.sql / marketplace.sql not applied yet: that side is simply empty
+        return response.json()
+
+    task = (await rows(f"freelance_tasks?id=eq.{task_id}&select=*", required=True) or [None])[0]
+    if not task:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")
+    bids = await rows(f"task_bids?task_id=eq.{task_id}&select=*&order=created_at.asc", required=True)
+    proposals = await rows(f"task_proposals?task_id=eq.{task_id}&select=*&order=created_at.desc")
+    messages = await rows(f"task_messages?task_id=eq.{task_id}&select=id,vendor_id,sender_id,body,attachment_url,created_at,read_at&order=created_at.asc")
+    ids = list(dict.fromkeys(str(x["vendor_id"]) for x in [*bids, *proposals, *messages]))
+    if task.get("exclusive_vendor_id") and str(task["exclusive_vendor_id"]) not in ids:
+        ids.append(str(task["exclusive_vendor_id"]))  # the only vendor who may bid, even before they did
+    vendors = {str(v["id"]): v for v in (await rows(f"vendors?id=in.({','.join(ids)})&select=*") if ids else [])}
+    customer = await _user(settings, client, task.get("customer_id"))
+    awarded = task.get("awarded_bid_id")
+    threads = []
+    for vid in ids:
+        v = vendors.get(vid, {})
+        account = await _user(settings, client, vid)
+        bid = next((b for b in bids if str(b["vendor_id"]) == vid), None)
+        threads.append({
+            "vendor": {"id": vid, "name": v.get("name") or account.get("name") or "", "logo_url": v.get("logo_url"), "location": v.get("location") or "",
+                       "status": v.get("status"), "email": account.get("email", ""), "phone": account.get("phone", "")},
+            "bid": bid,
+            "hired": bool(bid and awarded and str(bid["id"]) == str(awarded)),
+            "proposals": [{**p, "spec": proposal_spec(task, p)} for p in proposals if str(p["vendor_id"]) == vid],
+            # Who wrote each message: the vendor, or the customer answering them.
+            "messages": [{**m, "from": "vendor" if str(m["sender_id"]) == vid else "customer"} for m in messages if str(m["vendor_id"]) == vid],
+        })
+    # The hired vendor first, then those who offered, then the rest (questions or proposals only).
+    threads.sort(key=lambda th: (not th["hired"], th["bid"] is None))
+    return {"task": task, "customer": customer, "vendors": threads}
 
 
 class StatusBody(BaseModel):
