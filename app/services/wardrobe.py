@@ -30,7 +30,7 @@ BACK = 0.006
 GAP = 0.003  # between a front and its opening
 DRAWER_SIDE = 0.012
 
-Hex = Field(default="#e8e4dc", pattern=r"^#[0-9a-fA-F]{6}$")
+HEX = r"^#[0-9a-fA-F]{6}$"
 
 
 class Section(BaseModel):
@@ -38,6 +38,12 @@ class Section(BaseModel):
     height: float = Field(gt=0, description="Share of the column's height, bottom to top; a column's shares are scaled to add up to 1")
     leaves: Literal[1, 2] = Field(default=1, description="door only: 1 single door or 2 doors side by side")
     shelves: int = Field(default=0, ge=0, le=8, description="Inner shelves in this section (open: those visible; door: those likely behind it, 0 for hanging space)")
+    front_color: str | None = Field(default=None, pattern=HEX, description="This section's door or drawer colour when it differs from the wardrobe's front_color")
+    decor: Literal["none", "arch", "arch_inlay", "frame"] = Field(
+        default="none",
+        description="Decoration on this section's door or drawer fronts: arch = a raised arched outline (moulding), arch_inlay = a filled arch of another colour, frame = a raised rectangular outline",
+    )
+    decor_color: str | None = Field(default=None, pattern=HEX, description="The decoration's colour")
 
 
 class Column(BaseModel):
@@ -52,9 +58,13 @@ class WardrobeSpec(BaseModel):
     base: Literal["plinth", "legs", "none"] = "plinth"
     base_height_m: float = 0.06
     handle: Literal["knob", "bar", "none"] = "knob"
-    body_color: str = Hex
-    front_color: str = Hex
-    handle_color: str = Field(default="#c9c3b8", pattern=r"^#[0-9a-fA-F]{6}$")
+    handle_finish: Literal["metal", "matte"] = Field(default="matte", description="metal: shiny gold, brass, chrome or steel; matte: painted, wood or plastic")
+    # Required: a reading without the photo's colours is no layout (a silent default made white wardrobes).
+    body_color: str = Field(pattern=HEX, description="Carcass, sides and top")
+    front_color: str = Field(pattern=HEX, description="Most doors and drawer fronts")
+    handle_color: str = Field(pattern=HEX)
+    interior_color: str | None = Field(default=None, pattern=HEX, description="The inside back seen through open shelves, when it differs from the body")
+    shelf_color: str | None = Field(default=None, pattern=HEX, description="The shelves, when they differ from the body")
     columns: list[Column] = Field(min_length=1, max_length=6, description="Left to right, as seen from the front")
 
 
@@ -63,9 +73,13 @@ Describe its layout exactly as the photo shows it. Columns are the vertical bays
 front (a column ends where a full-height divider or a change of fronts is). Each column's sections go bottom to top:
 "door" (a hinged door covers it; leaves 2 when two doors meet in the middle), "drawer" (one drawer each), "open"
 (no front: shelves are visible). Count the drawers, doors and visible shelves exactly. Heights and widths are shares
-of the whole. Colours are the photo's own, as #rrggbb: body_color for the carcass and sides, front_color for the
-doors and drawer fronts, handle_color for the handles. handle: "knob" for round knobs, "bar" for bar pulls, "none"
-for push-to-open or cut-outs. Size in metres{size}."""
+of the whole. Colours are sampled from the photo itself as #rrggbb (pastels stay pastel: a sage green is a sage
+green, not white or grey): body_color for the carcass and sides, front_color for most doors and drawer fronts (a
+section whose fronts have another colour gives its own front_color), interior_color for the inside back seen through
+open shelves, shelf_color for the shelves, handle_color for the handles; handle_finish "metal" for gold, brass or
+chrome. Decorations on fronts go on their section: "arch" for a raised arched outline, "arch_inlay" for a filled arch
+of another colour, "frame" for a raised rectangular outline, with decor_color. handle: "knob" for round knobs, "bar"
+for bar pulls, "none" for push-to-open or cut-outs. Size in metres{size}."""
 
 
 def _child(kind: str | None) -> bool:
@@ -113,8 +127,8 @@ async def read_spec(ask, what: str, kind: str | None, details=None) -> WardrobeS
 # Display names: whole ids first, then numbered ones by their base ("drawer_2" → "درج 2").
 AR = {"wardrobe_body": "هيكل الدولاب", "back_panel": "اللوح الخلفي", "plinth": "القاعدة", "door": "الباب", "door_left": "الباب الأيسر", "door_right": "الباب الأيمن"}
 EN = {"wardrobe_body": "Wardrobe body", "back_panel": "Back panel", "plinth": "Plinth", "door": "Door", "door_left": "Left door", "door_right": "Right door"}
-AR_N = {"door": "باب", "drawer": "درج", "handle": "مقبض", "shelf": "رف", "leg": "رجل"}
-EN_N = {"door": "Door", "drawer": "Drawer", "handle": "Handle", "shelf": "Shelf", "leg": "Leg"}
+AR_N = {"door": "باب", "drawer": "درج", "handle": "مقبض", "shelf": "رف", "leg": "رجل", "decor": "زخرفة"}
+EN_N = {"door": "Door", "drawer": "Drawer", "handle": "Handle", "shelf": "Shelf", "leg": "Leg", "decor": "Decoration"}
 
 
 def part_name(part_id: str, lang: str = "ar") -> str:
@@ -128,6 +142,48 @@ def part_name(part_id: str, lang: str = "ar") -> str:
 def _rgba(hex_color: str, alpha: float = 1.0) -> list[float]:
     h = hex_color.lstrip("#")
     return [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)] + [alpha]
+
+
+def _arch(cx: float, yb: float, ys: float, r: float, n: int = 24) -> list[tuple[float, float]]:
+    """An arch's outline, counter-clockwise from the bottom right: up the right side, over the half circle, down."""
+    import math
+
+    top = [(cx + r * math.cos(math.pi * i / n), ys + r * math.sin(math.pi * i / n)) for i in range(n + 1)]
+    return [(cx + r, yb), *top, (cx - r, yb)]
+
+
+def _slab(points: list[tuple[float, float]], z0: float, z1: float):
+    """A convex outline (counter-clockwise, seen from the front) extruded from z0 to z1, as a closed mesh."""
+    import numpy as np
+    import trimesh
+
+    n = len(points)
+    c = np.mean(points, axis=0)
+    v = [(*p, z0) for p in points] + [(*p, z1) for p in points] + [(*c, z0), (*c, z1)]
+    faces = []
+    for i in range(n):
+        j = (i + 1) % n
+        faces += [(2 * n + 1, n + i, n + j), (2 * n, j, i), (i, j, n + j), (i, n + j, n + i)]  # front, back, side
+    return trimesh.Trimesh(vertices=v, faces=faces, process=False)
+
+
+def _strip(points: list[tuple[float, float]], width: float, z0: float, z1: float, closed: bool = False) -> list:
+    """A raised moulding along a path: one thin box per segment (corners overlap, as glued mouldings do)."""
+    import math
+
+    import trimesh
+
+    pieces = []
+    pairs = list(zip(points, points[1:] + points[:1] if closed else points[1:]))
+    for (ax, ay), (bx, by) in pairs:
+        length = math.hypot(bx - ax, by - ay)
+        if length < 1e-6:
+            continue
+        m = trimesh.creation.box(extents=(length + width, width, z1 - z0))
+        m.apply_transform(trimesh.transformations.rotation_matrix(math.atan2(by - ay, bx - ax), (0, 0, 1)))
+        m.apply_translation(((ax + bx) / 2, (ay + by) / 2, (z0 + z1) / 2))
+        pieces.append(m)
+    return pieces
 
 
 def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
@@ -147,6 +203,8 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
         colors.setdefault(name, (color, rough, metal))
 
     body, front, handle = spec.body_color, spec.front_color, spec.handle_color
+    interior, shelf_color = spec.interior_color or body, spec.shelf_color or body
+    handle_rough, handle_metal = (0.3, 0.9) if spec.handle_finish == "metal" else (0.55, 0.0)
     z_front = D / 2 - t / 2  # fronts sit flush inside the carcass
     inner_d = D - t - BACK  # inside depth, behind the fronts
 
@@ -156,7 +214,7 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
     box("wardrobe_body", t, H - side0, D, W / 2 - t / 2, (side0 + H) / 2, 0, body)
     box("wardrobe_body", W - 2 * t, t, D - BACK, 0, H - t / 2, BACK / 2, body)
     box("wardrobe_body", W - 2 * t, t, D - BACK, 0, b + t / 2, BACK / 2, body)
-    box("back_panel", W - 2 * t, H - b - 2 * t, BACK, 0, b + t + (H - b - 2 * t) / 2, -D / 2 + BACK / 2, body)
+    box("back_panel", W - 2 * t, H - b - 2 * t, BACK, 0, b + t + (H - b - 2 * t) / 2, -D / 2 + BACK / 2, interior)
     if spec.base == "plinth":
         box("plinth", W - 2 * t, b, t, 0, b / 2, D / 2 - t * 1.5, body)
     elif spec.base == "legs":
@@ -169,7 +227,7 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
     y0, y1 = b + t, H - t  # inside, floor to ceiling
     usable = W - 2 * t - t * (len(spec.columns) - 1)
     x = -W / 2 + t
-    fronts: list[tuple[str, float, float, float, float, str]] = []  # kind, x0, x1, y0, y1, handle side
+    fronts: list[tuple[str, float, float, float, float, str, Section]] = []  # kind, x0, x1, y0, y1, handle side, section
     shelves: list[tuple[float, float, float]] = []  # x0, x1, y
     for ci, col in enumerate(spec.columns):
         cw = usable * col.width
@@ -187,11 +245,11 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
             if sec.kind == "door":
                 if sec.leaves == 2:
                     mid = (x0 + x1) / 2
-                    fronts += [("door", x0, mid, s0, s1, "right"), ("door", mid, x1, s0, s1, "left")]
+                    fronts += [("door", x0, mid, s0, s1, "right", sec), ("door", mid, x1, s0, s1, "left", sec)]
                 else:
-                    fronts.append(("door", x0, x1, s0, s1, "left" if ci == len(spec.columns) - 1 and len(spec.columns) > 1 else "right"))
+                    fronts.append(("door", x0, x1, s0, s1, "left" if ci == len(spec.columns) - 1 and len(spec.columns) > 1 else "right", sec))
             elif sec.kind == "drawer":
-                fronts.append(("drawer", x0, x1, s0, s1, "center"))
+                fronts.append(("drawer", x0, x1, s0, s1, "center", sec))
             for k in range(sec.shelves if sec.kind != "drawer" else 0):
                 shelves.append((x0, x1, s0 + sh * (k + 1) / (sec.shelves + 1)))
             y = s1 + t
@@ -203,13 +261,28 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
     # Drawers numbered top to bottom, then left to right, as a shop lists them.
     drawer_order = sorted((f for f in fronts if f[0] == "drawer"), key=lambda f: (-f[3], f[1]))
     drawer_names = {id(f): f"drawer_{i}" for i, f in enumerate(drawer_order, 1)}
-    hn = 0
+    hn = dn = 0
     for f in fronts:
-        kind, fx0, fx1, fy0, fy1, side = f
+        kind, fx0, fx1, fy0, fy1, side, sec = f
         fw, fh = fx1 - fx0 - 2 * GAP, fy1 - fy0 - 2 * GAP
         cx, cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
         name = next(door_names) if kind == "door" else drawer_names[id(f)]
-        box(name, fw, fh, t, cx, cy, z_front, front)
+        box(name, fw, fh, t, cx, cy, z_front, sec.front_color or front)
+        if sec.decor != "none":  # on the front's face, its own part so it can be recoloured alone
+            dn += 1
+            m = max(0.025, 0.12 * min(fw, fh))
+            r, yb = fw / 2 - m, fy0 + GAP + m
+            ys = fy1 - GAP - m - r
+            z0, color = D / 2, sec.decor_color or body
+            if sec.decor == "frame" or ys < yb:  # too low for an arch: a rectangular frame
+                x0r, x1r, y0r, y1r = cx - fw / 2 + m, cx + fw / 2 - m, yb, fy1 - GAP - m
+                pieces = _strip([(x1r, y0r), (x1r, y1r), (x0r, y1r), (x0r, y0r)], 0.012, z0, z0 + 0.006, closed=True)
+            elif sec.decor == "arch":
+                pieces = _strip(_arch(cx, yb, ys, r), 0.012, z0, z0 + 0.006, closed=True)
+            else:  # arch_inlay: a thin filled arch of its own colour, just proud of the front
+                pieces = [_slab(_arch(cx, yb, ys, r), z0, z0 + 0.002)]
+            parts[f"decor_{dn}"] = pieces
+            colors[f"decor_{dn}"] = (color, 0.5, 0.0)
         if kind == "drawer":  # the drawer box behind its front: sides, back and bottom
             dd, dh, dw = inner_d - 0.03, fh * 0.7, fw - 0.03
             bz = z_front - t / 2 - dd / 2
@@ -227,16 +300,16 @@ def build(spec: WardrobeSpec, lang: str = "ar") -> tuple[bytes, list[dict]]:
             knob = trimesh.creation.cylinder(radius=0.014, height=0.025, sections=24)
             knob.apply_translation((hx, hy, hz))
             parts[f"handle_{hn}"] = [knob]
-            colors[f"handle_{hn}"] = (handle, 0.35, 0.2)
+            colors[f"handle_{hn}"] = (handle, handle_rough, handle_metal)
         else:
             vertical = kind == "door"
-            box(f"handle_{hn}", 0.012 if vertical else 0.12, 0.12 if vertical else 0.012, 0.025, hx, hy, hz, handle, 0.3, 0.7)
+            box(f"handle_{hn}", 0.012 if vertical else 0.12, 0.12 if vertical else 0.012, 0.025, hx, hy, hz, handle, handle_rough, handle_metal)
     for i, (sx0, sx1, sy) in enumerate(sorted(shelves, key=lambda s: (s[0], s[2])), 1):
-        box(f"shelf_{i}", sx1 - sx0 - 0.002, t, inner_d - 0.01, (sx0 + sx1) / 2, sy, (D - inner_d) / 2 - t, body)
+        box(f"shelf_{i}", sx1 - sx0 - 0.002, t, inner_d - 0.01, (sx0 + sx1) / 2, sy, (D - inner_d) / 2 - t, shelf_color)
 
     scene = trimesh.Scene()
     out = []
-    groups = ("wardrobe_body", "back_panel", "plinth", "leg", "door", "drawer", "shelf", "handle")
+    groups = ("wardrobe_body", "back_panel", "plinth", "leg", "door", "drawer", "decor", "shelf", "handle")
 
     def order(name: str) -> tuple[int, int]:
         base, _, n = name.rpartition("_")

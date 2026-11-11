@@ -28,7 +28,7 @@ from app.services.image_match import ImageMatchError, reference_png
 from app.services.generation_prompt import astra_prompt, furniture_family, object_description, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
-from app.services.model_check import check_glb
+from app.services.model_check import check_glb, with_appearance
 from app.services.part_names import name_components
 from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
@@ -275,10 +275,10 @@ async def named(request: Request, glb: bytes, doc: dict, category: str | None, k
         return glb, doc
 
 
-def validated(glb: bytes, components: dict, category: str | None, kind: str | None) -> dict:
-    """The AI model's check (services/model_check.py) in its component document: a damaged model is flagged, not
-    presented as a success (the review screen shows the problems)."""
-    return {**components, "validation": check_glb(glb, furniture_family(category, kind or None))}
+def validated(glb: bytes, components: dict, category: str | None, kind: str | None, photo: bytes | None = None, bbox: list[float] | None = None) -> dict:
+    """The model's check (services/model_check.py) in its component document, its colours against the photo
+    included: a damaged or wrongly coloured model is flagged, not presented as a success (the review shows why)."""
+    return {**components, "validation": with_appearance(check_glb(glb, furniture_family(category, kind or None)), glb, photo, bbox)}
 
 
 async def procedural_wardrobe(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: str, details: ProductDetails | None) -> tuple[bytes, dict] | None:
@@ -300,6 +300,7 @@ async def procedural_wardrobe(request: Request, settings: Settings, photo: bytes
     if not report["ok"]:
         logger.warning("Procedural wardrobe rejected: %s (layout %s)", report["errors"], spec.model_dump_json())
         return None
+    report = await run_in_threadpool(with_appearance, report, glb, photo, details.bbox if details else None)
     return glb, {**wardrobe.components_doc(glb, names), "validation": report, "layout": spec.model_dump(mode="json")}
 
 
@@ -386,7 +387,7 @@ async def generate_model(
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
             glb, source_glb, components = await sized(glb, source_glb, components)
-            components = await run_in_threadpool(validated, glb, components, category, kind)
+            components = await run_in_threadpool(validated, glb, components, category, kind, raw, details.bbox if details else None)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
             await remember(url, details, components, source_url)
@@ -404,7 +405,9 @@ async def generate_model(
     details = preread or (await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None)
     try:
         task_id = await meshy.create_image_to_3d_task(
-            GenerationOptions(should_texture=textured, enable_pbr=False),
+            # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
+            # file within its limit).
+            GenerationOptions(should_texture=textured, enable_pbr=textured),
             image=None if public_url else raw,
             mime_type=mime,
             image_url=public_url,
@@ -421,6 +424,7 @@ async def generate_model(
         "kind": kind,
         "split": split_prompt(category, kind or None) if settings.meshy_auto_split else None,  # Auto Split parts
         "textured": textured,
+        "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
     }
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
@@ -501,7 +505,7 @@ async def get_task(
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
         data, source_glb, components = await sized(data, source_glb, components)
-        components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"))
+        components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), pending.get("photo"), (pending.get("details") or {}).get("bbox"))
         url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
     except GlbTooLarge as exc:
