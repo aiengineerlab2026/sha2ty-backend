@@ -23,11 +23,12 @@ from app.services.astra_service import AstraError, AstraService
 from app.services.auth import create_confirmed_user, user_id_from_bearer
 from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
-from app.services import furniture_design, vision
+from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
-from app.services.generation_prompt import astra_prompt, furniture_family, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.generation_prompt import astra_prompt, furniture_family, object_description, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
+from app.services.model_check import check_glb
 from app.services.part_names import name_components
 from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
@@ -165,6 +166,8 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
 def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "") -> str:
     """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
     other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
+    if furniture_family(category, kind or None) == "wardrobe":
+        other += "|procedural-1"  # wardrobes are built from their layout now: the old fused meshes are not reused
     return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
 
@@ -272,6 +275,34 @@ async def named(request: Request, glb: bytes, doc: dict, category: str | None, k
         return glb, doc
 
 
+def validated(glb: bytes, components: dict, category: str | None, kind: str | None) -> dict:
+    """The AI model's check (services/model_check.py) in its component document: a damaged model is flagged, not
+    presented as a success (the review screen shows the problems)."""
+    return {**components, "validation": check_glb(glb, furniture_family(category, kind or None))}
+
+
+async def procedural_wardrobe(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: str, details: ProductDetails | None) -> tuple[bytes, dict] | None:
+    """A wardrobe rebuilt from its photo's layout as real, separately editable panels (services/wardrobe.py), or None
+    when the layout cannot be read or the result fails its check (then the image-to-3D path runs instead)."""
+    model = await vision.current_model(settings, request.app.state.auth_http)
+    if not vision.configured(settings, model):
+        return None
+    image = {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(photo).decode('ascii')}"}
+
+    async def ask(prompt: str, schema: dict) -> str | None:
+        return await vision.ask_json([{"type": "input_text", "text": prompt}, image], schema, "wardrobe_layout", settings, vision.client_for(request.app.state, model), model)
+
+    spec = await wardrobe.read_spec(ask, object_description(category, title, kind or None), kind, details)
+    if spec is None:
+        return None
+    glb, names = await run_in_threadpool(wardrobe.build, spec, lang)
+    report = await run_in_threadpool(check_glb, glb, "wardrobe")
+    if not report["ok"]:
+        logger.warning("Procedural wardrobe rejected: %s (layout %s)", report["errors"], spec.model_dump_json())
+        return None
+    return glb, {**wardrobe.components_doc(glb, names), "validation": report, "layout": spec.model_dump(mode="json")}
+
+
 @router.post("/generate")
 async def generate_model(
     request: Request,
@@ -328,6 +359,21 @@ async def generate_model(
             result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
+    # Wardrobes are flat panels: rebuilt from the photo's layout as real doors, drawers, shelves and handles instead of
+    # cut from a fused image-to-3D surface. No generation try is used (only the vision model is called).
+    if raw and furniture_family(category, kind or None) == "wardrobe":
+        details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
+        built = await procedural_wardrobe(request, settings, raw, mime, category, title, kind, lang, details)
+        if built:
+            glb, components = built
+            try:
+                url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+            except CdnError as exc:
+                raise HTTPException(exc.status_code, exc.message) from exc
+            await remember(url, details, components)
+            return GenerateReady(task_id=object_id, provider=provider, glb_url=url, details=details, components=components)
+        preread = details  # read once: the image-to-3D path below reuses it
+
     if provider in ("astra", "sol"):  # both OpenAI models via the Responses API
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
@@ -340,6 +386,7 @@ async def generate_model(
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
             glb, source_glb, components = await sized(glb, source_glb, components)
+            components = await run_in_threadpool(validated, glb, components, category, kind)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
             await remember(url, details, components, source_url)
@@ -454,6 +501,7 @@ async def get_task(
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
         data, source_glb, components = await sized(data, source_glb, components)
+        components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"))
         url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
     except GlbTooLarge as exc:
