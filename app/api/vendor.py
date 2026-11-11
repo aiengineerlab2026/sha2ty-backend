@@ -166,6 +166,8 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
 def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "") -> str:
     """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
     other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
+    if furniture_family(category, kind or None) == "wardrobe":
+        other += "|procedural-1"  # wardrobes are built from their layout now: the old fused meshes are not reused
     return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
 
