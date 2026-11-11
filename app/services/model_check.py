@@ -283,3 +283,52 @@ def with_appearance(report: dict[str, Any], glb: bytes, photo: bytes | None, bbo
         return report
     look = appearance(glb, photo, bbox)
     return {**report, "ok": report["ok"] and look["ok"], "errors": report["errors"] + look["issues"], "appearance": look}
+
+
+# ---- states: an open and a closed model of one product ----
+
+FIXED_TOLERANCE = 1e-3  # m: a part that does not move between states sits where it was
+MOVED = 0.05  # m: an open front has moved at least this far
+
+
+def _parts(glb: bytes) -> dict[str, Any]:
+    import trimesh
+
+    scene = trimesh.load(io.BytesIO(glb), file_type="glb", force="scene")
+    out = {}
+    for node in scene.graph.nodes_geometry:
+        transform, geom = scene.graph[node]
+        mesh = scene.geometry[geom].copy()
+        mesh.apply_transform(transform)
+        out[str(node)] = mesh.bounds
+    return out
+
+
+def check_states(closed: bytes, open_: bytes) -> dict[str, Any]:
+    """Both states are one product: the same parts, the carcass and the inside exactly where they were (same size,
+    orientation and origin), and the open state really open: its doors and drawers moved, not hidden or missing."""
+    import numpy as np
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        a, b = _parts(closed), _parts(open_)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "errors": [f"The states cannot be compared ({str(exc)[:80]})."], "warnings": []}
+    if set(a) != set(b):
+        missing, extra = sorted(set(a) - set(b)), sorted(set(b) - set(a))
+        errors.append("The states do not have the same parts" + (f"; open lacks {', '.join(missing[:5])}" if missing else "") + (f"; open adds {', '.join(extra[:5])}" if extra else "") + ".")
+    common = sorted(set(a) & set(b))
+    fronts = [n for n in common if n.startswith(FRONTS)]
+    fixed = [n for n in common if not n.startswith((*FRONTS, "handle", "decor"))]
+    for n in fixed:
+        if np.abs(a[n] - b[n]).max() > FIXED_TOLERANCE:
+            errors.append(f"{n} is not where it is in the closed state (different size, orientation or origin).")
+    moved = [n for n in fronts if np.abs(a[n] - b[n]).max() > MOVED]
+    if fronts and not moved:
+        errors.append("The open state's doors and drawers are where they are when closed: it is not open.")
+    elif len(moved) < len(fronts):
+        warnings.append(f"Not opened: {', '.join(n for n in fronts if n not in moved)}.")
+    if not any(n.startswith(("shelf", "rail")) for n in common):
+        warnings.append("Nothing inside to see when open (no shelves or hanging rail).")
+    return {"ok": not errors, "errors": errors, "warnings": warnings}

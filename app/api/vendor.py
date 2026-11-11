@@ -28,7 +28,7 @@ from app.services.image_match import ImageMatchError, reference_png
 from app.services.generation_prompt import astra_prompt, furniture_family, object_description, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import GlbTooLarge, enforce, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
-from app.services.model_check import check_glb, with_appearance
+from app.services.model_check import check_glb, check_states, with_appearance
 from app.services.part_names import name_components
 from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
@@ -62,6 +62,8 @@ class GenerateReady(BaseModel):
     details: ProductDetails | None = None
     components: dict | None = None  # meshes that actually exist in the GLB (glb_parts.inspect_glb)
     source_glb_url: str | None = None  # the untouched generated GLB, when glb_url is its split (modular) version
+    # Other states of the same product (supabase/model_states.sql): {"open": {"glb_url", "components"}}.
+    states: dict | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -281,27 +283,67 @@ def validated(glb: bytes, components: dict, category: str | None, kind: str | No
     return {**components, "validation": with_appearance(check_glb(glb, furniture_family(category, kind or None)), glb, photo, bbox)}
 
 
-async def procedural_wardrobe(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: str, details: ProductDetails | None) -> tuple[bytes, dict] | None:
-    """A wardrobe rebuilt from its photo's layout as real, separately editable panels (services/wardrobe.py), or None
-    when the layout cannot be read or the result fails its check (then the image-to-3D path runs instead)."""
+class StatesUnusable(Exception):
+    """Two states were asked for and cannot be made: said to the vendor (no image-to-3D fallback, which has one)."""
+
+
+async def procedural_wardrobe(
+    request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: str,
+    details: ProductDetails | None, open_photo: bytes | None = None, open_mime: str = "image/png",
+) -> tuple[bytes, dict, tuple[bytes, dict] | None] | None:
+    """A wardrobe rebuilt from its photo's layout as real, separately editable panels (services/wardrobe.py): the
+    closed GLB and its document, and with `open_photo` the open state too (same panels and origin, doors turned and
+    drawers pulled out, the inside as the open photo shows it). None when the layout cannot be read or fails its
+    check (then the image-to-3D path runs instead); StatesUnusable when two states were asked for and fail."""
     model = await vision.current_model(settings, request.app.state.auth_http)
     if not vision.configured(settings, model):
+        if open_photo:
+            raise StatesUnusable("The vision model is not configured, so the two states cannot be read.")
         return None
     image = {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(photo).decode('ascii')}"}
+    client = vision.client_for(request.app.state, model)
 
     async def ask(prompt: str, schema: dict) -> str | None:
-        return await vision.ask_json([{"type": "input_text", "text": prompt}, image], schema, "wardrobe_layout", settings, vision.client_for(request.app.state, model), model)
+        return await vision.ask_json([{"type": "input_text", "text": prompt}, image], schema, "wardrobe_layout", settings, client, model)
 
-    spec = await wardrobe.read_spec(ask, object_description(category, title, kind or None), kind, details)
+    what = object_description(category, title, kind or None)
+    spec = await wardrobe.read_spec(ask, what, kind, details)
     if spec is None:
+        if open_photo:
+            raise StatesUnusable("The wardrobe's layout could not be read from the closed photo. Try a straight-on photo of the whole wardrobe.")
         return None
+    reading, notes = None, []
+    if open_photo:
+        opened = {"type": "input_image", "image_url": f"data:{open_mime};base64,{base64.b64encode(open_photo).decode('ascii')}"}
+
+        async def ask_both(prompt: str, schema: dict) -> str | None:
+            return await vision.ask_json([{"type": "input_text", "text": prompt}, image, opened], schema, "wardrobe_open", settings, client, model)
+
+        reading = await wardrobe.read_open(ask_both, spec, what)
+        if reading is None:
+            raise StatesUnusable("The open photo could not be read. Try a photo of the whole wardrobe with its doors open.")
+        spec, notes = wardrobe.with_inside(spec, reading)
     glb, names = await run_in_threadpool(wardrobe.build, spec, lang)
     report = await run_in_threadpool(check_glb, glb, "wardrobe")
     if not report["ok"]:
         logger.warning("Procedural wardrobe rejected: %s (layout %s)", report["errors"], spec.model_dump_json())
+        if open_photo:
+            raise StatesUnusable("The wardrobe built from the photos failed its checks: " + " ".join(report["errors"][:3]))
         return None
     report = await run_in_threadpool(with_appearance, report, glb, photo, details.bbox if details else None)
-    return glb, {**wardrobe.components_doc(glb, names), "validation": report, "layout": spec.model_dump(mode="json")}
+    closed = {**wardrobe.components_doc(glb, names), "validation": report, "layout": spec.model_dump(mode="json")}
+    if not open_photo:
+        return glb, closed, None
+    open_glb, open_names = await run_in_threadpool(wardrobe.build, spec, lang, "open")
+    open_report = await run_in_threadpool(check_glb, open_glb, "wardrobe")
+    pair = await run_in_threadpool(check_states, glb, open_glb)
+    if not open_report["ok"] or not pair["ok"]:
+        raise StatesUnusable("The open state failed its checks: " + " ".join((open_report["errors"] + pair["errors"])[:3]))
+    open_report = await run_in_threadpool(with_appearance, open_report, open_glb, open_photo, None)
+    if reading and not reading.same_wardrobe:  # flagged, not refused: the vendor sees why and can replace a photo
+        open_report = {**open_report, "ok": False, "errors": [f"The two photos may not show the same wardrobe: {reading.differences or 'they differ'}."] + open_report["errors"]}
+    open_report = {**open_report, "warnings": open_report["warnings"] + notes + pair["warnings"], "states": pair}
+    return glb, closed, (open_glb, {**wardrobe.components_doc(open_glb, open_names), "validation": open_report})
 
 
 @router.post("/generate")
@@ -322,9 +364,15 @@ async def generate_model(
     title: Annotated[str, Form(max_length=200)] = "",
     kind: Annotated[str, Form(max_length=60)] = "",  # furniture: the type the vendor typed ("corner sofa")
     lang: Annotated[Literal["ar", "en"], Form()] = "ar",  # the listing (name, description) in the vendor's interface language
+    # Wardrobes with an open and a closed state: the photo of it open (`image` is the closed one).
+    open_image: Annotated[UploadFile | None, File()] = None,
 ) -> GenerateAccepted | GenerateReady:
     provider = await generator_setting.current(settings, request.app.state.auth_http)
     raw = await image.read() if image is not None else b""
+    open_raw = await open_image.read() if open_image is not None else b""
+    open_mime = read_upload(open_raw, open_image.content_type if open_image else "", settings) if open_raw else "image/png"
+    if open_raw and (not raw or furniture_family(category, kind or None) != "wardrobe"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Open and closed states are for wardrobes, with both photos uploaded.")
     public_url = (image_url or "").strip() or None
     if raw:
         mime = read_upload(raw, image.content_type if image else "", settings)
@@ -337,7 +385,7 @@ async def generate_model(
     db = request.app.state.auth_http
     # The same photo, vendor and options → the model generated before (model_cache): no vision call,
     # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
-    cache_key = glb_cache_key(raw, user_id, provider, category, title, textured, kind) if raw else None
+    cache_key = glb_cache_key(raw + open_raw, user_id, provider, category, title, textured, kind) if raw else None
     hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
     if hit and hit.get("glb_url"):
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
@@ -345,7 +393,7 @@ async def generate_model(
         # (the reading is cached per language, and costs no generation try).
         if details is None or not all(in_language(t, lang) for t in (details.name, details.description) if t):
             details = await read_photo(request, settings, raw, mime, category, title, kind, lang) or details
-        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details, components=hit.get("components"), source_glb_url=hit.get("source_glb_url"))
+        return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details, components=hit.get("components"), source_glb_url=hit.get("source_glb_url"), states=hit.get("states"))
 
     # Only a photo (the app's camera): read it first and take the type from it (furniture: what it is exactly).
     preread: ProductDetails | None = None
@@ -355,24 +403,28 @@ async def generate_model(
         # What the user typed wins (it goes into the Meshy / Astra prompt); else what the reading saw.
         kind = (kind.strip() or (preread.object_type if preread and category == "furniture" else ""))[:60]
 
-    async def remember(url: str, details: ProductDetails | None, components: dict | None = None, source_url: str | None = None) -> None:
+    async def remember(url: str, details: ProductDetails | None, components: dict | None = None, source_url: str | None = None, states: dict | None = None) -> None:
         if cache_key:
-            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url}
+            result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url, "states": states}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
     # Wardrobes are flat panels: rebuilt from the photo's layout as real doors, drawers, shelves and handles instead of
     # cut from a fused image-to-3D surface. No generation try is used (only the vision model is called).
     if raw and furniture_family(category, kind or None) == "wardrobe":
         details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
-        built = await procedural_wardrobe(request, settings, raw, mime, category, title, kind, lang, details)
+        try:
+            built = await procedural_wardrobe(request, settings, raw, mime, category, title, kind, lang, details, open_raw or None, open_mime)
+        except StatesUnusable as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
         if built:
-            glb, components = built
+            glb, components, opened = built
             try:
                 url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+                states = {"open": {"glb_url": cdn.upload(f"{user_id}/{object_id}.open.glb", opened[0], "model/gltf-binary"), "components": opened[1]}} if opened else None
             except CdnError as exc:
                 raise HTTPException(exc.status_code, exc.message) from exc
-            await remember(url, details, components)
-            return GenerateReady(task_id=object_id, provider=provider, glb_url=url, details=details, components=components)
+            await remember(url, details, components, states=states)
+            return GenerateReady(task_id=object_id, provider=provider, glb_url=url, details=details, components=components, states=states)
         preread = details  # read once: the image-to-3D path below reuses it
 
     if provider in ("astra", "sol"):  # both OpenAI models via the Responses API
@@ -520,6 +572,64 @@ async def get_task(
         await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
     request.app.state.pending_cdn.pop(task_id, None)
     return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url, components=components, source_glb_url=source_url)
+
+
+class StateBoxes(BaseModel):
+    closed: list[float] | None = Field(default=None, description="The wardrobe shown closed: x_min, y_min, x_max, y_max, normalised 0..1")
+    open: list[float] | None = Field(default=None, description="The same wardrobe shown open (doors open): x_min, y_min, x_max, y_max, normalised 0..1")
+
+
+SPLIT_PROMPT = """This image shows one wardrobe twice, side by side or one above the other: once closed (doors shut) and
+once open (doors open, the inside visible). Give the box around each depiction, the whole wardrobe and nothing of the
+other, in normalised image coordinates (0..1, origin top left). Null for a depiction the image does not have."""
+
+
+def crop_states(photo: bytes, boxes: StateBoxes) -> dict[str, str]:
+    """Each state's depiction cut out (a little margin kept) as a JPEG data URL."""
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(photo)).convert("RGB")
+    w, h = img.size
+    out = {}
+    for name in ("closed", "open"):
+        box = getattr(boxes, name)
+        if not box or len(box) != 4 or box[2] - box[0] < 0.05 or box[3] - box[1] < 0.05:
+            continue
+        x0, y0, x1, y1 = (min(1.0, max(0.0, v)) for v in box)
+        pad_x, pad_y = (x1 - x0) * 0.03, (y1 - y0) * 0.03
+        part = img.crop((int(max(0, x0 - pad_x) * w), int(max(0, y0 - pad_y) * h), int(min(1, x1 + pad_x) * w), int(min(1, y1 + pad_y) * h)))
+        buf = io.BytesIO()
+        part.save(buf, format="JPEG", quality=92)
+        out[name] = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    return out
+
+
+@router.post("/split-states")
+async def split_states(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    _user: Annotated[str, Depends(current_user)],
+    image: Annotated[UploadFile, File()],
+) -> dict[str, str]:
+    """One photo showing a wardrobe both closed and open, cut into the two photos ({"closed", "open"} data URLs) for
+    the vendor to check before generating. Uses no generation try."""
+    raw = await image.read()
+    mime = read_upload(raw, image.content_type or "", settings)
+    model = await vision.current_model(settings, request.app.state.auth_http)
+    if not vision.configured(settings, model):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The vision model is not configured.")
+    content = [{"type": "input_text", "text": SPLIT_PROMPT}, {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"}]
+    text = await vision.ask_json(content, StateBoxes.model_json_schema(), "wardrobe_states", settings, vision.client_for(request.app.state, model), model)
+    try:
+        boxes = StateBoxes.model_validate_json(text or "")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "The photo could not be read. Try again, or upload the two photos separately.") from exc
+    images = await run_in_threadpool(crop_states, raw, boxes)
+    if set(images) != {"closed", "open"}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Both the closed and the open wardrobe were not found in this photo. Upload the two photos separately.")
+    return images
 
 
 MAX_CARPET_PHOTO = 15 * 1024 * 1024

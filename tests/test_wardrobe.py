@@ -66,7 +66,7 @@ def test_parts_are_straight_boxes_not_fragments():
 def test_check_passes_the_built_wardrobe_and_its_doors_meet_without_overlap():
     glb, _ = _built()
     report = check_glb(glb, "wardrobe")
-    assert report == {"ok": True, "errors": [], "warnings": [], "parts": 18}
+    assert report == {"ok": True, "errors": [], "warnings": [], "parts": 19}  # with the inferred hanging rail (rail_1)
 
 
 def test_check_rejects_overlapping_floating_and_degenerate_parts():

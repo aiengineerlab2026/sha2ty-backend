@@ -25,7 +25,7 @@ class PlanStore:
 
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
-            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,source_image_url,thumbnail_url,vendor_id,status,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
+            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
@@ -45,7 +45,7 @@ class PlanStore:
         response = await self.client.get(f"{self.base}/models?{'&'.join(params)}", headers=self._headers())
         # A newer migration (pricing / categories / shape) not applied yet: drop only the columns the
         # database says are missing and serve the rest (prices stay when only `shape` is missing).
-        optional = ["price", "price_unit", "category", "shape", "length2_m", "thumbnail_url"]
+        optional = ["price", "price_unit", "category", "shape", "length2_m", "thumbnail_url", "states"]
         while response.status_code == 400:
             if "vendors.status=eq.approved" in params and "status" in response.text:
                 params.remove("vendors.status=eq.approved")  # approval migration not applied yet
@@ -85,6 +85,8 @@ class PlanStore:
                     "height_m": _num(row.get("height_m")),
                     "depth_m": _num(row.get("depth_m")),
                     "glb_url": row.get("glb_url"),
+                    # The open state of a wardrobe with two (supabase/model_states.sql); the row is the closed one.
+                    "open_glb_url": ((row.get("states") or {}).get("open") or {}).get("glb_url"),
                     "thumbnail": row.get("thumbnail_url") or (variants[0]["image_url"] if variants else None) or row.get("source_image_url"),  # the saved 3D model first
                     "company_id": company_id,
                     "company": groups[company_id]["name"],
