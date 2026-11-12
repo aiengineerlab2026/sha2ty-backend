@@ -145,10 +145,10 @@ class MeshyService:
             "target_formats": ["glb"],
             "should_texture": options.should_texture,
         }
+        # Remeshing replaces the generated surface with a decimated one and is what warped furniture. The photo
+        # is meshed as Meshy generated it. File size is reduced afterwards by re-encoding textures (glb_size).
         if target_polycount:
-            # File size: Meshy has no size option, so it is held down by its real ones: a remesh to this many
-            # triangles (unremeshed models came back with 0.3–4 million) and 2k textures. glb_size checks the result.
-            payload.update(should_remesh=True, topology="triangle", target_polycount=max(100, min(300000, target_polycount)))
+            payload["should_remesh"] = False
         if options.should_texture:
             payload["texture_resolution"] = "2k"
             payload["enable_pbr"] = options.enable_pbr

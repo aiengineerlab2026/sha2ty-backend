@@ -132,8 +132,8 @@ def modular_hint(category: str | None, kind: str | None = None, details=None) ->
     return f"Separate named meshes: {parts}; each part with its own material, looking exactly as in the photo."
 
 
-# Meshy remeshes to this many triangles (its `target_polycount`, 100–300000): enough for the shape, small enough for
-# an 8 MB GLB with its 2k texture. Soft, curvy pieces get more; boxy ones fewer.
+# Kept for callers that still pass a budget. Image to 3D does not remesh to it: a remesh replaces the generated
+# surface. The file is shrunk afterwards by re-encoding textures (glb_size).
 POLYCOUNT = {"sofa": 60000, "bed": 60000, "chair": 30000, "table": 30000, "wardrobe": 40000, "door": 20000}
 DEFAULT_POLYCOUNT = 50000
 

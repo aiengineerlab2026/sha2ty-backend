@@ -65,8 +65,8 @@ def test_meshy_is_asked_for_a_light_model_and_both_prompts_carry_the_size_rule()
     prompt = meshy_texture_prompt("furniture", "Oslo chair", None, "dining chair")
     anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True), image=b"x", texture_prompt=prompt, target_polycount=target_polycount("furniture", "dining chair")))
     body = json.loads(sent[0].content)
-    # The real size controls Meshy has (no file-size option exists): remesh to a triangle budget, 2k textures.
-    assert body["should_remesh"] is True and body["target_polycount"] == 30000 and body["texture_resolution"] == "2k"
+    # Remesh is left off: it replaces the generated surface. Textures stay 2k; glb_size shrinks the file afterwards.
+    assert body["should_remesh"] is False and "target_polycount" not in body and body["texture_resolution"] == "2k"
     # File size is not texture: no size rule in texture_prompt (Meshy uses it for the texture only).
     assert "under 8 MB" not in body["texture_prompt"] and "dining chair" in body["texture_prompt"] and len(body["texture_prompt"]) <= 800
     assert target_polycount("furniture", "corner sofa") > target_polycount("furniture", "dining chair")

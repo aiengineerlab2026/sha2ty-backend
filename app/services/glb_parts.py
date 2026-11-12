@@ -150,22 +150,13 @@ def _pretty(name: str) -> str:
 
 # ---- splitting a single generated mesh into parts ----
 #
-# Meshy's image-to-3D API has no part / segmentation option (its texture_prompt only guides texturing), so
-# its GLB is usually one textured mesh. When it is, `segment_glb` splits what the geometry itself shows:
-#   1. disconnected pieces (generated legs, cushions or handles are often separate islands), found on a copy
-#      with vertices merged by position so UV seams do not cut the mesh into fake islands;
-#   2. legs: the bottom band, only when it covers little of the footprint (thin supports, not a solid plinth);
-#   3. a tabletop: the top band of a table, only when it covers most of the footprint (a real flat top);
-#   4. a chair or sofa: backrest / back cushions, seat cushion(s) and front / rear legs, cut at the seat (`_seating`).
-# Parts keep their faces' UVs and texture, so the model looks exactly as generated; names come from the
-# furniture type the vendor selected. What geometry cannot tell apart (cushions fused to a frame, doors to a
-# wardrobe body) stays one piece, and the returned document says so.
+# Meshy's image-to-3D API has no part option, so its GLB is usually one mesh. `segment_glb` separates only
+# pieces that are already disconnected (legs, a top, a handle), named from where they sit. A connected
+# surface is never sliced into bands: that cut is an arbitrary fragment, and the original mesh is kept.
+# Parts keep their faces' UVs and texture. A split that changes the bounds or drops faces is discarded.
 
 MIN_PART_FACES = 8  # a part needs at least a box's worth of triangles…
 MIN_PART_SIZE = 0.04  # …and to be at least this share of the model's size (noise specks are not parts)
-LEG_BAND = {"sofa": 0.1, "bed": 0.12, "chair": 0.12, "table": 0.0, "wardrobe": 0.08, "furniture": 0.1}
-LEG_COVER = 0.35  # the bottom band covering less of the footprint than this = legs
-TOP_BAND = 0.12
 TOP_COVER = 0.5
 GRID = 20
 
@@ -196,10 +187,15 @@ def segment_glb(data: bytes, family: str) -> tuple[bytes, dict[str, Any]] | None
         part = mesh.submesh([faces], append=True)
         parts.append(part)
         out.add_geometry(part, geom_name=name, node_name=name)
-    # Every original face in exactly one part, each with its own UVs: a cut that lost geometry or texture is not used.
+    # Every original face in exactly one part, each with its own UVs, and the same bounds: a cut that lost
+    # geometry, texture or proportions is not used.
     uv = getattr(mesh.visual, "uv", None)
-    if sum(len(p.faces) for p in parts) != len(mesh.faces) or (uv is not None and any(getattr(p.visual, "uv", None) is None or len(p.visual.uv) != len(p.vertices) for p in parts)):
-        logger.warning("Geometry split of a %s dropped faces or UVs; the model is kept whole", family)
+    stacked = np.vstack([p.vertices for p in parts])
+    made = stacked.max(0) - stacked.min(0)
+    original = mesh.bounds[1] - mesh.bounds[0]
+    same_bounds = np.all(np.abs(made - original) <= np.maximum(1e-3, 0.02 * np.maximum(original, 1e-6)))
+    if sum(len(p.faces) for p in parts) != len(mesh.faces) or not same_bounds or (uv is not None and any(getattr(p.visual, "uv", None) is None or len(p.visual.uv) != len(p.vertices) for p in parts)):
+        logger.warning("Geometry split of a %s changed the mesh; the model is kept whole", family)
         return None
     glb = out.export(file_type="glb")
     doc = inspect_glb(glb, family)
@@ -235,10 +231,9 @@ def _labels(mesh, family: str, np, trimesh) -> list[str]:
     welded.merge_vertices(merge_tex=True, merge_norm=True)
     island = _components(welded.face_adjacency, n, np)
     counts = np.bincount(island)
-    main = int(np.argmax(counts))
     extra: dict[int, list[int]] = {}
     for k in range(len(counts)):
-        if k == main or counts[k] < MIN_PART_FACES:
+        if counts[k] < MIN_PART_FACES:
             continue
         faces = np.flatnonzero(island == k)
         ext = np.ptp(mesh.vertices[mesh.faces[faces].reshape(-1)], axis=0)
@@ -264,83 +259,50 @@ def _labels(mesh, family: str, np, trimesh) -> list[str]:
             ij = np.clip(np.floor(np.vstack([pts, t])).astype(int), 0, GRID - 1)
             hit[ij[:, 0], ij[:, 1]] = True
         return float(hit.mean())
-    # Islands: named by where they sit (a table's top island, legs on the floor, cushions above the seat…).
+    # Islands only. A piece that has no reliable name stays in the body: no "Part 3", no cut through a solid.
     counter: dict[str, int] = {}
-    for k, faces in extra.items():
+    shared = {"tabletop", "front_legs", "rear_legs", "backrest", "back_cushions", "seat_cushion", "seat_cushions"}
+    depth = max(hi[2] - lo[2], 1e-9)
+    for _k, faces in extra.items():
         pts = centroids[faces]
         bottom, top = (pts[:, 1].min() - lo[1]) / height, (pts[:, 1].max() - lo[1]) / height
-        small = float(np.linalg.norm(np.ptp(pts, axis=0))) < 0.15 * size
-        if family == "table" and top > 1 - TOP_BAND and cover(faces) >= TOP_COVER:
-            name = "tabletop"
-        elif bottom < 0.05 and cover(faces) < 0.1:  # stands on the floor and is thin: a leg (any height)
-            name = "leg"
-        elif family in ("wardrobe", "door") and small:
-            name = "handle"
-        elif family in ("sofa", "chair"):
-            continue  # cut by height below (_seating): an island above the seat is part of the back, etc.
-        elif family == "bed":
-            name = "pillow" if bottom > 0.35 else "mattress"
+        z_mean = float((pts[:, 2].mean() - lo[2]) / depth)
+        role = _role(family, bottom, top, cover(faces), z_mean)
+        if role is None:
+            continue
+        if role == "leg" and family in ("chair", "sofa"):
+            role = "front_legs" if z_mean >= 0.5 else "rear_legs"
+        if role in shared:
+            part = role
         else:
-            name = "part"
-        counter[name] = counter.get(name, 0) + 1
-        part = name if name == "tabletop" else f"{name}_{counter[name]}"
+            counter[role] = counter.get(role, 0) + 1
+            part = f"{role}_{counter[role]}"
         for f in faces:
             labels[f] = part
-
-    rest = np.array([labels[f] == base for f in range(n)])
-    # A table's top band, when it is a full flat top (most of the footprint).
-    if family == "table" and not any(l == "tabletop" for l in labels):
-        band = rest & (centroids[:, 1] > hi[1] - TOP_BAND * height)
-        if band.sum() >= MIN_PART_FACES and cover(np.flatnonzero(band)) >= TOP_COVER:
-            for f in np.flatnonzero(band):
-                labels[f] = "tabletop"
-            rest &= ~band
-    # Legs: the bottom band when it covers little of the footprint (thin supports, not a solid base).
-    leg_band = LEG_BAND.get(family, LEG_BAND["furniture"]) or (0.25 if family == "table" else 0.0)
-    if leg_band and not any(l.startswith("leg") for l in labels):
-        band = rest & (centroids[:, 1] < lo[1] + leg_band * height)
-        if band.sum() >= MIN_PART_FACES and cover(np.flatnonzero(band)) < LEG_COVER:
-            for f in np.flatnonzero(band):
-                labels[f] = "legs"
-    if family in ("chair", "sofa"):
-        _seating(mesh, labels, base, family, cover, np)
     return labels
 
 
-def _seating(mesh, labels: list[str], base: str, family: str, cover, np) -> None:
-    """A chair or sofa from one fused surface: the seat is the height with the most upward-facing area (20–75% up),
-    the back the side the surface above it leans to. Then: backrest / back cushions (above the seat, back part), seat
-    cushion(s) (a band down from the seat top), front / rear legs (thin supports under the seat, by side). Without a
-    clear seat or back it is left as it is (a stool, a bench)."""
-    lo, hi = mesh.bounds
-    height, depth = max(hi[1] - lo[1], 1e-9), max(hi[2] - lo[2], 1e-9)
-    c = mesh.triangles_center
-    y = (c[:, 1] - lo[1]) / height
-    z = (c[:, 2] - lo[2]) / depth
-    up = (mesh.face_normals[:, 1] > 0.7) & (y > 0.2) & (y < 0.75)
-    if mesh.area_faces[up].sum() < 0.03 * mesh.area_faces.sum():
-        return
-    hist, edges = np.histogram(y[up], bins=22, range=(0.2, 0.75), weights=mesh.area_faces[up])
-    seat = float(edges[int(np.argmax(hist))] + (edges[1] - edges[0]) / 2)
-    above = y > seat + 0.2
-    if above.sum() < MIN_PART_FACES or abs(float(z[above].mean()) - 0.5) < 0.08:
-        return  # nothing leans back above the seat: no backrest to cut
-    back = z if z[above].mean() < 0.5 else 1 - z  # 0 at the back
-    chair = family == "chair"
-    # Legs: everything under the seat cushion, when it covers little of the footprint (not a solid base).
-    under = np.array([l == base or l.startswith("leg") for l in labels]) & (y < seat - 0.15)
-    legs = under.sum() >= MIN_PART_FACES and cover(np.flatnonzero(under)) < LEG_COVER
-    for name, mask in (
-        ("backrest" if chair else "back_cushions", (y > seat + 0.06) & (back < 0.4)),
-        ("seat_cushion" if chair else "seat_cushions", (y > seat - 0.15) & (y <= seat + 0.06) & (back >= 0.15)),
-    ):
-        mask &= np.array([l == base for l in labels])
-        if mask.sum() >= MIN_PART_FACES:
-            for i in np.flatnonzero(mask):
-                labels[i] = name
-    for i, l in enumerate(labels):
-        if l.startswith("leg") or (legs and under[i]):
-            labels[i] = "front_legs" if back[i] >= 0.5 else "rear_legs"
+def _role(family: str, bottom: float, top: float, cover_frac: float, z_mean: float) -> str | None:
+    """A name for one disconnected piece, or None when its place does not identify a real component."""
+    span = top - bottom
+    if family in ("table", "chair", "sofa", "bed") and bottom < 0.08 and cover_frac < 0.12:
+        return "leg"
+    if family == "table" and top > 0.85 and cover_frac >= TOP_COVER:
+        return "tabletop"
+    if family in ("wardrobe", "door") and span < 0.25 and cover_frac < 0.08 and bottom > 0.15:
+        return "handle"
+    if family in ("chair", "sofa"):
+        if top > 0.7 and span > 0.2 and (z_mean < 0.35 or z_mean > 0.65):
+            return "backrest" if family == "chair" else "back_cushions"
+        if cover_frac >= 0.35 and span < 0.3 and 0.2 < bottom < 0.75:
+            return "seat_cushion" if family == "chair" else "seat_cushions"
+        return None
+    if family == "bed":
+        if bottom > 0.55 and cover_frac < 0.35:
+            return "pillow"
+        if bottom > 0.25 and cover_frac >= 0.4:
+            return "mattress"
+    return None
 
 
 def _components(pairs, n: int, np):

@@ -72,8 +72,11 @@ def check_glb(data: bytes, family: str = "furniture") -> dict[str, Any]:
     lo = np.min([m.bounds[0] for _, m, _ in parts], axis=0)
     hi = np.max([m.bounds[1] for _, m, _ in parts], axis=0)
     size = hi - lo
-    if (size < MIN_SIZE).any() or (size > MAX_SIZE).any():
+    longest = float(size.max())
+    if longest < MIN_SIZE or longest > 50:
         errors.append(f"Overall size {size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} m is not a real piece of furniture.")
+    elif longest > MAX_SIZE:
+        warnings.append(f"Overall size {size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} m is larger than a piece of furniture. It is scaled uniformly when placed, not stretched.")
 
     names = sorted(n for n, _, _ in parts)
     generic = [n for n in names if is_generic(n)]
@@ -82,7 +85,7 @@ def check_glb(data: bytes, family: str = "furniture") -> dict[str, Any]:
     if len(parts) > 1:
         materials = [id(m) for _, _, m in parts if m is not None]
         if len(set(materials)) < len(materials):
-            errors.append("Some parts share one material, so recolouring one would change the others.")
+            warnings.append("Some parts share one material. Recolouring copies it per part before painting, so the shared texture is kept.")
 
     boxes = {n: m.bounds.tolist() for n, m, _ in parts}
     fronts = [n for n in names if n.startswith(FRONTS)]
