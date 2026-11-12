@@ -213,7 +213,7 @@ class MeshyService:
             raise MeshyError(502, "Meshy returned an unexpected task object.")
         return task, _retry_after(response)
 
-    async def download_file(self, url: str, destination: Path, max_bytes: int) -> int:
+    async def download_file(self, url: str, destination: Path) -> int:
         """Stream a Meshy asset to disk atomically. Returns the number of bytes written."""
         temp_path = destination.with_suffix(destination.suffix + ".part")
         written = 0
@@ -224,8 +224,6 @@ class MeshyService:
                 async with await anyio.open_file(temp_path, "wb") as file:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         written += len(chunk)
-                        if written > max_bytes:
-                            raise MeshyError(502, "The generated model is larger than the server allows.")
                         await file.write(chunk)
             await anyio.Path(temp_path).replace(destination)
         except httpx.HTTPError as exc:

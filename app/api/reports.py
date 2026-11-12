@@ -17,6 +17,7 @@ import logging
 
 from app.services import part_sizes, request_report
 from app.services.auth import service_headers, user_id_from_bearer
+from app.services.cdn import file_prefixes
 
 router = APIRouter(prefix="/api/tasks", tags=["requests"])
 logger = logging.getLogger(__name__)
@@ -47,8 +48,7 @@ def may_see(task: dict[str, Any], user_id: str, vendor: dict[str, Any] | None, b
 
 async def _picture(client: httpx.AsyncClient, url: str | None) -> bytes | None:
     """The model's thumbnail, only from the platform's own storage (never an arbitrary URL)."""
-    prefix = f"{get_settings().supabase_url.rstrip('/')}/storage/v1/object/public/"
-    if not url or not url.startswith(prefix) or ".." in url:
+    if not url or not url.startswith(file_prefixes(get_settings())) or ".." in url:
         return None
     try:
         response = await client.get(url, timeout=15)
@@ -77,7 +77,7 @@ async def _sizes(client: httpx.AsyncClient, design: dict[str, Any]) -> list[dict
     """Each part's size from the request's 3D file (platform storage only); None when it cannot be read: the report
     still goes out, without sizes."""
     url = design.get("glb_url")
-    if not url or not url.startswith(f"{get_settings().supabase_url.rstrip('/')}/storage/v1/object/public/") or ".." in url:
+    if not url or not url.startswith(file_prefixes(get_settings())) or ".." in url:
         return None
     try:
         response = await client.get(url, timeout=30)

@@ -350,7 +350,7 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
         async def get_image_to_3d_task(self, task_id):
             return {"status": "SUCCEEDED", "progress": 100, "model_urls": {"glb": "https://meshy.test/m.glb"}}, None
 
-        async def download_file(self, _url, dest, _limit):
+        async def download_file(self, _url, dest):
             dest.write_bytes(b"glTF")
 
     class FakeCdn:
