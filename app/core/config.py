@@ -80,7 +80,6 @@ class Settings(BaseSettings):
     storage_dir: Path = BACKEND_DIR / "storage"
 
     max_image_bytes: int = 20 * 1024 * 1024
-    max_model_bytes: int = 300 * 1024 * 1024
 
     @property
     def meshy_configured(self) -> bool:

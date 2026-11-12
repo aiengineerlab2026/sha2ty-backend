@@ -12,7 +12,6 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
 from app.api.designs import User
-from app.core.config import get_settings
 from app.services.cdn import CdnError
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -38,8 +37,6 @@ async def upload(user_id: User, request: Request, file: Annotated[UploadFile, Fi
     if ".." in folder or not folder:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid folder.")
     data = await file.read()
-    if len(data) > get_settings().max_model_bytes:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "The file is too large.")
     ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
     try:
         url = await run_in_threadpool(request.app.state.cdn.upload, f"{user_id}/{folder}/{uuid.uuid4()}.{ext}", data, file.content_type)

@@ -611,12 +611,12 @@ async def get_task(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Meshy finished but did not return a GLB.")
     dest = request.app.state.storage.models_dir / f"{task_id}.glb"
     try:
-        await meshy.download_file(glb_url, dest, get_settings().max_model_bytes)
+        await meshy.download_file(glb_url, dest)
         data = dest.read_bytes()
         components = None
         if split_glb_url:
             split_dest = dest.with_suffix(".split.glb")
-            await meshy.download_file(split_glb_url, split_dest, get_settings().max_model_bytes)
+            await meshy.download_file(split_glb_url, split_dest)
             info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
             logger.info("Meshy Auto Split GLB for %s: separated=%s components=%s", task_id, info.get("separated"), [c["name"] for c in info.get("components", [])])
             if info.get("separated"):  # independently editable meshes in the file, not just a reported count
