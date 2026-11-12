@@ -1,4 +1,6 @@
-"""Keep generated GLBs under MAX_GLB_BYTES (8 MB) on the backend: no provider can promise a file size.
+"""Make generated GLBs lighter, aiming for MAX_GLB_BYTES (8 MB): no provider can promise a file size.
+
+8 MB is a target, not a limit: a model still over it after optimising is saved as it is (never refused).
 
 Meshy is asked for fewer polygons and 2k textures (its real parameters) and both providers are told the limit in
 their prompt, but the file that comes back is what counts. Over the limit, `fit_glb` tries, smallest change first:
@@ -25,12 +27,6 @@ MAX_GLB_BYTES = 8 * 1024 * 1024
 QUANTIZATION = "KHR_mesh_quantization"
 _TYPES = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
 _SIZES = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
-
-
-class GlbTooLarge(Exception):
-    def __init__(self, size: int):
-        super().__init__(f"The generated model is still {size / 1048576:.1f} MB after optimising (the limit is {MAX_GLB_BYTES // 1048576} MB). Try a simpler photo, or upload a lighter GLB.")
-        self.size = size
 
 
 def read_glb(data: bytes) -> tuple[dict[str, Any], bytes]:
@@ -184,11 +180,3 @@ def fit_glb(data: bytes, limit: int = MAX_GLB_BYTES) -> tuple[bytes, dict[str, A
     report["after"] = len(best)
     logger.info("GLB %.1f MB -> %.1f MB (%s)", len(data) / 1048576, len(best) / 1048576, ", ".join(report["steps"]))
     return best, report
-
-
-def enforce(data: bytes) -> tuple[bytes, dict[str, Any]]:
-    """fit_glb, raising GlbTooLarge when the result is still over the limit."""
-    out, report = fit_glb(data)
-    if len(out) > MAX_GLB_BYTES:
-        raise GlbTooLarge(len(out))
-    return out, report

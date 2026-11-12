@@ -26,7 +26,7 @@ from app.schemas.product_details import ProductDetails
 from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
 from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_texture_prompt, split_prompt, target_polycount
-from app.services.glb_size import GlbTooLarge, enforce, fit_glb
+from app.services.glb_size import MAX_GLB_BYTES, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
 from app.services.part_names import name_components
@@ -256,9 +256,11 @@ def modular(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, 
 
 
 async def sized(glb: bytes, source_glb: bytes | None, components: dict) -> tuple[bytes, bytes | None, dict]:
-    """The GLB within MAX_GLB_BYTES (glb_size: textures and vertex data compacted, parts untouched), or GlbTooLarge.
-    The untouched original is compacted too where it can be, but kept whatever its size (it is the backup)."""
-    glb, report = await run_in_threadpool(enforce, glb)
+    """The GLB made lighter (glb_size: textures and vertex data compacted, parts untouched), aiming for MAX_GLB_BYTES.
+    No size limit: a model still over the target is saved as it is. The untouched original is compacted too."""
+    glb, report = await run_in_threadpool(fit_glb, glb)
+    if report["after"] > MAX_GLB_BYTES:
+        logger.info("Generated model kept at %.1f MB (over the %d MB target)", report["after"] / 1048576, MAX_GLB_BYTES // 1048576)
     if source_glb:
         source_glb, _ = await run_in_threadpool(fit_glb, source_glb)
     return glb, source_glb, {**components, "file": {"bytes": report["after"], "originalBytes": report["before"], "optimised": report["steps"]}}
@@ -452,9 +454,6 @@ async def generate_model(
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
             await remember(url, details, components, source_url)
-        except GlbTooLarge as exc:
-            await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
             raise HTTPException(exc.status_code, exc.message) from exc
@@ -631,11 +630,6 @@ async def get_task(
         components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), pending.get("photo"), (pending.get("details") or {}).get("bbox"))
         url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
-    except GlbTooLarge as exc:
-        # Over the limit even after optimising: not saved; the try is given back once and polling stops.
-        if request.app.state.pending_cdn.pop(task_id, None) is not None:
-            await bus.publish(GenerationFailed(owner, "meshy"), request.app.state)
-        return TaskStatusResponse(task_id=task_id, status="FAILED", progress=100, error=str(exc))
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
     if pending.get("cache_key"):

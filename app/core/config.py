@@ -64,11 +64,15 @@ class Settings(BaseSettings):
     admin_session_secret: SecretStr = SecretStr("")
     admin_session_hours: float = 12.0
 
-    supabase_s3_endpoint: str = ""
-    supabase_s3_region: str = "eu-west-2"
-    supabase_s3_access_key_id: SecretStr = SecretStr("")
-    supabase_s3_secret_access_key: SecretStr = SecretStr("")
-    supabase_storage_bucket: str = "cads"
+    # File storage: Cloudflare R2 (S3 API). Files are served by this API at {api_public_url}/api/files/<key>
+    # unless cdn_public_url is set (the bucket's public r2.dev URL or custom domain).
+    r2_endpoint: str = ""
+    r2_region: str = "auto"
+    r2_access_key_id: SecretStr = SecretStr("")
+    r2_secret_access_key: SecretStr = SecretStr("")
+    r2_bucket: str = "cads"
+    api_public_url: str = "http://localhost:8010"
+    cdn_public_url: str = ""
 
     cors_origins: list[str] = []
     # Local development, also over the LAN (the mobile app's web view). Production: set CORS_ORIGINS to the site.

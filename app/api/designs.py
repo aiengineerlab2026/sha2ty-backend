@@ -32,6 +32,7 @@ from app.schemas.design import (
     plan_kind,
 )
 from app.services.auth import user_id_from_bearer
+from app.services.cdn import file_prefixes
 from app.services.design_store import DesignStore
 from app.services.plan_store import PlanStore
 
@@ -58,15 +59,16 @@ Plans = Annotated[PlanStore, Depends(plans)]
 # ---- file URLs ----
 
 
-def _public_prefix() -> str:
-    return f"{get_settings().supabase_url.rstrip('/')}/storage/v1/object/public/cads/"
+def _public_prefixes(user_id: str) -> tuple[str, ...]:
+    r2, supabase = file_prefixes(get_settings())
+    return (f"{r2}{user_id}/", f"{supabase}cads/{user_id}/")
 
 
 def own_file(url: str | None, user_id: str, what: str) -> str | None:
     """A GLB or thumbnail a version points at: only the user's own uploads (cads/<user id>/…)."""
     if url is None:
         return None
-    if not url.startswith(f"{_public_prefix()}{user_id}/") or ".." in url:
+    if not url.startswith(_public_prefixes(user_id)) or ".." in url:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The {what} must be a file you uploaded.")
     return url
 
@@ -87,7 +89,7 @@ def check_textures(edits: ItemEdits) -> None:
     for part, edit in edits.material_edits.items():
         if edit.mapUrl is None or BUILT_IN_TEXTURE.fullmatch(edit.mapUrl):
             continue
-        if not edit.mapUrl.startswith(_public_prefix()) or ".." in edit.mapUrl:
+        if not edit.mapUrl.startswith(file_prefixes(get_settings())) or ".." in edit.mapUrl:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The texture of part {part!r} must be uploaded first.")
 
 

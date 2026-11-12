@@ -1,10 +1,9 @@
 import numpy as np
-import pytest
 import trimesh
 from PIL import Image
 
 from app.services.glb_parts import inspect_glb
-from app.services.glb_size import GlbTooLarge, MAX_GLB_BYTES, enforce, fit_glb, read_glb
+from app.services.glb_size import MAX_GLB_BYTES, fit_glb, read_glb
 
 
 def _chair_glb() -> bytes:
@@ -43,15 +42,15 @@ def test_vertex_data_is_stored_compactly_and_stays_close():
         assert np.abs(loaded.geometry[name].visual.uv / 65535 - part.visual.uv).max() < 1e-4
 
 
-def test_small_files_are_left_alone_and_too_large_ones_refused():
+def test_small_files_are_left_alone_and_large_ones_kept():
+    """8 MB is a target, not a limit: a file still over it after every step is returned, never refused."""
+    import asyncio
+
+    from app.api.vendor import sized
+
     small = _chair_glb()
     assert fit_glb(small, len(small))[0] == small
-    assert len(small) < MAX_GLB_BYTES or enforce(small)
-    with pytest.raises(GlbTooLarge, match="still"):
-        import app.services.glb_size as glb_size
-
-        glb_size.MAX_GLB_BYTES, keep = 100, glb_size.MAX_GLB_BYTES
-        try:
-            enforce(small)
-        finally:
-            glb_size.MAX_GLB_BYTES = keep
+    over, report = fit_glb(small, 100)  # an impossible target
+    assert len(over) > 100 and read_glb(over) and report["after"] == len(over)
+    glb, _, components = asyncio.run(sized(small, None, {"components": []}))
+    assert read_glb(glb) and components["file"]["bytes"] == len(glb)
