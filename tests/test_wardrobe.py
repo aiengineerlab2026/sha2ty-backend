@@ -144,6 +144,10 @@ def test_generate_builds_a_child_wardrobe_without_meshy(tmp_path, monkeypatch):
     async def no_try(*_args):
         raise AssertionError("no generation try is used")
 
+    async def astra(*_args):
+        return "astra"  # the admin chose a GPT generator: the builder makes wardrobes
+
+    monkeypatch.setattr(vendor.generator_setting, "current", astra)
     monkeypatch.setattr(vendor, "extract_product_details", no_details)
     monkeypatch.setattr(vendor.vision, "ask_json", layout)
     monkeypatch.setattr(vendor, "take_try", no_try)
@@ -161,3 +165,43 @@ def test_generate_builds_a_child_wardrobe_without_meshy(tmp_path, monkeypatch):
     assert [c["id"] for c in doc["components"]][:4] == ["wardrobe_body", "back_panel", "plinth", "door_left"]
     assert all(not c["name"].startswith(("Part", "جزء")) for c in doc["components"])
     assert check_glb(next(iter(uploads.values())), "wardrobe")["ok"]
+
+
+def test_meshy_chosen_by_the_admin_makes_wardrobes_too(tmp_path, monkeypatch):
+    """The admin's generator is kept: with Meshy chosen, a single-photo wardrobe goes to Meshy, not the builder."""
+    calls = {}
+
+    async def no_details(*_args, **_kwargs):
+        return None
+
+    async def no_layout(*_args, **_kwargs):
+        raise AssertionError("the builder must not run when Meshy is chosen")
+
+    class Meshy:
+        async def create_image_to_3d_task(self, _options, **kwargs):
+            calls.update(kwargs)
+            return "mesh-1"
+
+    async def one_try(*_args):
+        return 4
+
+    async def meshy(*_args):
+        return "meshy"
+
+    monkeypatch.setattr(vendor.generator_setting, "current", meshy)
+    monkeypatch.setattr(vendor, "extract_product_details", no_details)
+    monkeypatch.setattr(vendor.vision, "ask_json", no_layout)
+    monkeypatch.setattr(vendor, "take_try", one_try)
+    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    app.dependency_overrides.update({vendor.current_user: lambda: "platform-1", vendor.get_meshy: lambda: Meshy(), vendor.get_settings: lambda: s})
+    try:
+        with TestClient(app) as client:
+            png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+            body = client.post("/api/vendor/generate", files={"image": ("w.png", png, "image/png")}, data={"category": "wardrobe"}).json()
+    finally:
+        app.dependency_overrides.clear()
+    assert body["provider"] == "meshy" and body["task_id"] == "mesh-1"
+    assert calls["image"] == png and "wardrobe" in calls["texture_prompt"]  # the photo itself, to Meshy image-to-3d
+    # A wardrobe built before (cached under the builder's key) is never served for a Meshy request.
+    assert vendor.glb_cache_key(png, "u", "meshy", "wardrobe", "", True, "", vendor.builds_wardrobe("meshy", "wardrobe", "", False)) != \
+        vendor.glb_cache_key(png, "u", "meshy", "wardrobe", "", True, "", True)

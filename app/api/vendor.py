@@ -40,7 +40,7 @@ from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 logger = logging.getLogger(__name__)
-GLB_CACHE_VERSION = "vendor-glb-v3"  # v3: remeshed, under 8 MB (v2: chair / sofa parts, part prompts)
+GLB_CACHE_VERSION = "vendor-glb-v4"  # v4: Meshy Image to Image with the furniture type (v3: remeshed, under 8 MB)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -165,10 +165,17 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
     )
 
 
-def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "") -> str:
+def builds_wardrobe(provider: str, category: str, kind: str, two_states: bool) -> bool:
+    """Whether the photo-layout builder (services/wardrobe.py) makes this model instead of the admin's generator. The
+    admin's choice is kept: with Meshy chosen, Meshy makes every single-photo model, wardrobes too. The builder makes
+    wardrobes for the GPT generators, and a wardrobe's open and closed states always (only it lines them up exactly)."""
+    return furniture_family(category, kind or None) == "wardrobe" and (two_states or provider != "meshy")
+
+
+def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "", procedural: bool = False) -> str:
     """Bump GLB_CACHE_VERSION when generation changes (prompts, providers): older models are not reused."""
     other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
-    if furniture_family(category, kind or None) == "wardrobe":
+    if procedural:  # a built wardrobe is never served for a request the admin's generator makes, nor the reverse
         other += "|procedural-2"  # 2: colours, decoration and the appearance check (1 made white wardrobes)
     return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
@@ -368,6 +375,7 @@ async def generate_model(
     open_image: Annotated[UploadFile | None, File()] = None,
 ) -> GenerateAccepted | GenerateReady:
     provider = await generator_setting.current(settings, request.app.state.auth_http)
+    logger.info("Generate: generator=%s (admin setting) category=%r kind=%r", provider, category, kind)
     raw = await image.read() if image is not None else b""
     open_raw = await open_image.read() if open_image is not None else b""
     open_mime = read_upload(open_raw, open_image.content_type if open_image else "", settings) if open_raw else "image/png"
@@ -385,7 +393,7 @@ async def generate_model(
     db = request.app.state.auth_http
     # The same photo, vendor and options → the model generated before (model_cache): no vision call,
     # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
-    cache_key = glb_cache_key(raw + open_raw, user_id, provider, category, title, textured, kind) if raw else None
+    cache_key = glb_cache_key(raw + open_raw, user_id, provider, category, title, textured, kind, builds_wardrobe(provider, category, kind, bool(open_raw))) if raw else None
     hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
     if hit and hit.get("glb_url"):
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
@@ -409,8 +417,9 @@ async def generate_model(
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
     # Wardrobes are flat panels: rebuilt from the photo's layout as real doors, drawers, shelves and handles instead of
-    # cut from a fused image-to-3D surface. No generation try is used (only the vision model is called).
-    if raw and furniture_family(category, kind or None) == "wardrobe":
+    # cut from a fused image-to-3D surface, unless the admin chose Meshy (builds_wardrobe). No generation try is used
+    # (only the vision model is called).
+    if raw and builds_wardrobe(provider, category, kind, bool(open_raw)):
         details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
         try:
             built = await procedural_wardrobe(request, settings, raw, mime, category, title, kind, lang, details, open_raw or None, open_mime)
