@@ -59,21 +59,36 @@ def _table(textured=False):
 
 
 def test_a_table_with_separate_legs_becomes_a_tabletop_and_four_legs():
-    glb, doc = segment_glb(_table(), "table")
+    original = _table()
+    glb, doc = segment_glb(original, "table")
     names = [c["name"] for c in doc["components"]]
     assert doc["separated"] and doc["segmented"]
     assert "Tabletop" in names and sum(n.startswith("Leg") for n in names) == 4
     assert inspect_glb(glb, "table")["separated"]  # the exported file really has the meshes
+    before = trimesh.load(trimesh.util.wrap_as_stream(original), file_type="glb", force="scene").bounds
+    after = trimesh.load(trimesh.util.wrap_as_stream(glb), file_type="glb", force="scene").bounds
+    assert abs((after[1] - after[0]) - (before[1] - before[0])).max() < 1e-3  # the split did not rescale it
 
 
-def test_legs_fused_to_a_sofa_body_are_cut_from_the_bottom_band():
-    # Legs sharing a corner vertex with the body: one connected surface, split only by the leg band.
+def test_sofa_legs_that_only_meet_the_body_at_a_corner_are_not_rescaled():
+    # A shared corner is not a shared edge, so the legs are still separate pieces. They may be named; the body is not sliced, and the size stays.
     body = _box(2.0, 0.7, 0.9, y=0.1)
     legs = [_box(0.06, 0.1, 0.06, x=sx * (1.0 - 0.03), z=sz * (0.45 - 0.03)) for sx in (-1, 1) for sz in (-1, 1)]
-    glb, doc = segment_glb(_one_mesh_glb(body, *legs), "sofa")
-    names = [c["name"] for c in doc["components"]]
-    assert "Legs" in names or sum(n.startswith("Leg") for n in names) == 4
-    assert "Frame" in names
+    raw = _one_mesh_glb(body, *legs)
+    split = segment_glb(raw, "sofa")
+    assert split is not None
+    glb, doc = split
+    assert all(not c["name"].startswith("Part") for c in doc["components"])
+    before = trimesh.load(trimesh.util.wrap_as_stream(raw), file_type="glb", force="scene").bounds
+    after = trimesh.load(trimesh.util.wrap_as_stream(glb), file_type="glb", force="scene").bounds
+    assert abs((after[1] - after[0]) - (before[1] - before[0])).max() < 1e-3
+
+
+def test_a_door_and_a_lamp_are_not_cut_into_fragments():
+    door = _one_mesh_glb(_box(0.9, 2.1, 0.04))
+    lamp = _one_mesh_glb(_box(0.3, 0.04, 0.3, y=1.4), _box(0.04, 1.4, 0.04))  # shade fused? separate, but not a named furniture part
+    assert segment_glb(door, "door") is None
+    assert segment_glb(lamp, "lighting") is None  # no reliable part names: the original mesh is kept
 
 
 def test_a_solid_block_is_not_split_and_says_so():
@@ -121,10 +136,11 @@ def test_the_generate_step_saves_the_split_model_and_keeps_the_original():
 
 
 def _chair(textured=False):
-    # 0.5 m chair, front +Z: 4 legs to 0.45 m, an 8 cm seat cushion, a backrest at the back up to 1 m.
-    legs = [_box(0.04, 0.45, 0.04, x=sx * 0.23, z=sz * 0.23) for sx in (-1, 1) for sz in (-1, 1)]
-    seat = _box(0.5, 0.08, 0.5, y=0.45)
-    back = _box(0.5, 0.47, 0.05, y=0.53, z=-0.225)
+    # 0.5 m chair, front +Z. The pieces do not share vertices: a generated chair whose parts only touch at a
+    # corner is one surface and is kept whole (see the fused-sofa test).
+    legs = [_box(0.04, 0.448, 0.04, x=sx * 0.23, z=sz * 0.23) for sx in (-1, 1) for sz in (-1, 1)]
+    seat = _box(0.5, 0.08, 0.5, y=0.452)
+    back = _box(0.5, 0.47, 0.05, y=0.536, z=-0.23)
     return _one_mesh_glb(*(p.subdivide().subdivide() for p in (*legs, seat, back)), textured=textured)  # dense, like generated meshes
 
 

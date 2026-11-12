@@ -54,7 +54,7 @@ def size_of(boxes: list[np.ndarray]) -> dict[str, float]:
 
 def measure(glb: bytes, parts: list[dict[str, Any]], dimensions: dict[str, float] | None, materials: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """[{name, width, height, depth, count}] in metres for each part, in the file's order; parts are named from the
-    request's part list (by id, else by order). Scaled per axis so the whole model is the requested size."""
+    request's part list (by id, else by order). One scale factor, so a requested size never stretches a part."""
     scene = trimesh.load(io.BytesIO(glb), file_type="glb", force="scene")
     meshes = []
     for node in scene.graph.nodes_geometry:
@@ -68,7 +68,9 @@ def measure(glb: bytes, parts: list[dict[str, Any]], dimensions: dict[str, float
     all_points = np.vstack([v for _, v, _ in meshes])
     extent = all_points.max(0) - all_points.min(0)
     want = np.array([(dimensions or {}).get(k) or 0 for k in ("width", "height", "depth")], dtype=float)
-    scale = np.where((want > 0) & (extent > 1e-9), want / np.maximum(extent, 1e-9), 1.0)
+    ratios = [want[i] / extent[i] for i in range(3) if want[i] > 0 and extent[i] > 1e-9]
+    k = float(np.exp(np.mean(np.log(ratios)))) if ratios else 1.0
+    scale = np.array([k, k, k])
     names = {p.get("id"): p.get("name") for p in parts}
     out = []
     for i, (node, vertices, faces) in enumerate(meshes):

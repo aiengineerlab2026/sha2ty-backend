@@ -23,9 +23,10 @@ def test_parts_are_measured_with_repeated_pieces_once_and_soft_furnishings_left_
     assert rows["Frame"]["count"] == 1 and round(rows["Frame"]["width"], 2) == 2.0
 
 
-def test_sizes_follow_the_requested_size():
+def test_sizes_keep_the_file_proportions_when_the_requested_size_differs():
     rows = {r["name"]: r for r in measure(glb(), [{"id": "legs", "name": "Legs"}, {"id": "frame", "name": "Frame"}], {"width": 1.0, "height": 0.875, "depth": 1.05})}
-    assert round(rows["Frame"]["width"], 2) == 1.0 and round(rows["Legs"]["height"], 2) == 0.4
+    # The file's frame is 2 m wide and a leg is 0.4 m tall. One scale keeps that ratio.
+    assert abs(rows["Frame"]["width"] / rows["Legs"]["height"] - 2.0 / 0.4) < 0.05
 
 
 def test_fabric_covered_parts_get_a_size_soft_furnishings_do_not():
