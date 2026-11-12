@@ -177,8 +177,11 @@ def furniture_type(category: str | None, kind: str | None = None, details=None) 
     """The furniture type for Meshy's prompts: what the vendor typed ("child wardrobe"), else what the photo reading
     says it is, else the category's name."""
     typed = " ".join((kind or "").split())[:60]
+    noun = TYPE_NAMES.get((category or "").strip())
     if typed:
-        return typed
+        # A specific category stays named: "wardrobe" with "kids" typed is a "wardrobe (kids)", never just "kids".
+        specific = noun and category not in ("furniture", "auto") and noun.lower() not in typed.lower()
+        return f"{noun} ({typed})" if specific else typed
     read = _read_type(details)
     return read or TYPE_NAMES.get((category or "").strip(), "piece of furniture")
 
@@ -196,15 +199,63 @@ def meshy_prompt(category: str | None, kind: str | None = None, details=None) ->
     )
 
 
+# The reconstruction brief for every photo → 3D conversion ({object_type}: the furniture type). GPT Astra / Sol write
+# the model themselves and get all of it. Meshy's Image to 3D takes text only as `texture_prompt` (texture guidance, at
+# most 800 characters): it gets the brief's texture requirements (meshy_texture_prompt); its geometry follows the photo,
+# kept as given (`image_enhancement: false`), remeshed and split by the settings that act on geometry.
+RECONSTRUCTION_PROMPT = """Create a high-quality, photorealistic, structurally accurate 3D reconstruction of the {object_type} shown in the reference image.
+
+Geometry and Structure:
+- Reproduce the exact shape, proportions, dimensions, orientation, and visible components.
+- Preserve all structural details, edges, curves, openings, and component relationships.
+- Generate clean, solid, realistic geometry with correct topology.
+- Keep flat surfaces flat, straight edges straight, and curved surfaces smooth.
+- Preserve the original arrangement of components without inventing or removing parts.
+- Avoid warped, melted, stretched, floating, overlapping, or disconnected geometry.
+
+Materials and Textures:
+- Match the reference image's colors, patterns, textures, and materials as closely as possible.
+- Preserve original material boundaries and component-specific colors.
+- Generate realistic PBR materials with correct UV mapping.
+- Avoid blurry textures, artificial wrinkles, discoloration, and unwanted reflections.
+
+Modularity:
+- Separate meaningful physical components into independently editable meshes where supported.
+- Preserve each component's original geometry, materials, and position.
+- Avoid arbitrary mesh fragmentation.
+
+Accuracy Requirements:
+- Reconstruct the same object, not a redesigned or stylized variation.
+- Preserve visible details and mechanical relationships.
+- Infer hidden surfaces conservatively using realistic construction.
+- Prioritize structural accuracy, reference-image similarity, and clean geometry over unnecessary decorative details.
+
+Strictly avoid: Geometry distortion, missing components, incorrect proportions, invented features, texture stretching, color changes, and malformed surfaces.
+
+The final result should resemble a professionally manufactured 3D product model that faithfully matches the reference image."""
+
+
+def reconstruction_prompt(category: str | None, kind: str | None = None, details=None) -> str:
+    return RECONSTRUCTION_PROMPT.format(object_type=furniture_type(category, kind, details))
+
+
+# The brief's texture requirements, in its own words: what Meshy's texture_prompt can act on.
+MESHY_TEXTURE_BRIEF = (
+    "Photorealistic {object_type}: the same object as the reference image, not a redesigned or stylized variation. "
+    "Match the reference image's colors, patterns, textures, and materials as closely as possible. "
+    "Preserve original material boundaries and component-specific colors. "
+    "Realistic PBR materials with correct UV mapping. "
+    "Avoid blurry textures, artificial wrinkles, discoloration, unwanted reflections, texture stretching, and color changes."
+)
+
+
 def meshy_texture_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
-    """Meshy Image to 3D `texture_prompt`: it guides the texture only (docs: "Text that guides the texture, up to 800
-    characters"), so it holds only what texturing can use: the type, the photo's colours and materials. Parts and
-    file size are not texture: they go to fields that act on them (Auto Split's part list, `target_polycount`)."""
-    what = _what(category, title, details, kind)  # the product as named: type, title, what the photo reading saw
-    body = (
-        f"This is {what}. Texture it with the reference image's exact colours, patterns, textures and materials: do not "
-        f"recolour, stylise, brighten or add colours that are not in the photo. {details_text(details)}"
-    ).strip()
+    """Meshy Image to 3D `texture_prompt`: texture guidance only (docs: "Text that guides the texture, up to 800
+    characters"): the reconstruction brief's texture requirements for this type, then the photo's colours and
+    materials as read, cut at a whole sentence to fit. Geometry and parts go to the settings that act on them."""
+    brief = MESHY_TEXTURE_BRIEF.format(object_type=furniture_type(category, kind, details))
+    name = (title or "").strip()
+    body = f"{brief} {f'The product: “{name[:80]}”. ' if name else ''}{details_text(details)}".strip()
     if len(body) <= MESHY_TEXTURE_PROMPT_MAX:
         return body
     cut = body[:MESHY_TEXTURE_PROMPT_MAX]
@@ -212,10 +263,13 @@ def meshy_texture_prompt(category: str | None, title: str | None = None, details
 
 
 def astra_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
+    """GPT Astra / Sol write the GLB themselves: the whole reconstruction brief, then what the photo reading measured
+    and what the file must be."""
     what = _what(category, title, details, kind)
     hidden = f" The photo does not show {details.hidden}: keep those parts simple and plausible." if details and details.hidden else ""
     return (
-        f"Create a 3D model of {what} shown in the photo. {colour_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
+        f"{reconstruction_prompt(category, kind, details)}\n\n"
+        f"The object: {what}. {focus_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
         f"{modular_hint(category, kind, details)} {size_rule(category, kind or _read_type(details))} "
         "Keep its real proportions, standing upright as it does in a room. "
         "Use few vertices per part and at most 1024 px textures (or plain material colours). "

@@ -416,9 +416,10 @@ def test_vendor_measures_a_photo_before_converting(tmp_path, monkeypatch):
 
 
 def test_furniture_type_names_the_object_in_meshy_and_astra_prompts():
-    assert "a single corner sofa" in meshy_texture_prompt("furniture", "Oslo", kind="corner sofa")
+    assert meshy_texture_prompt("furniture", "Oslo", kind="corner sofa").startswith("Photorealistic corner sofa: the same object as the reference image")
+    assert "3D reconstruction of the corner sofa shown in the reference image" in astra_prompt("furniture", "Oslo", kind="corner sofa")
     assert "a single corner sofa" in astra_prompt("furniture", "Oslo", kind="corner sofa")
-    assert "such as a sofa, bed" in meshy_texture_prompt("furniture")  # no type typed: the generic description
+    assert meshy_texture_prompt("furniture").startswith("Photorealistic piece of furniture")  # no type typed: the category
     assert "wardrobe" in meshy_texture_prompt("wardrobe", kind="ignored for other categories")
 
 
