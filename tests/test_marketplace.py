@@ -87,6 +87,8 @@ def test_request_is_built_from_the_saved_version_and_not_duplicated(env):
     assert spec["dimensions"] == {"width": 2.1, "height": 1.1, "depth": 2.1}
     assert spec["materials"] == [{"part": "Headboard", "part_id": "headboard", "mapUrl": f"{FILES}/{ALICE}/t.png", "color": "#ffffff", "tile": 0.25, "mapping": "box"}]
     assert spec["glb_url"].endswith("a.glb") and spec["source"]["model_id"] == MODEL
+    # The request viewer opens doors and drawers like the editor: the parts by id, read-only.
+    assert spec["part_document"]["components"] == [{"id": "headboard", "name": "Headboard", "editable": False}, {"id": "frame", "name": "Frame", "editable": False}]
     # Asking again for the same version returns the open request.
     assert client.post(f"/api/designs/{bed['id']}/request", json=body).json()["id"] == task["id"]
     assert len(fake.tables["freelance_tasks"]) == 1
@@ -284,3 +286,33 @@ def test_cancelling_deletes_the_customers_open_request_and_their_cancelled_ones(
     assert client.delete(f"/api/tasks/{awarded}").status_code == 404  # a vendor was hired: no longer cancellable
     assert client.delete(f"/api/tasks/{open_}").status_code == 204
     assert {t["id"] for t in fake.tables["freelance_tasks"]} == {awarded, bobs}  # the open one and the old cancelled one are gone
+
+
+def test_a_request_keeps_its_model_views_and_a_save_refreshes_them(env):
+    fake, client = env
+    bed = _bed(client)
+    views = {"closed_url": f"{FILES}/{ALICE}/closed.png", "open_url": f"{FILES}/{ALICE}/open.png", "opened": 2,
+             "parts": [{"n": 1, "id": "shelf_1", "name": "Shelf 1", "added": True, "width": 40, "height": 1.8, "depth": 45, "thickness": 1.8, "offsets": {"top": 30, "bottom": 50}}]}
+    outside = {**views, "closed_url": "https://evil.example/x.png"}
+    assert client.post(f"/api/designs/{bed['id']}/request", json={"views": outside}).status_code == 422
+    task = client.post(f"/api/designs/{bed['id']}/request", json={"views": views}).json()
+    assert task["spec"]["design"]["views"]["parts"][0]["added"] is True
+    # A new save moves the request to the new version (its old pictures go) and says so; the editor sends new ones.
+    saved = client.post(f"/api/designs/{bed['id']}/versions", json={"item": {"dimensions": {"width": 2.3, "height": 1.1, "depth": 2.1}}}).json()
+    assert saved["requests"] == 1 and "views" not in fake.tables["freelance_tasks"][0]["spec"]["design"]
+    fresh = {**views, "closed_url": f"{FILES}/{ALICE}/closed2.png"}
+    assert client.put(f"/api/designs/{bed['id']}/request-views", json=fresh).json() == {"updated": 1}
+    assert fake.tables["freelance_tasks"][0]["spec"]["design"]["views"]["closed_url"].endswith("closed2.png")
+    assert client.put(f"/api/designs/{bed['id']}/request-views", json=outside).status_code == 422
+
+
+def test_only_the_customer_replaces_a_requests_pictures(env):
+    fake, client = env
+    bed = _bed(client)
+    task = client.post(f"/api/designs/{bed['id']}/request", json={}).json()
+    views = {"closed_url": f"{FILES}/{ALICE}/c.png", "open_url": f"{FILES}/{ALICE}/o.png", "detail_urls": [f"{FILES}/{ALICE}/d1.png"], "version": 2, "parts": []}
+    assert client.put(f"/api/tasks/{task['id']}/views", json=views, headers={"x-test-user": BOB}).status_code == 404
+    assert client.put(f"/api/tasks/{task['id']}/views", json={**views, "open_url": "https://evil.example/o.png"}).status_code == 422
+    assert client.put(f"/api/tasks/{task['id']}/views", json=views).json() == {"updated": 1}
+    saved = fake.tables["freelance_tasks"][0]["spec"]["design"]["views"]
+    assert saved["version"] == 2 and saved["detail_urls"] == [f"{FILES}/{ALICE}/d1.png"]

@@ -322,3 +322,77 @@ def _components(pairs, n: int, np):
     roots = np.array([root(i) for i in range(n)])
     _, labels = np.unique(roots, return_inverse=True)
     return labels
+
+
+_FACES = (  # each face of a unit box: its normal and its four corners (0 = min, 1 = max per axis), counter-clockwise
+    ((1, 0, 0), ((1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1))),
+    ((-1, 0, 0), ((0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0))),
+    ((0, 1, 0), ((0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0))),
+    ((0, -1, 0), ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1))),
+    ((0, 0, 1), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))),
+    ((0, 0, -1), ((0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0))),
+)
+
+
+def append_boxes(data: bytes, boxes: list[dict[str, Any]]) -> tuple[bytes, list[dict[str, Any]]]:
+    """The same GLB with simple box parts added (estimated shelves, rails…): `boxes` are {name, min, max, color}
+    in scene coordinates. Each becomes its own mesh, material and root node at the end of the scene; nothing that
+    was in the file changes (its bytes are kept and new data is appended). Returns the GLB and each new part's
+    mesh / node / material indexes, in order."""
+    import struct
+
+    doc = _gltf_json(data)
+    chunk_len = int.from_bytes(data[12:16], "little")
+    rest = data[20 + chunk_len :]
+    buffers = doc.setdefault("buffers", [])
+    if buffers and buffers[0].get("uri"):
+        raise ValueError("the GLB's buffer is external")
+    bin_data = b""
+    if len(rest) >= 8 and rest[4:8] == b"BIN\x00":
+        bin_len = int.from_bytes(rest[0:4], "little")
+        bin_data = rest[8 : 8 + bin_len]
+    if not buffers:
+        buffers.append({"byteLength": 0})
+    out = bytearray(bin_data)
+    views, accessors = doc.setdefault("bufferViews", []), doc.setdefault("accessors", [])
+    meshes, materials, nodes = doc.setdefault("meshes", []), doc.setdefault("materials", []), doc.setdefault("nodes", [])
+    scene = doc.setdefault("scenes", [{"nodes": []}])[doc.get("scene", 0)]
+    added = []
+
+    def view(blob: bytes, target: int) -> int:
+        out.extend(b"\0" * (-len(out) % 4))
+        views.append({"buffer": 0, "byteOffset": len(out), "byteLength": len(blob), "target": target})
+        out.extend(blob)
+        return len(views) - 1
+
+    for box in boxes:
+        lo, hi = box["min"], box["max"]
+        positions, normals, indices = [], [], []
+        for normal, corners in _FACES:
+            start = len(positions)
+            for c in corners:
+                positions.append([hi[i] if c[i] else lo[i] for i in range(3)])
+                normals.append(normal)
+            indices += [start, start + 1, start + 2, start, start + 2, start + 3]
+        pos_view = view(struct.pack(f"<{len(positions) * 3}f", *[v for p in positions for v in p]), 34962)
+        nrm_view = view(struct.pack(f"<{len(normals) * 3}f", *[float(v) for n in normals for v in n]), 34962)
+        idx_view = view(struct.pack(f"<{len(indices)}H", *indices), 34963)
+        accessors += [
+            {"bufferView": pos_view, "componentType": 5126, "count": len(positions), "type": "VEC3", "min": [float(v) for v in lo], "max": [float(v) for v in hi]},
+            {"bufferView": nrm_view, "componentType": 5126, "count": len(normals), "type": "VEC3"},
+            {"bufferView": idx_view, "componentType": 5123, "count": len(indices), "type": "SCALAR"},
+        ]
+        a = len(accessors) - 3
+        rgb = box.get("color") or "#D9D4CC"
+        factor = [int(rgb[i : i + 2], 16) / 255 for i in (1, 3, 5)] + [1.0]
+        materials.append({"name": box["name"], "pbrMetallicRoughness": {"baseColorFactor": factor, "metallicFactor": 0.0, "roughnessFactor": 0.8}})
+        meshes.append({"name": box["name"], "primitives": [{"attributes": {"POSITION": a, "NORMAL": a + 1}, "indices": a + 2, "material": len(materials) - 1}]})
+        nodes.append({"name": box["name"], "mesh": len(meshes) - 1})
+        scene.setdefault("nodes", []).append(len(nodes) - 1)
+        added.append({"mesh": len(meshes) - 1, "node": len(nodes) - 1, "material": len(materials) - 1, "primitive": 0})
+    out.extend(b"\0" * (-len(out) % 4))
+    buffers[0]["byteLength"] = len(out)
+    text = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode()
+    text += b" " * (-len(text) % 4)
+    body = len(text).to_bytes(4, "little") + b"JSON" + text + len(out).to_bytes(4, "little") + b"BIN\x00" + bytes(out)
+    return data[:8] + (12 + len(body)).to_bytes(4, "little") + body, added

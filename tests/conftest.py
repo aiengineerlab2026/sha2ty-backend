@@ -28,3 +28,17 @@ def generator_from_default(monkeypatch, request):
     from app.services import generator_setting
 
     monkeypatch.setattr(generator_setting, "current", default)
+
+
+@pytest.fixture(autouse=True)
+def no_mesh_analysis(monkeypatch, request):
+    """Endpoint tests never call a real vision model for the mesh analysis: none is made (test_mesh_analysis
+    exercises it with its own answers)."""
+    if request.node.module.__name__.endswith("test_mesh_analysis"):
+        return
+    from app.api import vendor
+
+    async def none(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(vendor, "analysed", none)

@@ -34,13 +34,14 @@ from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
+from app.services import animation, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService
 from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 logger = logging.getLogger(__name__)
-GLB_CACHE_VERSION = "vendor-glb-v4"  # v4: Meshy Image to Image with the furniture type (v3: remeshed, under 8 MB)
+GLB_CACHE_VERSION = "vendor-glb-v6"  # v6: animation configuration (v5: vision mesh analysis before Meshy)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -292,6 +293,38 @@ def validated(glb: bytes, components: dict, category: str | None, kind: str | No
     return {**components, "validation": with_appearance(check_glb(glb, furniture_family(category, kind or None)), glb, photo, bbox)}
 
 
+async def analysed(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str) -> mesh_analysis.MeshAnalysis | None:
+    """The photo's physical components (services/mesh_analysis.py), read by the configured vision model before
+    Meshy runs. None when there is no vision model or no usable answer: generation goes on without it."""
+    model = await vision.current_model(settings, request.app.state.auth_http)
+    if not vision.configured(settings, model):
+        return None
+    image = {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(photo).decode('ascii')}"}
+    client = vision.client_for(request.app.state, model)
+
+    async def ask(prompt: str, schema: dict) -> str | None:
+        return await vision.ask_json([{"type": "input_text", "text": prompt}, image], schema, "mesh_analysis", settings, client, model)
+
+    analysis = await mesh_analysis.analyze(ask, object_description(category, title, kind or None), kind.strip())
+    logger.info("Mesh analysis: %s", [(c.id, c.visibility, c.separateMesh) for c in analysis.components] if analysis else None)
+    return analysis
+
+
+def analysis_checked(components: dict, pending: dict) -> dict:
+    """The generated meshes matched to the vision analysis (names in English and Arabic; geometry untouched), the
+    analysis and where its prompt went stored with them for later editing and regeneration."""
+    raw = pending.get("analysis")
+    analysis = mesh_analysis.MeshAnalysis.model_validate(raw) if raw else None
+    components = mesh_analysis.match(components, analysis)
+    if pending.get("meshy_conditioning"):
+        components = {**components, "conditioning": pending["meshy_conditioning"]}
+    if (components.get("modularity") or {}).get("level") == "partial":
+        components = {**components, "limits": " ".join(x for x in (components.get("limits"), components["modularity"]["note"]) if x)}
+    if analysis is None:
+        components = {**components, "limits": " ".join(x for x in (components.get("limits"), "The photo was not analysed into components before generation (no vision model answer).") if x)}
+    return components
+
+
 class StatesUnusable(Exception):
     """Two states were asked for and cannot be made: said to the vendor (no image-to-3D fallback, which has one)."""
 
@@ -340,7 +373,8 @@ async def procedural_wardrobe(
             raise StatesUnusable("The wardrobe built from the photos failed its checks: " + " ".join(report["errors"][:3]))
         return None
     report = await run_in_threadpool(with_appearance, report, glb, photo, details.bbox if details else None)
-    closed = {**wardrobe.components_doc(glb, names), "validation": report, "layout": spec.model_dump(mode="json")}
+    _, closed = await run_in_threadpool(animation.configure, glb, wardrobe.components_doc(glb, names))  # doors and drawers by name
+    closed = {**closed, "validation": report, "layout": spec.model_dump(mode="json")}
     if not open_photo:
         return glb, closed, None
     open_glb, open_names = await run_in_threadpool(wardrobe.build, spec, lang, "open")
@@ -449,6 +483,7 @@ async def generate_model(
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None)
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
             glb, components = await named(request, glb, components, category, kind)
+            glb, components = await run_in_threadpool(animation.configure, glb, components)
             glb, source_glb, components = await sized(glb, source_glb, components)
             components = await run_in_threadpool(validated, glb, components, category, kind, raw, details.bbox if details else None)
             url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
@@ -466,9 +501,19 @@ async def generate_model(
     # Image to 3D is the selected Meshy model. Image to Image only redraws a 2D picture (nano-banana / GPT Image)
     # and is not a 3D conversion. The uploaded bytes go in the request: a public URL Meshy cannot fetch never starts a task.
     kind_type = furniture_type(category, kind or None, details)
+    # Vision mesh analysis first: the photo's components shape the prompt. Meshy takes it where it can act on it
+    # (texture_prompt, Auto Split's part list); `conditioning` records where each part went, nothing is dropped.
+    analysis = await analysed(request, settings, raw, mime, category, title, kind) if raw else None
+    base_texture = meshy_texture_prompt(category, title, details, kind or None)
+    split = split_prompt(category, kind or None)
+    conditioning = None
+    if analysis:
+        base_texture = mesh_analysis.texture_prompt(analysis, base_texture)
+        split = mesh_analysis.split_prompt(analysis) or split
+        conditioning = mesh_analysis.conditioning(mesh_analysis.meshy_prompt(analysis), base_texture, split, settings.meshy_auto_split)
     mesh = {
         "textured": textured,
-        "texture_prompt": meshy_texture_prompt(category, title, details, kind or None),
+        "texture_prompt": base_texture,
         "target_polycount": target_polycount(category, kind or None),
     }
     try:
@@ -483,7 +528,7 @@ async def generate_model(
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    logger.info("Meshy image-to-3d %s: furniture_type=%r category=%r", task_id, kind_type, category)
+    logger.info("Meshy image-to-3d %s: furniture_type=%r category=%r analysed=%s split=%r", task_id, kind_type, category, bool(analysis), split)
     request.app.state.pending_cdn[task_id] = {
         "stage": "mesh",
         "mesh_task_id": task_id,
@@ -494,7 +539,9 @@ async def generate_model(
         "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
         "category": category,
         "kind": kind,
-        "split": split_prompt(category, kind or None) if settings.meshy_auto_split else None,  # Auto Split parts
+        "split": split if settings.meshy_auto_split else None,  # Auto Split parts
+        "analysis": analysis.model_dump(mode="json") if analysis else None,
+        "meshy_conditioning": conditioning,
         "textured": textured,
         "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
     }
@@ -623,7 +670,9 @@ async def get_task(
                 data, source_glb, components = split_dest.read_bytes(), data, {**info, "method": "meshy_auto_split"}
         if components is None:
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
+        components = analysis_checked(components, pending)
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        data, components = await run_in_threadpool(animation.configure, data, components)  # movable parts, estimated interior
         if pending.get("conditioning"):  # said, not hidden: the type did not shape this model's image
             components = {**components, "limits": " ".join(x for x in (components.get("limits"), pending["conditioning"]) if x)}
         data, source_glb, components = await sized(data, source_glb, components)
