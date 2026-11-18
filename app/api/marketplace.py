@@ -9,7 +9,7 @@ a bid and status changes go through the database functions in tasks.sql.
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -19,10 +19,83 @@ from pydantic import BaseModel, Field
 from app.api.designs import Designs, User
 from app.core.config import get_settings
 from app.services.auth import service_headers
+from app.services.cdn import file_prefixes
 
 router = APIRouter(prefix="/api", tags=["marketplace"])
 
 OPEN = ("published", "awarded", "in_progress")
+
+
+class ViewPart(BaseModel):
+    """One row of the report's parts table, measured from the saved model in the browser (cm)."""
+
+    n: int = Field(ge=1, le=1000)
+    id: str = Field(max_length=200)
+    name: str = Field(max_length=200)
+    added: bool = False
+    quantity: int = Field(default=1, ge=1, le=1000)
+    material: str | None = Field(default=None, max_length=120)
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    width: float = Field(ge=0, le=10_000)
+    height: float = Field(ge=0, le=10_000)
+    depth: float = Field(ge=0, le=10_000)
+    thickness: float = Field(ge=0, le=10_000)
+    # Distances from the compartment's inside faces (added parts): top, bottom, left, right, front, back.
+    offsets: dict[str, float] | None = None
+    shown: bool = True  # labelled in the opened picture
+    # Its name in Arabic, both without position or number; a main furniture part (not hardware); its material's type
+    # and finish when the customer set them.
+    name_ar: str | None = Field(default=None, max_length=200)
+    main_name: str | None = Field(default=None, max_length=200)
+    main_name_ar: str | None = Field(default=None, max_length=200)
+    main: bool | None = None
+    kind: str | None = Field(default=None, max_length=40)
+    finish: str | None = Field(default=None, pattern=r"^(matte|satin|gloss)$")
+    # The wood chosen in the editor: board type and thickness (mm), the surface on it, a paint's colour, the texture.
+    board: str | None = Field(default=None, max_length=40)
+    board_mm: float | None = Field(default=None, ge=0, le=200)
+    surface: str | None = Field(default=None, max_length=120)
+    surface_type: str | None = Field(default=None, max_length=40)
+    paint: str | None = Field(default=None, max_length=120)
+    texture: str | None = Field(default=None, max_length=1000)
+    group: str | None = Field(default=None, pattern=r"^(structure|doors|drawers|shelves|accessories)$")
+    pic: int | None = Field(default=None, ge=0, le=1000)  # its picture: cell `pic` of the parts sheet
+
+
+class Check(BaseModel):
+    """One measurement check made before the report (frontend lib/designs/measure.ts checkMeasurements)."""
+
+    level: Literal["critical", "warning", "info", "error"]  # error: pictures made before the three levels (critical)
+    code: Literal["approx", "mismatch", "units", "missing", "exceeds", "over_request", "axis", "overlap", "joint", "clearance", "drawer", "shelf"]
+    parts: list[str] = Field(default_factory=list, max_length=10)
+    params: dict[str, float | str] = Field(default_factory=dict, max_length=10)
+
+
+class DesignViews(BaseModel):
+    """The two rendered pictures of the saved model (platform storage) and the measurements drawn on them."""
+
+    closed_url: str = Field(max_length=1000)
+    open_url: str = Field(max_length=1000)
+    # Close-ups of the parts whose dimensions do not fit clearly in the opened picture.
+    # One a row of the parts table (frontend MAX_DETAILS).
+    detail_urls: list[str] = Field(default_factory=list, max_length=60)
+    # What each close-up shows: a group of parts (doors, drawers, shelves, structure, accessories).
+    detail_groups: list[str] = Field(default_factory=list, max_length=60)
+    # Front, side and top orthographic views with the overall size (one picture).
+    ortho_url: str | None = Field(default=None, max_length=1000)
+    # What the measurements do not agree on (requested vs model size, parts that overlap…), for the checks page.
+    checks: list[Check] | None = Field(default=None, max_length=300)
+    # 2: dimensions written beside the parts. 1 (or none): numbered markers, which the report no longer shows.
+    version: int = Field(default=1, ge=1, le=100)
+    # Each main part's picture: one sheet of `pic_size` squares, `pic_cols` to a line.
+    pictures_url: str | None = Field(default=None, max_length=1000)
+    pic_size: int = Field(default=512, ge=64, le=2048)
+    pic_cols: int = Field(default=8, ge=1, le=64)
+    scale_known: bool = True
+    # The model's own size as measured from its geometry (cm), beside the requested one.
+    overall: dict[str, float] | None = None
+    opened: int = Field(default=0, ge=0, le=1000)  # movable parts opened in the second picture
+    parts: list[ViewPart] = Field(default_factory=list, max_length=1000)
 
 
 class RequestBody(BaseModel):
@@ -34,6 +107,8 @@ class RequestBody(BaseModel):
     part_ids: list[str] | None = Field(default=None, max_length=500)
     # How many pieces of the model the customer wants made.
     quantity: int = Field(default=1, ge=1, le=1000)
+    # The closed / opened pictures with dimensions for the report (captured by the editor from the saved version).
+    views: DesignViews | None = None
 
 
 def spec_from_version(design: dict[str, Any], version: dict[str, Any], part_ids: list[str] | None = None) -> dict[str, Any]:
@@ -89,6 +164,12 @@ def spec_from_version(design: dict[str, Any], version: dict[str, Any], part_ids:
                 for k, v in names.items()
             ],
             "whole_model": part_ids is None or wanted == set(names),
+            # What the request's viewer needs to open its doors and drawers like the editor (read-only): each part's
+            # id and names, the movable parts' settings and the parts the customer added.
+            "part_document": {
+                "components": [{k: c.get(k) for k in ("id", "name", "nameAr") if c.get(k) is not None} | {"editable": False} for c in components],
+                **{k: (item.get("components") or {}).get(k) for k in ("animation", "added") if (item.get("components") or {}).get(k)},
+            },
             "materials": materials,
             "materials_total": materials_total,
         }
@@ -141,6 +222,8 @@ async def get_request_target(design_id: UUID, request: Request, user_id: User, s
 async def request_implementation(design_id: UUID, body: RequestBody, request: Request, user_id: User, store: Designs) -> dict[str, Any]:
     """Ask vendors to make a saved customised model. One open request per design version (a repeat returns it)."""
     design, version = await _design_version(design_id, user_id, store)
+    if body.views:
+        check_views(body.views)
     client_: httpx.AsyncClient = request.app.state.auth_http
     target = await request_target(design, version, client_)
     if not target["available"]:
@@ -160,11 +243,14 @@ async def request_implementation(design_id: UUID, body: RequestBody, request: Re
             spec = task.get("spec") or {}
             if spec.get("design", {}).get("parts") == wanted_spec["design"]["parts"] and spec.get("quantity", 1) == body.quantity:
                 return task  # the same request again (same version, parts and quantity)
+        spec = spec_from_version(design, version, body.part_ids)
+        if body.views:
+            spec["design"]["views"] = body.views.model_dump()
         row = {
             "customer_id": user_id, "title": design.get("title") or "Custom model", "scope": "item", "service": "furniture",
             "description": body.description.strip(), "location": body.location.strip(), "budget_max": body.budget_max,
             "deadline": body.deadline.isoformat() if body.deadline else None, "status": "published",
-            "spec": {**spec_from_version(design, version, body.part_ids), "audience": target["audience"], "vendor": target["vendor"], "quantity": body.quantity},
+            "spec": {**spec, "audience": target["audience"], "vendor": target["vendor"], "quantity": body.quantity},
             "design_id": str(design_id), "design_version_id": version["id"],
             "audience": target["audience"], "exclusive_vendor_id": (target["vendor"] or {}).get("id"),
         }
@@ -178,6 +264,59 @@ async def request_implementation(design_id: UUID, body: RequestBody, request: Re
             "Requests are not set up yet: run backend/supabase/tasks.sql and marketplace.sql." if missing else "Could not publish the request.",
         )
     return response.json()[0]
+
+
+def check_views(views: DesignViews) -> None:
+    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in (views.closed_url, views.open_url, *views.detail_urls, *([u for u in (views.pictures_url, views.ortho_url) if u]))):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The model views must be uploaded to Sha2ty first.")
+
+
+@router.put("/designs/{design_id}/request-views")
+async def update_request_views(design_id: UUID, views: DesignViews, request: Request, user_id: User, store: Designs) -> dict[str, int]:
+    """New pictures for the design's active requests after a save moved them to its newest version (the old ones
+    showed the model as it was). Only the owner's requests on the current version change."""
+    design, version = await _design_version(design_id, user_id, store)
+    check_views(views)
+    settings = get_settings()
+    base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
+    client: httpx.AsyncClient = request.app.state.auth_http
+    try:
+        found = await client.get(
+            f"{base}/freelance_tasks?customer_id=eq.{user_id}&design_id=eq.{design_id}&design_version_id=eq.{version['id']}&status=in.({','.join(OPEN)})&select=id,spec",
+            headers=service_headers(settings),
+        )
+        updated = 0
+        for task in found.json() if found.status_code < 400 else []:
+            spec = task.get("spec") or {}
+            spec = {**spec, "design": {**(spec.get("design") or {}), "views": views.model_dump()}}
+            done = await client.patch(f"{base}/freelance_tasks?id=eq.{task['id']}", headers=service_headers(settings), json={"spec": spec})
+            updated += done.status_code < 400
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not update the request's model views.") from exc
+    return {"updated": updated}
+
+
+@router.put("/tasks/{task_id}/views")
+async def replace_task_views(task_id: UUID, views: DesignViews, request: Request, user_id: User) -> dict[str, int]:
+    """The customer's own request gets pictures made again from its frozen model (older pictures had numbered
+    markers instead of dimensions). Only the customer; only while the request is active."""
+    check_views(views)
+    settings = get_settings()
+    base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
+    client: httpx.AsyncClient = request.app.state.auth_http
+    try:
+        found = await client.get(f"{base}/freelance_tasks?id=eq.{task_id}&customer_id=eq.{user_id}&status=in.({','.join(OPEN)})&select=id,spec", headers=service_headers(settings))
+        task = (found.json() or [None])[0] if found.status_code < 400 else None
+        if not task or not (task.get("spec") or {}).get("design"):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")
+        spec = task["spec"]
+        spec = {**spec, "design": {**spec["design"], "views": views.model_dump()}}
+        done = await client.patch(f"{base}/freelance_tasks?id=eq.{task_id}", headers=service_headers(settings), json={"spec": spec})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not update the request's model views.") from exc
+    if done.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not update the request's model views.")
+    return {"updated": 1}
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

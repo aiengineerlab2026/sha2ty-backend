@@ -25,7 +25,8 @@ class PlanStore:
 
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
-            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
+            # animation / parts: the movable parts and the part ids they name (the planner plays them), not the whole document.
+            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
@@ -92,6 +93,8 @@ class PlanStore:
                     "company": groups[company_id]["name"],
                     "company_logo": groups[company_id]["logo_url"],
                     **({"components": row.get("components")} if model_id else {}),
+                    # Models of several parts: the planner finds and plays their movable ones by these part ids.
+                    **({"animation": row.get("animation"), "parts": row["parts"]} if len(row.get("parts") or []) > 1 else {}),
                 }
             )
         return {"companies": list(groups.values()), "count": len(rows)}
