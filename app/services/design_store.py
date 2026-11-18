@@ -11,7 +11,8 @@ from fastapi import HTTPException, status
 from app.core.config import Settings
 from app.services.auth import service_headers
 
-LIST_FIELDS = "id,kind,title,source_model_id,plan_id,current_version_id,version_count,thumbnail_url,created_at,updated_at"
+# draft: supabase/designs_draft.sql
+LIST_FIELDS = "id,kind,title,draft,source_model_id,plan_id,current_version_id,version_count,thumbnail_url,created_at,updated_at"
 VERSION_FIELDS = "id,design_id,number,schema,glb_url,thumbnail_url,note,restored_from,created_at"
 
 

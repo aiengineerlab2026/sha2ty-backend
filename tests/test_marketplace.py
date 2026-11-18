@@ -273,7 +273,7 @@ def test_brands_say_which_vendor_is_sha2tys_own_and_share_no_private_details(env
     assert brands[PLATFORM]["platform"] is True
 
 
-def test_cancelling_deletes_the_customers_open_request_and_their_cancelled_ones(env):
+def test_a_customer_deletes_their_own_request_in_any_state_and_their_cancelled_ones(env):
     fake, client = env
     fake.tables["freelance_tasks"] = [
         {"id": str(uuid.uuid4()), "customer_id": ALICE, "status": "published"},
@@ -283,9 +283,10 @@ def test_cancelling_deletes_the_customers_open_request_and_their_cancelled_ones(
     ]
     open_, _, awarded, bobs = (t["id"] for t in fake.tables["freelance_tasks"])
     assert client.delete(f"/api/tasks/{bobs}").status_code == 404  # not hers
-    assert client.delete(f"/api/tasks/{awarded}").status_code == 404  # a vendor was hired: no longer cancellable
     assert client.delete(f"/api/tasks/{open_}").status_code == 204
     assert {t["id"] for t in fake.tables["freelance_tasks"]} == {awarded, bobs}  # the open one and the old cancelled one are gone
+    assert client.delete(f"/api/tasks/{awarded}").status_code == 204  # a vendor was chosen: still hers to delete
+    assert {t["id"] for t in fake.tables["freelance_tasks"]} == {bobs}
 
 
 def test_a_request_keeps_its_model_views_and_a_save_refreshes_them(env):

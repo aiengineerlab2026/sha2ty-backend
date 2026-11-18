@@ -325,3 +325,77 @@ def test_saving_a_customised_model_updates_its_active_requests(env):
     assert open_["design_version_id"] == saved["id"] and open_["spec"]["design"]["dimensions"]["width"] == 2.4
     assert open_["spec"]["quantity"] == 2 and open_["spec"]["audience"] == "open"  # the customer's request choices stay
     assert done["design_version_id"] == sent  # a finished job keeps what it was made from
+
+
+def test_the_shop_leaves_out_listings_their_vendor_hid_but_a_link_to_one_still_opens(env):
+    fake, _ = env
+    settings = Settings(supabase_url=SB, supabase_service_role_key=SecretStr("srv"))
+    store = PlanStore(settings, httpx.AsyncClient(transport=httpx.MockTransport(fake)))
+    # The fake reads the embedded vendor filter (vendors.status=eq.approved) as a column of the row.
+    fake.tables["models"][0].update({"furniture_type": "beds", "vendors.status": "approved", "vendors": {"id": VENDOR, "name": "Studio", "status": "approved"}})
+    fake.tables["models"].append({"id": str(uuid.UUID(int=12)), "title": "test", "vendor_id": VENDOR, "status": "ready", "listed": False, "vendors.status": "approved",
+                                  "glb_url": f"{FILES}/{VENDOR}/t.glb", "vendors": {"id": VENDOR, "name": "Studio", "status": "approved"}})
+    import asyncio
+    shop = asyncio.run(store.catalog())
+    titles = [m["title"] for c in shop["companies"] for m in c["models"]]
+    assert titles == ["Oslo bed"]
+    assert shop["companies"][0]["models"][0]["furniture_type"] == "beds"
+    hidden = asyncio.run(store.catalog(model_id=str(uuid.UUID(int=12))))
+    assert [m["title"] for c in hidden["companies"] for m in c["models"]] == ["test"]
+
+
+def test_a_draft_saves_without_a_name_and_naming_it_ends_the_draft(env):
+    fake, client = env
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL, "title": "Draft · Oslo bed", "draft": True, "item": {"material_edits": {}}})
+    assert made.status_code == 201
+    row = next(d for d in fake.tables["designs"] if d["id"] == made.json()["id"])
+    assert row["draft"] is True
+    client.patch(f"/api/designs/{row['id']}", json={"title": "Guest room bed"})
+    assert row["draft"] is False and row["title"] == "Guest room bed"
+
+
+def test_a_customer_cannot_add_parts_or_variants_the_vendor_does_not_offer(env):
+    fake, client = env
+    model = fake.tables["models"][0]
+    model["components"] = {**model["components"], "addable": [{"type": "shelf"}]}
+    leg = {"id": "a1", "type": "leg", "size": [0.05, 0.4, 0.05], "center": [0, 0.2, 0]}
+    refused = client.post("/api/designs/from-model", json={"model_id": MODEL, "item": {"material_edits": {}, "components": {**model["components"], "added": [leg]}}})
+    assert refused.status_code == 422 and "leg" in refused.json()["detail"]
+    shelf = {**leg, "id": "a2", "type": "shelf"}
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL, "item": {"material_edits": {}, "components": {**model["components"], "added": [shelf]}}})
+    assert made.status_code == 201
+    # A later save with a variant the vendor never offered is refused too.
+    bad = client.post(f"/api/designs/{made.json()['id']}/versions", json={"item": {"material_edits": {}, "part_variants": {"headboard": "nope"}}})
+    assert bad.status_code == 422
+
+
+def test_every_customisation_survives_save_reopen_and_the_request(env):
+    from app.api.marketplace import spec_from_version
+
+    fake, client = env
+    model = fake.tables["models"][0]
+    model["components"] = {"separated": True, "addable": [{"type": "shelf", "price_delta": 150}], "components": [
+        {"id": "headboard", "name": "Headboard", "editable": True, "variants": [{"id": "tufted", "name": "Tufted", "glb_url": f"{FILES}/{VENDOR}/t.glb"}]},
+        {"id": "legs", "name": "Legs", "editable": True},
+    ]}
+    shelf = {"id": "added_shelf", "type": "shelf", "size": [0.4, 0.02, 0.3], "center": [0, 0.5, 0]}
+    wood = {"mapUrl": "/woods/walnut.jpg", "color": "#ffffff", "material": {"id": "w", "kind": "wood", "name": "Walnut", "wood_type": "walnut", "unit": "m3"}}
+    fabric = {"mapUrl": f"{FILES}/{VENDOR}/fabrics/linen.png", "color": "#ffffff", "material": {"id": "f", "kind": "fabric", "name": "Green linen", "unit": "m"}}
+    edits = {
+        "dimensions": {"width": 1.6, "height": 1.1, "depth": 2.1}, "resize_mode": "independent",
+        "components": {**model["components"], "components": model["components"]["components"] + [{"id": "added_shelf", "name": "Shelf", "editable": True}], "added": [shelf]},
+        "material_edits": {"legs": wood, "headboard": fabric},
+        "part_variants": {"headboard": "tufted"},
+    }
+    made = client.post("/api/designs/from-model", json={"model_id": MODEL, "title": "Draft · Oslo bed", "draft": True, "item": edits})
+    assert made.status_code == 201, made.text
+    reopened = client.get(f"/api/designs/{made.json()['id']}").json()
+    item = reopened["current"]["data"]["item"]
+    assert item["dimensions"] == edits["dimensions"] and item["resize_mode"] == "independent"
+    assert item["material_edits"]["legs"]["material"]["name"] == "Walnut" and item["material_edits"]["headboard"]["material"]["name"] == "Green linen"
+    assert item["part_variants"] == {"headboard": "tufted"} and item["components"]["added"][0]["type"] == "shelf"
+    spec = spec_from_version(reopened, reopened["current"])["design"]
+    assert spec["dimensions"] == edits["dimensions"] and spec["resize_mode"] == "independent"
+    assert {m["part_id"]: m["material"]["name"] for m in spec["materials"]} == {"legs": "Walnut", "headboard": "Green linen"}
+    assert next(p for p in spec["parts"] if p["id"] == "headboard")["variant"]["name"] == "Tufted"
+    assert spec["part_document"]["added"][0]["id"] == "added_shelf"

@@ -35,6 +35,8 @@ from app.services.auth import user_id_from_bearer
 from app.services.cdn import file_prefixes
 from app.services.design_store import DesignStore
 from app.services.plan_store import PlanStore
+from app.services.price_guide import price_guide
+from app.services.shopper_choices import shopper_choice_errors
 
 router = APIRouter(prefix="/api/designs", tags=["designs"])
 
@@ -165,6 +167,28 @@ async def customised_models(user_id: User, store: Designs, limit: int = 50, offs
     return {"models": await store.library(user_id, limit, offset), "limit": limit, "offset": offset}
 
 
+# Before /{design_id}: a literal path, not a design id.
+@router.get("/price-guide")
+async def price_guide_for(model_id: UUID, user_id: User, store: Designs, width: float | None = None, height: float | None = None, depth: float | None = None) -> dict[str, Any]:
+    """A per-piece price range for a customised model from vendors' bids on earlier requests for the same listing
+    (app/services/price_guide.py), or no range when there are too few. Customers may not read other requests' bids,
+    so only these aggregates leave the server."""
+    del user_id  # signed-in customers only
+    tasks = await store._call(
+        "GET", f"freelance_tasks?select=id,spec&spec->design->source->>model_id=eq.{model_id}&order=created_at.desc&limit=200", "load earlier requests",
+    )
+    requests = [{"id": t["id"], "quantity": (t.get("spec") or {}).get("quantity") or 1, "dimensions": ((t.get("spec") or {}).get("design") or {}).get("dimensions")} for t in tasks]
+    bids: list[dict[str, Any]] = []
+    if requests:
+        ids = ",".join(r["id"] for r in requests)
+        try:
+            bids = await store._call("GET", f"task_bids?select=task_id,price,price_basis,quantity,status&task_id=in.({ids})", "load earlier bids")
+        except HTTPException:  # before bid_terms.sql: no basis / quantity columns
+            bids = await store._call("GET", f"task_bids?select=task_id,price,status&task_id=in.({ids})", "load earlier bids")
+    size = {"width": width, "height": height, "depth": depth} if width and height and depth else None
+    return price_guide(requests, bids, size)
+
+
 @router.get("/{design_id}")
 async def get_design(design_id: UUID, user_id: User, store: Designs) -> dict[str, Any]:
     return await _full(store, await store.get_design(design_id, user_id))
@@ -180,6 +204,26 @@ async def list_versions(design_id: UUID, user_id: User, store: Designs) -> dict[
 async def get_version(design_id: UUID, number: int, user_id: User, store: Designs) -> dict[str, Any]:
     await store.get_design(design_id, user_id)
     return await store.version(design_id, number)
+
+
+def check_choices(item: dict[str, Any], components: Any) -> None:
+    """Only what the vendor lets customers add or swap (app/services/shopper_choices.py)."""
+    errors = shopper_choice_errors(item, components if isinstance(components, dict) else None)
+    if errors:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, " ".join(errors[:3]))
+
+
+async def source_components(store: DesignStore, source: dict[str, Any], user_id: str) -> Any:
+    """The listing's part document now (what its vendor offers), for a design of a catalogue model; None for the
+    customer's own model (no vendor's rules apply)."""
+    if source.get("source_type") == "user" or not source.get("model_id"):
+        return None
+    try:
+        return (await store.catalog_model(UUID(str(source["model_id"])), user_id)).get("components")
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:  # the listing was withdrawn: the design keeps what it had
+            return None
+        raise
 
 
 # ---- creating ----
@@ -203,11 +247,13 @@ async def from_model(body: FromModelBody, user_id: User, store: Designs) -> dict
     fields = item.model_dump(mode="json", exclude_none=True)
     if body.item is not None:  # the first save carries the customer's edits: v1 is what they saved
         check_files(body.item, user_id)
+        check_choices(body.item.model_dump(mode="json", exclude_none=True), model.get("components"))
         fields = {**fields, **body.item.model_dump(mode="json", exclude_none=True), "source": fields["source"]}
     data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(fields)})
     return await _create(
         store, user_id,
         {"kind": "item", "title": body.title.strip() or model.get("title") or "", "source_model_id": str(body.model_id),
+         **({"draft": True} if body.draft else {}),
          "thumbnail_url": own_file(body.thumbnail_url, user_id, "thumbnail") or model.get("thumbnail_url") or model.get("source_image_url")},
         data, body.note or ("Saved" if body.item is not None else "Started from the catalogue"),
         client_token=body.client_token,
@@ -264,6 +310,7 @@ async def save_version(design_id: UUID, body: SaveVersionBody, user_id: User, st
         check_files(body.item, user_id)
         # The catalogue source stays as it was when the design started.
         item = {**body.item.model_dump(mode="json", exclude_none=True), "source": previous["item"]["source"]}
+        check_choices(item, await source_components(store, previous["item"]["source"], user_id))
         data = validated({"schema": "sha2ty.design/1", "kind": "item", "item": with_scale(item)})
     else:
         if not design.get("plan_id"):
@@ -337,7 +384,8 @@ async def duplicate_design(design_id: UUID, body: DuplicateBody, user_id: User, 
 
 @router.patch("/{design_id}")
 async def rename_design(design_id: UUID, body: RenameBody, user_id: User, store: Designs) -> dict[str, Any]:
-    return await store.update_design(design_id, user_id, {"title": body.title.strip()})
+    # A name given by the customer: the design is no longer a draft.
+    return await store.update_design(design_id, user_id, {"title": body.title.strip(), "draft": False})
 
 
 @router.delete("/{design_id}")
