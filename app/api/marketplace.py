@@ -9,7 +9,7 @@ a bid and status changes go through the database functions in tasks.sql.
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -62,15 +62,29 @@ class ViewPart(BaseModel):
     pic: int | None = Field(default=None, ge=0, le=1000)  # its picture: cell `pic` of the parts sheet
 
 
+class Check(BaseModel):
+    """One measurement check made before the report (frontend lib/designs/measure.ts checkMeasurements)."""
+
+    level: Literal["critical", "warning", "info", "error"]  # error: pictures made before the three levels (critical)
+    code: Literal["approx", "mismatch", "units", "missing", "exceeds", "over_request", "axis", "overlap", "joint", "clearance", "drawer", "shelf"]
+    parts: list[str] = Field(default_factory=list, max_length=10)
+    params: dict[str, float | str] = Field(default_factory=dict, max_length=10)
+
+
 class DesignViews(BaseModel):
     """The two rendered pictures of the saved model (platform storage) and the measurements drawn on them."""
 
     closed_url: str = Field(max_length=1000)
     open_url: str = Field(max_length=1000)
     # Close-ups of the parts whose dimensions do not fit clearly in the opened picture.
-    detail_urls: list[str] = Field(default_factory=list, max_length=12)
+    # One a row of the parts table (frontend MAX_DETAILS).
+    detail_urls: list[str] = Field(default_factory=list, max_length=60)
     # What each close-up shows: a group of parts (doors, drawers, shelves, structure, accessories).
-    detail_groups: list[str] = Field(default_factory=list, max_length=12)
+    detail_groups: list[str] = Field(default_factory=list, max_length=60)
+    # Front, side and top orthographic views with the overall size (one picture).
+    ortho_url: str | None = Field(default=None, max_length=1000)
+    # What the measurements do not agree on (requested vs model size, parts that overlap…), for the checks page.
+    checks: list[Check] | None = Field(default=None, max_length=300)
     # 2: dimensions written beside the parts. 1 (or none): numbered markers, which the report no longer shows.
     version: int = Field(default=1, ge=1, le=100)
     # Each main part's picture: one sheet of `pic_size` squares, `pic_cols` to a line.
@@ -253,7 +267,7 @@ async def request_implementation(design_id: UUID, body: RequestBody, request: Re
 
 
 def check_views(views: DesignViews) -> None:
-    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in (views.closed_url, views.open_url, *views.detail_urls, *([views.pictures_url] if views.pictures_url else []))):
+    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in (views.closed_url, views.open_url, *views.detail_urls, *([u for u in (views.pictures_url, views.ortho_url) if u]))):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The model views must be uploaded to Sha2ty first.")
 
 

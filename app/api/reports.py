@@ -17,7 +17,7 @@ from app.api.admin import token_valid
 from app.api.marketplace import DesignViews, check_views
 from app.core.config import get_settings
 
-from app.services import request_report
+from app.services import report_photos, request_report
 from app.services.auth import service_headers, user_id_from_bearer
 from app.services.cdn import file_prefixes
 
@@ -128,7 +128,8 @@ async def _report(task_id: UUID, request: Request, lang: Literal["ar", "en"], au
         meta = {}  # numbered-marker pictures: the report says they must be made again, never shows them
         design["views"] = None
     if meta:
-        pictures = [await _picture(client, u) for u in (meta.get("closed_url"), meta.get("open_url"), *(meta.get("detail_urls") or []))]
+        urls = (meta.get("closed_url"), *([meta["ortho_url"]] if meta.get("ortho_url") else []), meta.get("open_url"), *(meta.get("detail_urls") or []))
+        pictures = [await _picture(client, u) for u in urls]
         if not all(pictures):
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read the model views for this report. Try again.")
         views = tuple(pictures)
@@ -143,6 +144,8 @@ async def _report(task_id: UUID, request: Request, lang: Literal["ar", "en"], au
         image = await _picture(client, url)
         if image:
             textures[url] = image
+    # The thumbnail and the part pictures become real photos (gpt-image-2); the dimension views stay exact as drawn.
+    picture, pictures = await report_photos.realistic(picture, pictures, meta, get_settings(), request.app.state.openai_http)
     pdf = await run_in_threadpool(request_report.build, task, picture, lang, None, download, customer, views, pictures, textures)
     return Response(pdf, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="sha2ty-request-{str(task_id)[:8]}.pdf"',
