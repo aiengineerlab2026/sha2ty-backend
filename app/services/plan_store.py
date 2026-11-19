@@ -26,7 +26,7 @@ class PlanStore:
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
             # animation / parts: the movable parts and the part ids they name (the planner plays them), not the whole document.
-            "select=id,title,description,price,price_unit,category,furniture_type,listed,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
+            "select=id,title,description,production_days,price,price_unit,category,furniture_type,listed,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url,location),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
@@ -46,7 +46,7 @@ class PlanStore:
         response = await self.client.get(f"{self.base}/models?{'&'.join(params)}", headers=self._headers())
         # A newer migration (pricing / categories / shape) not applied yet: drop only the columns the
         # database says are missing and serve the rest (prices stay when only `shape` is missing).
-        optional = ["price", "price_unit", "category", "furniture_type", "listed", "shape", "length2_m", "thumbnail_url", "states"]
+        optional = ["production_days", "price", "price_unit", "category", "furniture_type", "listed", "shape", "length2_m", "thumbnail_url", "states"]
         while response.status_code == 400:
             if "vendors.status=eq.approved" in params and "status" in response.text:
                 params.remove("vendors.status=eq.approved")  # approval migration not applied yet
@@ -72,7 +72,7 @@ class PlanStore:
             company_id = vendor.get("id") or row.get("vendor_id") or "unknown"
             groups.setdefault(
                 company_id,
-                {"id": company_id, "name": vendor.get("name") or "Unknown studio", "logo_url": vendor.get("logo_url"), "models": []},
+                {"id": company_id, "name": vendor.get("name") or "Unknown studio", "logo_url": vendor.get("logo_url"), "location": vendor.get("location") or "", "models": []},
             )
             variants = sorted(row.get("model_variants") or [], key=lambda item: item.get("sort_order") or 0)
             groups[company_id]["models"].append(
@@ -97,6 +97,8 @@ class PlanStore:
                     "company_id": company_id,
                     "company": groups[company_id]["name"],
                     "company_logo": groups[company_id]["logo_url"],
+                    "company_location": groups[company_id]["location"],
+                    "production_days": row.get("production_days"),
                     **({"components": row.get("components")} if model_id else {}),
                     # Models of several parts: the planner finds and plays their movable ones by these part ids.
                     **({"animation": row.get("animation"), "parts": row["parts"]} if len(row.get("parts") or []) > 1 else {}),

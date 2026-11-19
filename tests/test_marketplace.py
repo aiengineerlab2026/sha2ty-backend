@@ -119,7 +119,8 @@ def test_vendor_profile_is_public_without_private_details(env):
     fake.tables["vendor_reviews"] += [{"id": "r1", "task_id": task["id"], "vendor_id": VENDOR, "rating": 5, "comment": "Great", "created_at": "2026-11-01"},
                                       {"id": "r2", "task_id": "t2", "vendor_id": VENDOR, "rating": 4, "comment": "", "created_at": "2026-10-01"}]
     profile = client.get(f"/api/vendors/{VENDOR}/profile").json()
-    assert profile["vendor"] == {"id": VENDOR, "name": "Oslo Studio", "location": "Cairo", "logo_url": None, "created_at": "2026-01-01"}
+    assert profile["vendor"] == {"id": VENDOR, "name": "Oslo Studio", "location": "Cairo", "logo_url": None, "created_at": "2026-01-01",
+                                 "service_areas": [], "bio": "", "portfolio": []}
     assert "email" not in str(profile) and "Private Owner" not in str(profile)
     assert profile["stats"] == {"completed_projects": 1, "active_projects": 0, "bids": 1, "rating": 4.5, "reviews": 2}
     assert profile["projects"][0]["title"] == "My Modern Bed" and [m["title"] for m in profile["listings"]] == ["Oslo bed"]
@@ -317,3 +318,21 @@ def test_only_the_customer_replaces_a_requests_pictures(env):
     assert client.put(f"/api/tasks/{task['id']}/views", json=views).json() == {"updated": 1}
     saved = fake.tables["freelance_tasks"][0]["spec"]["design"]["views"]
     assert saved["version"] == 2 and saved["detail_urls"] == [f"{FILES}/{ALICE}/d1.png"]
+
+
+def test_a_custom_request_without_a_model_goes_to_every_vendor_with_its_brief(env):
+    fake, client = env
+    brief = {"title": "Oak dining table", "furniture_type": "tables", "dimensions": {"width": 180, "height": 75, "depth": 90},
+             "quantity": 1, "material": "Solid oak", "finish": "Matte oil", "location": "Nasr City, Cairo", "budget_max": 30000,
+             "images": [f"{FILES}/{ALICE}/requests/ref.jpg"]}
+    task = client.post("/api/requests", json=brief)
+    assert task.status_code == 201
+    row = fake.tables["freelance_tasks"][0]
+    assert row["customer_id"] == ALICE and row["audience"] == "open" and row["status"] == "published" and not row.get("design_id")
+    assert row["spec"]["brief"] == {"furniture_type": "tables", "dimensions": {"width": 180, "height": 75, "depth": 90},
+                                    "material": "Solid oak", "finish": "Matte oil", "images": brief["images"]}
+    # Pictures from anywhere else, a missing size or a past date are refused before anything is written.
+    assert client.post("/api/requests", json={**brief, "images": ["https://example.com/x.jpg"]}).status_code == 422
+    assert client.post("/api/requests", json={**brief, "dimensions": {"width": 0, "height": 75, "depth": 90}}).status_code == 422
+    assert client.post("/api/requests", json={**brief, "deadline": "2020-01-01"}).status_code == 422
+    assert len(fake.tables["freelance_tasks"]) == 1

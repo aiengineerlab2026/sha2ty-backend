@@ -319,6 +319,70 @@ async def replace_task_views(task_id: UUID, views: DesignViews, request: Request
     return {"updated": 1}
 
 
+FURNITURE_KINDS = ("chairs", "sofas", "beds", "tables", "storage", "doors", "other")
+
+
+class Size(BaseModel):
+    """Centimetres, as the customer measured them."""
+
+    width: float = Field(gt=0, le=2000)
+    height: float = Field(gt=0, le=2000)
+    depth: float = Field(gt=0, le=2000)
+
+
+class CustomRequestBody(BaseModel):
+    """A piece described in words, sizes and pictures, for vendors who make furniture to order (no 3D model)."""
+
+    title: str = Field(min_length=2, max_length=120)
+    furniture_type: Literal[FURNITURE_KINDS]  # type: ignore[valid-type]
+    dimensions: Size
+    quantity: int = Field(default=1, ge=1, le=1000)
+    material: str = Field(min_length=2, max_length=200)
+    finish: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=4000)
+    location: str = Field(min_length=2, max_length=200)
+    budget_max: float | None = Field(default=None, ge=0, le=100_000_000)
+    deadline: date | None = None
+    images: list[str] = Field(default_factory=list, max_length=8)
+
+
+@router.post("/requests", status_code=status.HTTP_201_CREATED)
+async def create_custom_request(body: CustomRequestBody, request: Request, user_id: User) -> dict[str, Any]:
+    """Publish a made-to-order request to every approved vendor. The pictures must already be on Sha2ty (POST
+    /api/files); the specification is stored as sent (spec.brief) and never changes after publishing."""
+    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in body.images):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Upload the reference pictures to Sha2ty first.")
+    if body.deadline and body.deadline < date.today():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The wanted-by date has passed.")
+    brief = {
+        "furniture_type": body.furniture_type,
+        "dimensions": body.dimensions.model_dump(),
+        "material": body.material.strip(),
+        "finish": body.finish.strip(),
+        "images": body.images,
+    }
+    row = {
+        "customer_id": user_id, "title": body.title.strip(), "scope": "item", "service": "furniture",
+        "description": body.description.strip(), "location": body.location.strip(), "budget_max": body.budget_max,
+        "deadline": body.deadline.isoformat() if body.deadline else None, "status": "published",
+        "spec": {"brief": brief, "quantity": body.quantity, "audience": "open", "vendor": None},
+        "audience": "open",
+    }
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    try:
+        response = await client.post(
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/freelance_tasks",
+            headers={**service_headers(settings), "Prefer": "return=representation"},
+            json=row,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send the request.") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send the request.")
+    return response.json()[0]
+
+
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_request(task_id: UUID, request: Request, user_id: User) -> None:
     """The customer deletes their own request, whatever its state: the row is removed from the database and its bids,
@@ -400,7 +464,10 @@ async def vendor_profile(vendor_id: UUID, request: Request) -> dict[str, Any]:
     completed = [p for p in projects if p["status"] == "completed"]
     rating = round(sum(r["rating"] for r in reviews) / len(reviews), 2) if reviews else None
     return {
-        "vendor": {k: vendor.get(k) for k in ("id", "name", "location", "logo_url", "created_at")},
+        "vendor": {k: vendor.get(k) for k in ("id", "name", "location", "logo_url", "created_at")}
+        | {"service_areas": vendor.get("service_areas") or [], "bio": vendor.get("bio") or "",
+           # Only pictures stored on Sha2ty: a vendor cannot point the page at someone else's site.
+           "portfolio": [p for p in vendor.get("portfolio") or [] if isinstance(p, dict) and str(p.get("url", "")).startswith(file_prefixes(settings))][:12]},
         "stats": {"completed_projects": len(completed), "active_projects": len(projects) - len(completed),
                   "bids": len(bids), "rating": rating, "reviews": len(reviews)},
         "listings": models,
