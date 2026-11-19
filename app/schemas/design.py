@@ -224,6 +224,8 @@ class FromModelBody(BaseModel):
 
     model_id: UUID
     title: str = Field(default="", max_length=200)
+    # Saved without a name yet: `title` is a temporary one (designs.draft); naming it later clears the flag.
+    draft: bool = False
     item: ItemEdits | None = None
     glb_url: str | None = None
     thumbnail_url: str | None = None

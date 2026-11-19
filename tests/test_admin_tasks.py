@@ -66,3 +66,27 @@ def test_an_unknown_request_is_not_found(monkeypatch):
         app.state.auth_http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=[])))
         res = client.get(f"/api/admin/tasks/{TASK}", headers={"X-Admin-Token": issue_token(settings)[0]})
     assert res.status_code == 404
+
+
+def test_admin_deletes_any_request_from_the_database(monkeypatch):
+    settings = Settings(supabase_url=SB, supabase_service_role_key=SecretStr("srv"), admin_password=SecretStr("pw"), admin_session_secret=SecretStr("s" * 32))
+    monkeypatch.setattr(admin, "get_settings", lambda: settings)
+    rows = {TASK: {"id": TASK, "customer_id": "c1", "status": "in_progress"}}
+    deleted: list[str] = []
+
+    def db(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE" and request.url.path.endswith("/freelance_tasks")
+        assert request.headers["apikey"] == "srv"  # any owner, any state: the service key
+        task_id = request.url.params["id"].removeprefix("eq.")
+        row = rows.pop(task_id, None)
+        if row:
+            deleted.append(task_id)
+        return httpx.Response(200, json=[row] if row else [])
+
+    with TestClient(app) as client:
+        app.state.auth_http = httpx.AsyncClient(transport=httpx.MockTransport(db))
+        assert client.delete(f"/api/admin/tasks/{TASK}").status_code == 401  # admins only
+        token = {"X-Admin-Token": issue_token(settings)[0]}
+        assert client.delete(f"/api/admin/tasks/{TASK}", headers=token).status_code == 204
+        assert deleted == [TASK] and not rows  # bids, chat, proposals and review go with it (ON DELETE CASCADE)
+        assert client.delete(f"/api/admin/tasks/{TASK}", headers=token).status_code == 404

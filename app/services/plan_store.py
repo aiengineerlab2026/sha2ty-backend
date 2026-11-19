@@ -26,7 +26,7 @@ class PlanStore:
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
             # animation / parts: the movable parts and the part ids they name (the planner plays them), not the whole document.
-            "select=id,title,description,price,price_unit,category,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
+            "select=id,title,description,price,price_unit,category,furniture_type,listed,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
@@ -46,7 +46,7 @@ class PlanStore:
         response = await self.client.get(f"{self.base}/models?{'&'.join(params)}", headers=self._headers())
         # A newer migration (pricing / categories / shape) not applied yet: drop only the columns the
         # database says are missing and serve the rest (prices stay when only `shape` is missing).
-        optional = ["price", "price_unit", "category", "shape", "length2_m", "thumbnail_url", "states"]
+        optional = ["price", "price_unit", "category", "furniture_type", "listed", "shape", "length2_m", "thumbnail_url", "states"]
         while response.status_code == 400:
             if "vendors.status=eq.approved" in params and "status" in response.text:
                 params.remove("vendors.status=eq.approved")  # approval migration not applied yet
@@ -62,6 +62,10 @@ class PlanStore:
         if response.status_code >= 400:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not load the furniture catalog.")
         rows = response.json()
+        # Listings their vendor hid (drafts, tests) stay out of the shop; one asked for by id still opens (old links,
+        # designs made from it). Filtered here, not in the query, so the catalogue works before models_listing.sql.
+        if not model_id:
+            rows = [row for row in rows if row.get("listed") is not False]
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
             vendor = row.get("vendors") or {}
@@ -79,6 +83,7 @@ class PlanStore:
                     "price": _num(row.get("price")),
                     "price_unit": row.get("price_unit") or "item",
                     "category": row.get("category") or "furniture",
+                    "furniture_type": row.get("furniture_type"),
                     "shape": row.get("shape") or "straight",
                     "length2_m": _num(row.get("length2_m")),
                     "variants": [v["image_url"] for v in variants if v.get("image_url")],

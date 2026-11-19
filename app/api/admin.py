@@ -162,6 +162,25 @@ async def _user(settings, client: httpx.AsyncClient, user_id: str | None) -> dic
     return {"id": user_id, "name": (meta.get("full_name") or meta.get("name") or "").strip(), "email": u.get("email") or "", "phone": u.get("phone") or meta.get("phone") or ""}
 
 
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+async def delete_task(task_id: UUID, request: Request) -> None:
+    """Admins delete any request, whatever its state or owner: the row goes from the database, with its bids, chat,
+    proposals and review (ON DELETE CASCADE in tasks.sql, marketplace.sql, proposals.sql)."""
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    try:
+        response = await client.delete(
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/freelance_tasks?id=eq.{task_id}",
+            headers={**service_headers(settings), "Prefer": "return=representation"},
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not delete the request.") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not delete the request.")
+    if not response.json():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found.")
+
+
 @router.get("/tasks/{task_id}", dependencies=[Depends(require_admin)])
 async def task_detail(task_id: UUID, request: Request) -> dict[str, object]:
     """One request seen from both sides: what the customer asked for and who they are, and for every vendor who
