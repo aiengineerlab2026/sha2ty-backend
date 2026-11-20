@@ -13,6 +13,7 @@ from app.api.designs import router as designs_router
 from app.api.files import router as files_router
 from app.api.marketplace import router as marketplace_router
 from app.api.proposals import router as proposals_router
+from app.api.realistic import router as realistic_router
 from app.api.reports import router as reports_router
 from app.api.match import router as match_router
 from app.api.plans import router as plans_router
@@ -91,6 +92,7 @@ app.include_router(designs_router)
 app.include_router(files_router)
 app.include_router(marketplace_router)
 app.include_router(proposals_router)
+app.include_router(realistic_router)
 app.include_router(reports_router)
 
 
