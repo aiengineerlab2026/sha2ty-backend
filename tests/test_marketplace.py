@@ -335,4 +335,9 @@ def test_a_custom_request_without_a_model_goes_to_every_vendor_with_its_brief(en
     assert client.post("/api/requests", json={**brief, "images": ["https://example.com/x.jpg"]}).status_code == 422
     assert client.post("/api/requests", json={**brief, "dimensions": {"width": 0, "height": 75, "depth": 90}}).status_code == 422
     assert client.post("/api/requests", json={**brief, "deadline": "2020-01-01"}).status_code == 422
+    assert client.post("/api/requests", json={**brief, "glb_url": "https://example.com/x.glb"}).status_code == 422
     assert len(fake.tables["freelance_tasks"]) == 1
+    # The 3D model made from the first picture is kept with the brief.
+    glb = f"{FILES}/{ALICE}/abc.glb"
+    assert client.post("/api/requests", json={**brief, "glb_url": glb}).status_code == 201
+    assert fake.tables["freelance_tasks"][1]["spec"]["brief"]["glb_url"] == glb

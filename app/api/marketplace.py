@@ -344,13 +344,15 @@ class CustomRequestBody(BaseModel):
     budget_max: float | None = Field(default=None, ge=0, le=100_000_000)
     deadline: date | None = None
     images: list[str] = Field(default_factory=list, max_length=8)
+    # A 3D model made from the first picture with the admin's generator (POST /api/vendor/generate), when it finished.
+    glb_url: str | None = Field(default=None, max_length=1000)
 
 
 @router.post("/requests", status_code=status.HTTP_201_CREATED)
 async def create_custom_request(body: CustomRequestBody, request: Request, user_id: User) -> dict[str, Any]:
     """Publish a made-to-order request to every approved vendor. The pictures must already be on Sha2ty (POST
     /api/files); the specification is stored as sent (spec.brief) and never changes after publishing."""
-    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in body.images):
+    if not all(u.startswith(file_prefixes(get_settings())) and ".." not in u and len(u) <= 1000 for u in [*body.images, *([body.glb_url] if body.glb_url else [])]):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Upload the reference pictures to Sha2ty first.")
     if body.deadline and body.deadline < date.today():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The wanted-by date has passed.")
@@ -360,6 +362,7 @@ async def create_custom_request(body: CustomRequestBody, request: Request, user_
         "material": body.material.strip(),
         "finish": body.finish.strip(),
         "images": body.images,
+        **({"glb_url": body.glb_url} if body.glb_url else {}),
     }
     row = {
         "customer_id": user_id, "title": body.title.strip(), "scope": "item", "service": "furniture",
