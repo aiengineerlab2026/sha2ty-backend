@@ -125,8 +125,11 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
     calls = {}
     parts = [mesh("p1", "Part 1", [0, 0, 0], [2, 2, 0.6]), mesh("p2", "Part 2", [0.04, 0.6, 0.6], [1, 1.9, 0.62]), mesh("p3", "Part 3", [1, 0.6, 0.6], [1.96, 1.9, 0.62])]
 
-    async def analysed(*_args, **_kwargs):
-        return ma.parse(json.dumps(WARDROBE))
+    async def read_spec(*_args, **_kwargs):
+        from app.schemas.product_details import ProductDetails
+        from app.services.furniture_spec import FurnitureSpec
+
+        return FurnitureSpec(details=ProductDetails(object_type="wardrobe"), analysis=ma.parse(json.dumps(WARDROBE)))
 
     class FakeMeshy:
         async def create_image_to_3d_task(self, _options, **kwargs):
@@ -162,14 +165,13 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
     async def unchanged(glb, source, doc):
         return glb, source, doc
 
-    monkeypatch.setattr(vendor, "analysed", analysed)
-    monkeypatch.setattr(vendor, "read_photo", lambda *a, **k: asyncio.sleep(0, None))
+    monkeypatch.setattr(vendor, "read_furniture_spec", read_spec)
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor, "inspect_glb", lambda *_a: {"separated": True, "components": copy.deepcopy(parts)})
     monkeypatch.setattr(vendor, "named", passthrough)
     monkeypatch.setattr(vendor, "sized", unchanged)
     monkeypatch.setattr(vendor, "validated", lambda glb, doc, *_a: doc)
-    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, meshy_auto_split=True, storage_dir=tmp_path)
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), config.get_settings: lambda: s})
     try:

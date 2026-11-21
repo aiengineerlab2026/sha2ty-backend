@@ -31,14 +31,24 @@ def generator_from_default(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def no_mesh_analysis(monkeypatch, request):
-    """Endpoint tests never call a real vision model for the mesh analysis: none is made (test_mesh_analysis
-    exercises it with its own answers)."""
-    if request.node.module.__name__.endswith("test_mesh_analysis"):
-        return
+def no_furniture_spec(monkeypatch):
+    """Endpoint tests never call a real vision model for the photo's spec: none is read unless a test gives its own
+    reader (spec_of)."""
     from app.api import vendor
 
     async def none(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(vendor, "analysed", none)
+    monkeypatch.setattr(vendor, "read_furniture_spec", none)
+
+
+def spec_of(fake_details):
+    """A test's fake product-details reader as the furniture spec reader the endpoints call (one vision call returns
+    both: its details here, no components)."""
+    from app.services.furniture_spec import FurnitureSpec
+
+    async def read(*args, **kwargs):
+        details = await fake_details(*args, **kwargs)
+        return FurnitureSpec(details=details) if details else None
+
+    return read

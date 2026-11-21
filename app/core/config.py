@@ -21,11 +21,14 @@ class Settings(BaseSettings):
     meshy_download_timeout_seconds: float = 300.0
     # The platform's own vendor (admin-added catalogue models): its system user's email (services/platform.py).
     platform_vendor_email: str = "studio@sha2ty.app"
-    # After image-to-3D, split the model into its named parts with Meshy Auto Split (10 credits a task).
-    meshy_auto_split: bool = True
-    # Before image-to-3D, clean the photo with the configured vision model (plan_vision_model / admin vision setting):
-    # loose objects and contents removed, hidden surfaces rebuilt. The 3D task then builds from that image.
-    # Off: the photo goes straight to image-to-3D.
+    # After image-to-3D, split the visual model into named parts with Meshy Auto Split (10 credits a task, and it
+    # rewrites the visual mesh). Off: the editable parts are the structural model's, built from the spec for free.
+    meshy_auto_split: bool = False
+    # Vision calls on the generated visual model (grouping its meshes, naming them). Off: one vision call per photo,
+    # parts named from their geometry and matched to the spec.
+    visual_part_ai: bool = False
+    # Before image-to-3D, clean the photo with the configured vision model (plan_vision_model / admin vision setting),
+    # only when the photo reading found loose objects on or in the product. Off: the photo always goes straight to 3D.
     meshy_clean_image: bool = True
     meshy_image_model: str = "nano-banana"  # Image to Image ai_model (docs: nano-banana, nano-banana-2, gpt-image-2, ...)
 

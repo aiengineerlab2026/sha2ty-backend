@@ -101,6 +101,10 @@ class Component(BaseModel):
     texture: str = ""
     role: Literal["structural", "functional", "decorative"] = "structural"
     visibility: Literal["visible", "inferred"] = "visible"
+    # The shared material specification (services/material_spec.py): one class per part, read from the photo.
+    materialClass: str = "other"
+    finish: str = ""
+    confidence: float = Field(default=0.5, ge=0, le=1)
     separateMesh: bool = True
     relations: list[Relation] = []
     motion: Motion = Motion()
@@ -109,6 +113,22 @@ class Component(BaseModel):
     @classmethod
     def _motion(cls, v: Any) -> Any:
         return v if isinstance(v, dict) else {}
+
+    @field_validator("materialClass", mode="before")
+    @classmethod
+    def _class(cls, v: Any) -> str:
+        from app.services.material_spec import CLASSES
+
+        v = str(v or "").strip().lower().replace(" ", "_").replace("-", "_")
+        return v if v in CLASSES else "other"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _confidence(cls, v: Any) -> float:
+        try:
+            return min(max(float(v), 0.0), 1.0)
+        except (TypeError, ValueError):
+            return 0.5
 
     @field_validator("id", mode="before")
     @classmethod
@@ -150,6 +170,8 @@ class MeshAnalysis(BaseModel):
         return v
 
 
+from app.services.material_spec import CLASSES as MATERIAL_CLASSES  # noqa: E402
+
 _COMPONENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -168,6 +190,9 @@ _COMPONENT_SCHEMA = {
         "material": {"type": "string"},
         "texture": {"type": "string", "description": "Surface finish or pattern: matte, wood grain, woven fabric…"},
         "role": {"type": "string", "enum": ["structural", "functional", "decorative"]},
+        "materialClass": {"type": "string", "enum": list(MATERIAL_CLASSES), "description": "The part's material family as seen"},
+        "finish": {"type": "string", "description": "matte, satin, gloss, lacquer, brushed, polished, woven, tufted…"},
+        "confidence": {"type": "number", "description": "0..1: how sure you are of this part (its presence, box and size)"},
         "visibility": {"type": "string", "enum": ["visible", "inferred"]},
         "separateMesh": {"type": "boolean", "description": "true for a physical part a person could recolour or move on its own"},
         "motion": {
@@ -196,7 +221,7 @@ _COMPONENT_SCHEMA = {
             },
         },
     },
-    "required": ["id", "name", "nameAr", "shape", "position", "box", "color", "material", "texture", "role", "visibility", "separateMesh", "relations", "motion"],
+    "required": ["id", "name", "nameAr", "shape", "position", "box", "dimensions", "color", "material", "materialClass", "finish", "texture", "role", "visibility", "separateMesh", "relations", "motion", "confidence"],
 }
 
 SCHEMA = {

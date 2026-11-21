@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
@@ -34,17 +34,18 @@ from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
 from app.services.part_names import name_components
 from app.services.platform import is_platform
-from app.services.product_details import extract_product_details, in_language
+from app.services.product_details import in_language
+from app.services import fidelity, furniture_spec, material_spec, structural
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
-from app.services import animation, carpenter, component_grouping, geometry_quality, mesh_analysis
+from app.services import animation, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService
 from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
 logger = logging.getLogger(__name__)
-GLB_CACHE_VERSION = "vendor-glb-v6"  # v6: animation configuration (v5: vision mesh analysis before Meshy)
+GLB_CACHE_VERSION = "vendor-glb-v7"  # v7: one vision spec, structural model from it, raw GLB kept (v6: animation)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -178,10 +179,10 @@ async def generation_quota(request: Request, user_id: Annotated[str, Depends(cur
 
 
 def builds_wardrobe(provider: str, category: str, kind: str, two_states: bool) -> bool:
-    """Whether the photo-layout builder (services/wardrobe.py) makes this model instead of the admin's generator. The
-    admin's choice is kept: with Meshy chosen, Meshy makes every single-photo model, wardrobes too. The builder makes
-    wardrobes for the GPT generators, and a wardrobe's open and closed states always (only it lines them up exactly)."""
-    return furniture_family(category, kind or None) == "wardrobe" and (two_states or provider != "meshy")
+    """Whether the photo-layout builder (services/wardrobe.py) makes this model instead of the admin's generator. Only
+    for a wardrobe the vendor uploaded open AND closed (only the builder lines both states up exactly). A single photo
+    always goes to the selected generator, Meshy or Astra / Sol: a wardrobe is never silently built procedurally."""
+    return furniture_family(category, kind or None) == "wardrobe" and two_states
 
 
 def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title: str, textured: bool, kind: str = "", procedural: bool = False) -> str:
@@ -203,15 +204,24 @@ def read_upload(raw: bytes, declared: str, settings: Settings) -> str:
     return sniffed or "image/png"
 
 
-async def read_photo(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: Literal["ar", "en"] = "ar") -> ProductDetails | None:
-    """Workflow B: the admin-selected vision model reads the photo into JSON before 3D generation (cached
-    per photo, model and object description, so measuring first and converting after costs one call)."""
+read_furniture_spec = furniture_spec.read  # the one vision call (tests replace it)
+
+
+async def read_spec(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: Literal["ar", "en"] = "ar") -> furniture_spec.FurnitureSpec | None:
+    """The photo's furniture spec (services/furniture_spec.py): the one vision call, cached per photo, model, object
+    description and language, so measuring first (/product-details) and converting after costs one call."""
     if not photo:
         return None  # an image URL only: Meshy fetches it, nothing to read here
     model = await vision.current_model(settings, request.app.state.auth_http)
-    return await extract_product_details(
+    return await read_furniture_spec(
         photo, mime, category, title, settings, vision.client_for(request.app.state, model), model, db=request.app.state.auth_http, kind=kind or None, lang=lang
     )
+
+
+async def read_photo(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str, lang: Literal["ar", "en"] = "ar") -> ProductDetails | None:
+    """The listing part of the spec (name, category, estimated size): the same cached call as read_spec."""
+    spec = await read_spec(request, settings, photo, mime, category, title, kind, lang)
+    return spec.details if spec else None
 
 
 @router.post("/product-details", response_model=ProductDetails)
@@ -283,7 +293,8 @@ async def named(request: Request, glb: bytes, doc: dict, category: str | None, k
     model = await vision.current_model(settings, request.app.state.auth_http)
 
     async def ask(prompt: str, schema: dict) -> str | None:
-        if not vision.configured(settings, model):
+        # Geometry names every part without a call; the vision model only when the admin turned it on.
+        if not settings.visual_part_ai or not vision.configured(settings, model):
             return None
         return await vision.ask_json([{"type": "input_text", "text": prompt}], schema, "part_names", settings, vision.client_for(request.app.state, model), model)
 
@@ -304,7 +315,7 @@ async def grouped(request: Request, glb: bytes, source_glb: bytes | None, doc: d
     settings = get_settings()
     model = await vision.current_model(settings, request.app.state.auth_http)
     ask = None
-    if vision.configured(settings, model):
+    if settings.visual_part_ai and vision.configured(settings, model):  # an extra vision call: off unless the admin turns it on
         client = vision.client_for(request.app.state, model)
 
         async def ask(content: list[dict], schema: dict) -> str | None:
@@ -383,18 +394,59 @@ def schedule_ar(background: BackgroundTasks, job: dict | None, cdn: Cdn, owner: 
     return {**doc, "ar": {"url": cdn.public_url(key), "status": "processing"}}
 
 
-def carpenter_copy(components: dict, details: dict | None, kind: str | None, category: str | None, cdn: Cdn, key: str) -> dict:
-    """A separate carpenter GLB. The visual file is left as it is, and a failure here does not fail the generation."""
+def structural_model(spec: dict | None, category: str | None, kind: str | None, cdn: Cdn, key: str) -> dict:
+    """The structural model from the photo's spec alone (services/structural.py), uploaded beside the visual one. The
+    visual model is never read or changed. Its report, with `url` when it was built and `uncertain` always."""
+    spec = spec or {}
     try:
-        built = carpenter.reconstruct(components, details, kind, category)
-        if not built:
-            return components
-        glb, report = built
-        report["url"] = cdn.upload(key, glb, "model/gltf-binary")
-    except Exception:  # noqa: BLE001 - the visual model is the product; this extra file must not fail the generation
-        logger.exception("Carpenter model %s was not built", key)
-        return components
-    return {**components, "carpenter": report}
+        glb, report = structural.build(spec.get("details"), spec.get("analysis"), category, kind)
+        if glb:
+            report["url"] = cdn.upload(key, glb, "model/gltf-binary")
+    except Exception as exc:  # noqa: BLE001 - the visual model is the product; this one must not fail it
+        logger.exception("Structural model %s was not built", key)
+        report = {"source": "vision_spec", "built": False, "uncertain": [f"The structural model could not be built ({str(exc)[:100]})."]}
+    return report
+
+
+def with_structural(components: dict, report: dict | None, spec: dict | None) -> dict:
+    """The structural model (`carpenter`, read by the editor's structural mode), its status and the shared material
+    spec, in the component document. The visual parts keep `analysisId`: the link to the same spec component."""
+    report = report or {"built": False, "uncertain": ["No photo reading: no structural model."]}
+    status = {k: report.get(k) for k in ("source", "built", "uncertain", "excludedLoose", "sizeM", "scaleKnown") if k in report}
+    out = {**components, "structural": status, "materials": material_spec.for_analysis((spec or {}).get("analysis"))}
+    if report.get("built") and report.get("url"):
+        out["carpenter"] = {k: v for k, v in report.items() if k not in ("materials",)}
+    else:
+        out.pop("carpenter", None)
+    if spec:
+        out["spec"] = {"looseObjects": spec.get("loose_objects") or [], "designFeatures": spec.get("design_features") or []}
+    return out
+
+
+def upload_raw(raw: bytes, cdn: Cdn, key: str) -> None:
+    """Background: the provider's GLB exactly as it arrived (no compaction): the reference every check compares with."""
+    try:
+        cdn.upload(key, raw, "model/gltf-binary")
+    except Exception:  # noqa: BLE001 - background work: logged, the processed model is already saved
+        logger.exception("Raw provider model %s was not uploaded", key)
+
+
+def fidelity_checked(components: dict, raw: bytes, glb: bytes, photo: bytes | None, cleaned: bytes | None, bbox: list[float] | None) -> dict:
+    """Where the visual model lost fidelity (services/fidelity.py), stage by stage. A failed stage flags the model
+    (quality "low", its issues in the validation warnings) instead of passing it as a success."""
+    stages = []
+    if cleaned and photo:
+        stages.append(fidelity.compare_images(photo, cleaned, bbox))
+    stages.append(fidelity.provider(raw, photo, bbox, cleaned))
+    stages += fidelity.compare_glbs(raw, glb)
+    stages.append(fidelity.structural(components.get("structural") and {**(components.get("carpenter") or {}), **components["structural"]}))
+    result = fidelity.report(stages)
+    out = {**components, "fidelity": result}
+    if not result["ok"]:
+        lost = [f"{s['stage']}: {issue}" for s in stages if s.get("ok") is False and s["stage"] != "structural" for issue in s["issues"]]
+        validation = out.get("validation") or {"ok": True, "errors": [], "warnings": [], "parts": 0}
+        out["validation"] = {**validation, "ok": False, "warnings": [*validation.get("warnings", []), *lost[:8]]}
+    return out
 
 
 def validated(glb: bytes, components: dict, category: str | None, kind: str | None, photo: bytes | None = None, bbox: list[float] | None = None) -> dict:
@@ -422,23 +474,6 @@ def cleaning_record(pending: dict, cdn: Cdn, key: str) -> dict:
         except CdnError as exc:
             logger.warning("Cleaned reference image not uploaded: %s", exc.message)
     return record
-
-
-async def analysed(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str) -> mesh_analysis.MeshAnalysis | None:
-    """The photo's physical components (services/mesh_analysis.py), read by the configured vision model before
-    Meshy runs. None when there is no vision model or no usable answer: generation goes on without it."""
-    model = await vision.current_model(settings, request.app.state.auth_http)
-    if not vision.configured(settings, model):
-        return None
-    image = {"type": "input_image", "image_url": f"data:{mime};base64,{base64.b64encode(photo).decode('ascii')}"}
-    client = vision.client_for(request.app.state, model)
-
-    async def ask(prompt: str, schema: dict) -> str | None:
-        return await vision.ask_json([{"type": "input_text", "text": prompt}, image], schema, "mesh_analysis", settings, client, model)
-
-    analysis = await mesh_analysis.analyze(ask, object_description(category, title, kind or None), kind.strip())
-    logger.info("Mesh analysis: %s", [(c.id, c.visibility, c.separateMesh) for c in analysis.components] if analysis else None)
-    return analysis
 
 
 def analysis_checked(components: dict, pending: dict) -> dict:
@@ -581,8 +616,10 @@ async def generate_model(
 
     # Only a photo (the app's camera): read it first and take the type from it (furniture: what it is exactly).
     preread: ProductDetails | None = None
+    prespec: furniture_spec.FurnitureSpec | None = None
     if category == "auto":
-        preread = await read_photo(request, settings, raw, mime, "auto", title, kind, lang) if raw else None
+        prespec = await read_spec(request, settings, raw, mime, "auto", title, kind, lang) if raw else None
+        preread = prespec.details if prespec else None
         category = preread.category if preread and preread.category else "furniture"
         # What the user typed wins (it goes into the Meshy / Astra prompt); else what the reading saw.
         kind = (kind.strip() or (preread.object_type if preread and category == "furniture" else ""))[:60]
@@ -592,9 +629,8 @@ async def generate_model(
             result = {"glb_url": url, "model_id": object_id, "details": details.model_dump(mode="json") if details else None, "components": components, "source_glb_url": source_url, "states": states}
             await vision.cache_put(settings, db, cache_key, "vendor_glb", provider, result, table="model_cache")
 
-    # Wardrobes are flat panels: rebuilt from the photo's layout as real doors, drawers, shelves and handles instead of
-    # cut from a fused image-to-3D surface, unless the admin chose Meshy (builds_wardrobe). No generation try is used
-    # (only the vision model is called).
+    # A wardrobe photographed open and closed: both states rebuilt from the photos' layout, so they line up exactly
+    # (builds_wardrobe). A single photo always goes to the selected generator below.
     if raw and builds_wardrobe(provider, category, kind, bool(open_raw)):
         details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
         try:
@@ -619,9 +655,18 @@ async def generate_model(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "The photo file is needed, not only its URL.")
         remaining = await take_try(request, user_id, provider, settings)
         try:
-            details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
-            glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None)
+            spec = prespec or await read_spec(request, settings, raw, mime, category, title, kind, lang)
+            details = spec.details if spec else preread
+            spec_doc = spec.model_dump(mode="json") if spec else None
+            # The visual model (the provider) and the structural one (deterministic, from the spec) at the same time.
+            glb, built = await asyncio.gather(
+                astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None),
+                run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb"),
+            )
+            raw_glb = glb  # the provider's file before any change, kept and compared with
+            background.add_task(upload_raw, raw_glb, cdn, f"{user_id}/{object_id}.raw.glb")
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
+            components = mesh_analysis.match(components, spec.analysis if spec else None)
             glb, source_glb, components = await grouped(request, glb, source_glb, components, raw, details.model_dump(mode="json") if details else None)
             glb, components = await named(request, glb, components, category, kind)
             glb, components, ar_job = await quality_checked(glb, components, details.model_dump(mode="json") if details else None)
@@ -629,7 +674,8 @@ async def generate_model(
             glb, components = await run_in_threadpool(animation.configure, glb, components)
             glb, source_glb, components = await sized(glb, source_glb, components)
             components = await run_in_threadpool(validated, glb, components, category, kind, raw, details.bbox if details else None)
-            components = await run_in_threadpool(carpenter_copy, components, details.model_dump(mode="json") if details else None, kind, category, cdn, f"{user_id}/{object_id}.carpenter.glb")
+            components = {**with_structural(components, built, spec_doc), "raw_glb_url": cdn.public_url(f"{user_id}/{object_id}.raw.glb")}
+            components = await run_in_threadpool(fidelity_checked, components, raw_glb, glb, raw, None, details.bbox if details else None)
             url = await run_in_threadpool(cdn.upload, f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = schedule_source(background, source_glb, cdn, f"{user_id}/{object_id}.source.glb")
             await remember(url, details, components, source_url)
@@ -643,19 +689,20 @@ async def generate_model(
     remaining = await take_try(request, user_id, "meshy", settings)
     # The listing reading and the component analysis read the same photo independently: asked at the same time
     # (each takes 30–60 s), not one after the other.
-    async def no_reading() -> None:
-        return None
-
-    details, analysis = await asyncio.gather(
-        no_reading() if preread or not raw else read_photo(request, settings, raw, mime, category, title, kind, lang),
-        analysed(request, settings, raw, mime, category, title, kind) if raw else no_reading(),
-    )
-    details = preread or details
+    # One vision call (cached): the listing, the components and what is not part of the product.
+    spec = prespec or (await read_spec(request, settings, raw, mime, category, title, kind, lang) if raw else None)
+    details = spec.details if spec else preread
+    analysis = spec.analysis if spec else None
+    spec_doc = spec.model_dump(mode="json") if spec else None
     # Original photo → the configured vision model cleans it (loose objects and contents removed) → Image to 3D from
     # that image → Auto Split → grouping, naming, checks. Image to 3D has no geometry prompt, so what is removed
     # is removed in the image. A public URL is downloaded here: the vision model needs the bytes.
     kind_type = furniture_type(category, kind or None, details)
-    clean_prompt = meshy_prompt(category, kind or None, details) if settings.meshy_clean_image else None
+    # Cleaning is another image-model call that redraws the photo: only when the reading found loose objects on or in
+    # the product. A clean product photo goes to Image to 3D as it is (the most faithful input).
+    clean_prompt = meshy_prompt(category, kind or None, details) if settings.meshy_clean_image and spec and spec.needs_cleaning else None
+    if clean_prompt:
+        clean_prompt += f" In this photo, remove: {', '.join(spec.loose_objects[:12])}."
     clean_model = None
     # Vision mesh analysis first: the photo's components shape the prompt. Meshy takes it where it can act on it
     # (texture_prompt, Auto Split's part list); `conditioning` records where each part went, nothing is dropped.
@@ -705,7 +752,9 @@ async def generate_model(
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    logger.info("%s %s: furniture_type=%r category=%r analysed=%s split=%r vision_model=%s", "Vision image cleaning" if stage == "image" else "Meshy image-to-3d", task_id, kind_type, category, bool(analysis), split, clean_model)
+    logger.info("%s %s: furniture_type=%r category=%r analysed=%s split=%r vision_model=%s loose=%s", "Vision image cleaning" if stage == "image" else "Meshy image-to-3d", task_id, kind_type, category, bool(analysis), split, clean_model, spec.loose_objects if spec else None)
+    # The structural model needs only the spec: built now, while the provider works on the visual one.
+    built = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb")
     request.app.state.pending_cdn[task_id] = {
         "stage": stage,
         "mesh_task_id": task_id if stage == "mesh" else None,
@@ -722,6 +771,8 @@ async def generate_model(
         "split": split if settings.meshy_auto_split else None,  # Auto Split parts
         "analysis": analysis.model_dump(mode="json") if analysis else None,
         "meshy_conditioning": conditioning,
+        "spec": spec_doc,
+        "structural": built,
         "textured": textured,
         "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
     }
@@ -889,6 +940,8 @@ async def get_task(
         # The model and its split at the same time (tens of MB each).
         await asyncio.gather(meshy.download_file(glb_url, dest), *([meshy.download_file(split_glb_url, split_dest)] if split_glb_url else []))
         data = dest.read_bytes()
+        raw_glb = data  # the provider's file before any change, kept and compared with
+        background.add_task(upload_raw, raw_glb, cdn, f"{owner}/{object_id}.raw.glb")
         components = None
         if split_glb_url:
             info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
@@ -911,7 +964,10 @@ async def get_task(
         bbox = None if pending.get("reference") else (pending.get("details") or {}).get("bbox")
         components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), reference, bbox)
         components = {**components, "cleaning": await run_in_threadpool(cleaning_record, pending, cdn, f"{owner}/{object_id}.clean.png")}
-        components = await run_in_threadpool(carpenter_copy, components, pending.get("details"), pending.get("kind"), pending.get("category"), cdn, f"{owner}/{object_id}.carpenter.glb")
+        # Built from the spec when the task was submitted (older tasks without one: built now, from the same spec).
+        built = pending.get("structural") if "structural" in pending else await run_in_threadpool(structural_model, pending.get("spec"), pending.get("category"), pending.get("kind"), cdn, f"{owner}/{object_id}.carpenter.glb")
+        components = {**with_structural(components, built, pending.get("spec")), "raw_glb_url": cdn.public_url(f"{owner}/{object_id}.raw.glb")}
+        components = await run_in_threadpool(fidelity_checked, components, raw_glb, data, pending.get("photo"), pending.get("reference"), (pending.get("details") or {}).get("bbox"))
         url = await run_in_threadpool(cdn.upload, f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = schedule_source(background, source_glb, cdn, f"{owner}/{object_id}.source.glb")
     except (MeshyError, CdnError) as exc:
@@ -921,6 +977,30 @@ async def get_task(
         await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
     request.app.state.pending_cdn.pop(task_id, None)
     return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url, components=components, source_glb_url=source_url)
+
+
+class StructuralBody(BaseModel):
+    """A corrected spec (sizes, parts, materials) for a model already generated: only the structural model is rebuilt."""
+
+    model_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    details: dict = Field(default_factory=dict)  # width_m, height_m, depth_m, dimension_source, proportions, category
+    analysis: dict  # the spec's components (services/mesh_analysis.MeshAnalysis)
+    category: str = Field(default="furniture", max_length=40)
+    kind: str = Field(default="", max_length=60)
+
+
+@router.post("/structural")
+async def rebuild_structural(body: StructuralBody, cdn: Annotated[Cdn, Depends(get_cdn)], user_id: Annotated[str, Depends(current_user)]) -> dict:
+    """The structural model again from an edited spec: no vision call and no new 3D generation (the visual model is
+    untouched). The file gets a new name per spec, so no viewer shows a cached older one."""
+    try:
+        analysis = mesh_analysis.MeshAnalysis.model_validate(body.analysis).model_dump(mode="json")
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The spec's components are invalid: {str(exc)[:200]}") from exc
+    spec = {"details": body.details, "analysis": analysis}
+    tag = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:10]
+    report = await run_in_threadpool(structural_model, spec, body.category, body.kind, cdn, f"{user_id}/{body.model_id}.carpenter.{tag}.glb")
+    return with_structural({}, report, spec)
 
 
 class StateBoxes(BaseModel):

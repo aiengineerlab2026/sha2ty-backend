@@ -1,5 +1,6 @@
 """Child wardrobe from a photo: real, separately editable panels, validated before saving."""
 
+from tests.conftest import spec_of
 import asyncio
 import io
 import json
@@ -122,49 +123,55 @@ def test_read_spec_sends_the_type_and_rejects_unreadable_answers():
     assert asyncio.run(wardrobe.read_spec(junk, "a wardrobe", None)) is None
 
 
-def test_generate_builds_a_child_wardrobe_without_meshy(tmp_path, monkeypatch):
-    uploads = {}
+def test_a_single_wardrobe_photo_goes_to_the_selected_generator(tmp_path, monkeypatch):
+    """No silent override: with Astra selected, Astra makes the wardrobe (the builder is only for open + closed photos)."""
+    import io as _io
+
+    uploads, calls = {}, {}
 
     async def no_details(*_args, **_kwargs):
         return None
 
-    async def layout(_content, _schema, name, *_args):
-        assert name == "wardrobe_layout"
-        return json.dumps(CHILD)
+    async def no_vision(_content, _schema, name, *_args):
+        raise AssertionError(f"no extra vision call ({name})")
 
-    class NoMeshy:
-        async def create_image_to_3d_task(self, *_a, **_k):
-            raise AssertionError("a wardrobe is not sent to image-to-3D")
+    class FakeAstra:
+        async def generate_glb(self, *_args):
+            calls["astra"] = True
+            buf = _io.BytesIO()
+            trimesh.creation.box((1.2, 2.0, 0.6)).export(buf, file_type="glb")
+            return buf.getvalue()
 
     class FakeCdn:
         def upload(self, path, data, _type):
             uploads[path] = data
             return f"https://cdn.test/{path}"
 
-    async def no_try(*_args):
-        raise AssertionError("no generation try is used")
+        def public_url(self, path):
+            return f"https://cdn.test/{path}"
+
+    async def one_try(*_args):
+        return 4
 
     async def astra(*_args):
-        return "astra"  # the admin chose a GPT generator: the builder makes wardrobes
+        return "astra"
 
     monkeypatch.setattr(vendor.generator_setting, "current", astra)
-    monkeypatch.setattr(vendor, "extract_product_details", no_details)
-    monkeypatch.setattr(vendor.vision, "ask_json", layout)
-    monkeypatch.setattr(vendor, "take_try", no_try)
-    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
-    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: NoMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(no_details))
+    monkeypatch.setattr(vendor.vision, "ask_json", no_vision)
+    monkeypatch.setattr(vendor, "take_try", one_try)
+    s = Settings(meshy_api_key="msy-test", openai_api_key="sk-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_astra: lambda: FakeAstra(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
             body = client.post("/api/vendor/generate", files={"image": ("w.png", png, "image/png")}, data={"category": "wardrobe", "kind": "Child Wardrobe"}).json()
     finally:
         app.dependency_overrides.clear()
-    assert body["status"] == "SUCCEEDED" and body["glb_url"].endswith(".glb")
+    assert calls.get("astra") and body["provider"] == "astra" and body["status"] == "SUCCEEDED"
     doc = body["components"]
-    assert doc["method"] == "procedural" and doc["separated"] and doc["validation"]["ok"]
-    assert [c["id"] for c in doc["components"]][:4] == ["wardrobe_body", "back_panel", "plinth", "door_left"]
-    assert all(not c["name"].startswith(("Part", "جزء")) for c in doc["components"])
-    assert check_glb(next(iter(uploads.values())), "wardrobe")["ok"]
+    assert doc.get("method") != "procedural" and doc["raw_glb_url"].endswith(".raw.glb")
+    assert any(k.endswith(".raw.glb") for k in uploads)  # the provider's file, kept as it arrived
 
 
 def test_meshy_chosen_by_the_admin_makes_wardrobes_too(tmp_path, monkeypatch):
@@ -189,7 +196,7 @@ def test_meshy_chosen_by_the_admin_makes_wardrobes_too(tmp_path, monkeypatch):
         return "meshy"
 
     monkeypatch.setattr(vendor.generator_setting, "current", meshy)
-    monkeypatch.setattr(vendor, "extract_product_details", no_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(no_details))
     monkeypatch.setattr(vendor.vision, "ask_json", no_layout)
     monkeypatch.setattr(vendor, "take_try", one_try)
     s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
