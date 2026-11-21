@@ -3,6 +3,7 @@ ProductDetails JSON → Meshy prompt). Every HTTP call is mocked; no test pays f
 
 from __future__ import annotations
 
+from tests.conftest import spec_of
 import asyncio
 import json
 
@@ -100,7 +101,7 @@ def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
     async def one_try(*_args):
         return 4
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
@@ -358,13 +359,16 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
         def upload(self, path, _data, _type):
             return f"https://cdn.test/{path}"
 
+        def public_url(self, path):
+            return f"https://cdn.test/{path}"
+
     async def one_try(*_args):
         return 4
 
     async def admin_chose_meshy(*_args, **_kwargs):
         return "meshy"
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
     s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
@@ -399,7 +403,7 @@ def test_vendor_measures_a_photo_before_converting(tmp_path, monkeypatch):
     async def no_try(*_args):
         raise AssertionError("measuring must not use a generation try")
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", no_try)
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_settings] = lambda: Settings(gemini_api_key="gem-test", storage_dir=tmp_path)
@@ -460,7 +464,7 @@ def test_generate_and_measure_pass_the_listing_language(tmp_path, monkeypatch):
         seen.append(lang)
         return product_details.clean(ProductDetails.model_validate(SOFA), lang)
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_settings] = lambda: Settings(gemini_api_key="gem-test", storage_dir=tmp_path)
     try:
@@ -487,7 +491,7 @@ def test_photo_only_generation_takes_the_type_from_the_reading(tmp_path, monkeyp
     async def one_try(*_args):
         return 4
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
@@ -521,7 +525,7 @@ def test_typed_furniture_type_goes_into_the_meshy_prompt(tmp_path, monkeypatch):
     async def one_try(*_args):
         return 4
 
-    monkeypatch.setattr(vendor, "extract_product_details", fake_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "user-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()

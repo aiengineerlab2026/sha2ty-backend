@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from app.services import material_spec
 from app.services.generation_prompt import furniture_family
 from app.services.glb_size import write_glb
 
@@ -62,8 +63,10 @@ def reconstruct(components: dict[str, Any], details: dict[str, Any] | None = Non
     parts = [p for p in components.get("components") or [] if _box(p) is not None]
     if not parts:
         return None
-    lo = np.min([_box(p)[0] for p in parts], axis=0)
-    hi = np.max([_box(p)[1] for p in parts], axis=0)
+    # The envelope: handles stand proud of the fronts and do not widen the carcass.
+    body = [p for p in parts if _role(p) != "handle"] or parts
+    lo = np.min([_box(p)[0] for p in body], axis=0)
+    hi = np.max([_box(p)[1] for p in body], axis=0)
     span = np.maximum(hi - lo, 1e-9)
     scales, estimated = _scales(span, details)
     lo, hi = lo * scales, hi * scales
@@ -72,23 +75,31 @@ def reconstruct(components: dict[str, Any], details: dict[str, Any] | None = Non
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     roles: set[str] = set()
+    carcass: dict[str, Any] = {}  # the whole body's spec entry and id: its inferred panels are made of it
     for part in parts:
         role = _role(part)
         box = (_box(part)[0] * scales, _box(part)[1] * scales)
+        spec = part.get("material")  # the shared material spec entry (services/material_spec.py), when built from it
+        if part.get("carcass") and family in _MISSING:  # the whole body: built as its panels below, not one block
+            excluded.append({"name": str(part.get("name") or role), "reason": "The whole body: built as its separate panels."})
+            carcass = {"spec": part.get("material"), "spec_id": part.get("specId")}
+            continue
         if role in _EXCLUDE or (role in _UPHOLSTERY and "frame" not in str(part.get("name") or "").lower()):
             excluded.append({"name": str(part.get("name") or role), "reason": "Not part of the wooden structure."})
             if role in _UPHOLSTERY:
-                kept.append(_solid(_frame_box(box, role, board), _frame_name(role), role, "inferred", "wood", lo, estimated))
+                kept.append(_solid(_frame_box(box, role, board), _frame_name(role), role, "inferred", "wood", lo, estimated, spec_id=part.get("specId")))
                 roles.add(role)
             continue
-        material = "glass" if role == "glass" else "metal" if role == "handle" else "wood"
-        kept.append(_solid(_thicken(box, board), str(part.get("name") or role), role, "observed", material, lo, estimated))
+        material = _category(spec) if spec else "glass" if role == "glass" else "metal" if role == "handle" else "wood"
+        source = "inferred" if part.get("inferred") else "observed"
+        kept.append(_solid(_thicken(box, board), str(part.get("name") or role), role, source, material, lo, estimated, spec, part.get("specId")))
         roles.add(role)
     for role in _MISSING.get(family, ()):
         if role in roles:
             continue
-        for name, box in _missing(role, lo, hi, board):
-            kept.append(_solid(box, name, role, "inferred", "wood", lo, estimated))
+        for name, box in _missing(role, lo, hi, board, family):
+            spec = carcass.get("spec")
+            kept.append(_solid(box, name, role, "inferred", _category(spec) if spec else "wood", lo, estimated, spec, carcass.get("spec_id")))
     if not kept:
         return None
     for index, part in enumerate(kept, 1):
@@ -102,7 +113,7 @@ def reconstruct(components: dict[str, Any], details: dict[str, Any] | None = Non
         "boardThicknessCm": BOARD_CM,
         "note": NOTE,
         "hierarchy": _hierarchy(kept),
-        "components": [{k: v for k, v in part.items() if k != "box"} for part in kept],
+        "components": [{k: v for k, v in part.items() if k not in ("box", "materialSpec")} for part in kept],
         "excluded": excluded,
         "checks": checks,
     }
@@ -174,9 +185,10 @@ def _frame_name(role: str) -> str:
     return {"seat": "Seat frame", "backrest": "Backrest frame", "armrest": "Armrest frame"}.get(role, "Frame")
 
 
-def _missing(role: str, lo: np.ndarray, hi: np.ndarray, board: np.ndarray) -> list[tuple[str, tuple[np.ndarray, np.ndarray]]]:
+def _missing(role: str, lo: np.ndarray, hi: np.ndarray, board: np.ndarray, family: str = "") -> list[tuple[str, tuple[np.ndarray, np.ndarray]]]:
     span = hi - lo
-    height = lo[1] + max(span[1] * 0.3, board[1])
+    # A storage piece's sides run its full height; a bed's side rails about a third of it.
+    height = hi[1] if family in ("wardrobe", "cabinet") else lo[1] + max(span[1] * 0.3, board[1])
     if role == "side":
         return [
             ("Left Side Panel", (lo.copy(), np.array([lo[0] + board[0], height, hi[2]]))),
@@ -207,12 +219,21 @@ def _missing(role: str, lo: np.ndarray, hi: np.ndarray, board: np.ndarray) -> li
     return [one] if one else []
 
 
-def _solid(box: tuple[np.ndarray, np.ndarray], name: str, role: str, source: str, material: str, origin: np.ndarray, estimated: bool) -> dict[str, Any]:
+def _category(spec: dict[str, Any]) -> str:
+    """The report's coarse material category (wood / glass / metal / upholstery) for a material spec entry."""
+    cls = spec.get("class")
+    return {"glass": "glass", "mirror": "glass", "metal": "metal", "fabric": "upholstery", "leather": "upholstery"}.get(cls, "wood")
+
+
+def _solid(box: tuple[np.ndarray, np.ndarray], name: str, role: str, source: str, material: str, origin: np.ndarray, estimated: bool,
+           spec: dict[str, Any] | None = None, spec_id: str | None = None) -> dict[str, Any]:
     lo, hi = box
     size = (hi - lo) * 100
     center = (lo + hi) / 2 - origin
     return {
         "name": name, "role": role, "source": source, "materialCategory": material,
+        **({"specId": spec_id} if spec_id else {}),
+        **({"materialClass": spec.get("class"), "materialSpec": spec} if spec else {}),
         "classification": "inferred" if source == "inferred" else "functional" if material != "wood" else "structural",
         "sizeCm": {"width": round(float(size[0]), 1), "height": round(float(size[1]), 1), "depth": round(float(size[2]), 1)},
         "positionCm": {"x": round(float(center[0] * 100), 1), "y": round(float(center[1] * 100), 1), "z": round(float(center[2] * 100), 1)},
@@ -255,21 +276,31 @@ def _glb(parts: list[dict[str, Any]]) -> bytes:
                  {"name": "Glass", "pbrMetallicRoughness": {"baseColorFactor": [0.75, 0.85, 0.9, 0.4], "roughnessFactor": 0.05}},
                  {"name": "Metal", "pbrMetallicRoughness": {"baseColorFactor": [0.6, 0.6, 0.62, 1], "metallicFactor": 1, "roughnessFactor": 0.4}}]
     which = {"wood": 0, "glass": 1, "metal": 2}
+    which = {**which, "upholstery": 0}
+    used: set[str] = set()
     for part in parts:
         corners, faces = _corners(*part["box"])
         positions.append(corners.astype(np.float32))
         indices.append(faces.astype(np.uint32))
-        meshes.append({"name": part["name"], "primitives": [{"attributes": {"POSITION": len(accessors)}, "indices": len(parts) + len(accessors), "mode": 4, "material": which[part["materialCategory"]]}]})
+        if part.get("materialSpec"):  # its own material from the shared spec: class, colour, finish
+            mat, ext = material_spec.gltf_material(part["materialSpec"], part["name"])
+            materials.append(mat)
+            used |= ext
+            index = len(materials) - 1
+        else:
+            index = which[part["materialCategory"]]
+        meshes.append({"name": part["name"], "primitives": [{"attributes": {"POSITION": len(accessors)}, "indices": len(parts) + len(accessors), "mode": 4, "material": index}]})
         accessors.append({"bufferView": 0, "byteOffset": len(positions) * 8 * 12 - 96, "componentType": 5126, "count": 8, "type": "VEC3", "min": corners.min(0).tolist(), "max": corners.max(0).tolist()})
-        nodes.append({"name": part["name"], "mesh": len(meshes) - 1, "extras": {"partId": part["id"], "source": part["source"], "role": part["role"]}})
+        nodes.append({"name": part["name"], "mesh": len(meshes) - 1, "extras": {"partId": part["id"], "source": part["source"], "role": part["role"], **({"specId": part["specId"]} if part.get("specId") else {})}})
     for index, faces in enumerate(indices):
-        accessors.append({"bufferView": 1, "byteOffset": index * 12 * 4, "componentType": 5125, "count": 12, "type": "SCALAR"})
+        accessors.append({"bufferView": 1, "byteOffset": index * 36 * 4, "componentType": 5125, "count": 36, "type": "SCALAR"})  # 12 triangles
     doc: dict[str, Any] = {
         "asset": {"version": "2.0"}, "scene": 0,
         "scenes": [{"nodes": [len(nodes)]}],
         "nodes": nodes + [{"name": "Carpenter model", "children": list(range(len(nodes)))}],
         "meshes": meshes, "materials": materials, "accessors": accessors,
         "buffers": [{}], "bufferViews": [{}, {"target": 34963}],
+        **({"extensionsUsed": sorted(used)} if used else {}),
     }
     return write_glb(doc, [np.concatenate(positions).tobytes(), np.concatenate(indices).tobytes()])
 

@@ -1,5 +1,6 @@
 """The request bodies httpx actually sends to Meshy (captured at the transport, after serialisation)."""
 
+from tests.conftest import spec_of
 import json
 import logging
 
@@ -124,7 +125,7 @@ def test_generate_sends_the_photo_to_meshy_image_to_3d(tmp_path, monkeypatch):
         return "meshy"
 
     monkeypatch.setattr(vendor, "take_try", one_try)
-    monkeypatch.setattr(vendor, "extract_product_details", no_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(no_details))
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(),
                                      vendor.get_settings: lambda: Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)})

@@ -197,9 +197,12 @@ def _face_colours(mesh):
         return visual.face_colors[:, :3].astype(float)
     mat = getattr(visual, "material", None)
     factor = getattr(mat, "baseColorFactor", None)
-    factor = np.asarray(factor if factor is not None else getattr(mat, "main_color", [255, 255, 255, 255]), dtype=float)[:3]
-    factor = factor / 255 if factor.max() > 1 else factor
     image = getattr(mat, "baseColorTexture", None) or getattr(mat, "image", None)
+    # No factor in the file is glTF's default 1.0. trimesh's main_color for it is a 40 % grey, which made every
+    # textured model without an explicit factor read 2.5× too dark against its photo.
+    fallback = [255, 255, 255, 255] if image is not None else getattr(mat, "main_color", [255, 255, 255, 255])
+    factor = np.asarray(factor if factor is not None else fallback, dtype=float)[:3]
+    factor = factor / 255 if factor.max() > 1 else factor
     uv = getattr(visual, "uv", None)
     if image is not None and uv is not None and len(uv) == len(mesh.vertices):
         tex = np.asarray(image.convert("RGB"), dtype=float)

@@ -1,5 +1,6 @@
 """One wardrobe, two states: the same panels, the open one really open, both saved as one product."""
 
+from tests.conftest import spec_of
 import base64
 import io
 import json
@@ -115,7 +116,7 @@ def _client(monkeypatch, tmp_path, answers, uploads):
         async def create_image_to_3d_task(self, *_a, **_k):
             raise AssertionError("a wardrobe with two states is not sent to image-to-3D")
 
-    monkeypatch.setattr(vendor, "extract_product_details", no_details)
+    monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(no_details))
     monkeypatch.setattr(vendor.vision, "ask_json", vision_answer)
     s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: NoMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})

@@ -1,5 +1,6 @@
 """Photo → configured vision model cleans it → Image to 3D from those bytes → checks against the cleaned image."""
 
+from tests.conftest import spec_of
 import asyncio
 import base64
 import json
@@ -85,6 +86,14 @@ class FakeMeshy:
         return "mesh-1"
 
 
+async def cluttered(*_args, **_kwargs):
+    """The photo reading found things on the desk: the photo is cleaned before 3D."""
+    from app.schemas.product_details import ProductDetails
+    from app.services.furniture_spec import FurnitureSpec
+
+    return FurnitureSpec(details=ProductDetails(object_type="desk"), loose_objects=["books", "phone"])
+
+
 def _generate(tmp_path, monkeypatch, meshy: FakeMeshy, **settings):
     from fastapi.testclient import TestClient
 
@@ -110,8 +119,7 @@ def _generate(tmp_path, monkeypatch, meshy: FakeMeshy, **settings):
         return "gemini-3.1-pro-preview"
 
     monkeypatch.setattr(vendor, "take_try", one_try)
-    monkeypatch.setattr(vendor, "extract_product_details", nothing)
-    monkeypatch.setattr(vendor, "analysed", nothing)
+    monkeypatch.setattr(vendor, "read_furniture_spec", cluttered)
     monkeypatch.setattr(vendor.vision, "current_model", chosen)
     monkeypatch.setattr(vendor.vision, "clean_image", clean_image)
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
@@ -161,8 +169,7 @@ def test_a_refused_cleaning_step_does_not_start_3d(tmp_path, monkeypatch):
         return "gemini-3.1-pro-preview"
 
     monkeypatch.setattr(vendor, "take_try", one_try)
-    monkeypatch.setattr(vendor, "extract_product_details", nothing)
-    monkeypatch.setattr(vendor, "analysed", nothing)
+    monkeypatch.setattr(vendor, "read_furniture_spec", cluttered)
     monkeypatch.setattr(vendor.vision, "current_model", chosen)
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: meshy,
