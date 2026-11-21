@@ -151,7 +151,7 @@ def test_generate_builds_a_child_wardrobe_without_meshy(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "extract_product_details", no_details)
     monkeypatch.setattr(vendor.vision, "ask_json", layout)
     monkeypatch.setattr(vendor, "take_try", no_try)
-    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: NoMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
     try:
         with TestClient(app) as client:
@@ -192,7 +192,7 @@ def test_meshy_chosen_by_the_admin_makes_wardrobes_too(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "extract_product_details", no_details)
     monkeypatch.setattr(vendor.vision, "ask_json", no_layout)
     monkeypatch.setattr(vendor, "take_try", one_try)
-    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
     app.dependency_overrides.update({vendor.current_user: lambda: "platform-1", vendor.get_meshy: lambda: Meshy(), vendor.get_settings: lambda: s})
     try:
         with TestClient(app) as client:

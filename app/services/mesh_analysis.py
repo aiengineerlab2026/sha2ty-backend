@@ -323,11 +323,14 @@ def _fit(text: str, limit: int) -> str:
 
 
 def texture_prompt(a: MeshAnalysis, base: str) -> str:
-    """Image to 3D `texture_prompt`: each part's colour and material first (what the photo-wide brief cannot say),
-    then the base brief, cut to Meshy's 800 characters."""
+    """Image to 3D `texture_prompt`: the carpenter request stays first, then each part's colour and material, then
+    the base brief. Only the text after the carpenter request is cut to Meshy's 800 characters."""
+    from app.services.generation_prompt import split_carpenter_lead, _fit_keeping_lead
+
+    lead, rest = split_carpenter_lead(base)
     looks = [f"{c.name.lower()}: {' '.join(x for x in (c.color or '', c.material, c.texture) if x)}" for c in a.components if c.color or c.material or c.texture]
     parts = f"Photorealistic {a.objectType}. Component colors and materials: {'; '.join(looks)}." if looks else ""
-    return _fit(" ".join(x for x in (parts, base) if x), TEXTURE_PROMPT_MAX)
+    return _fit_keeping_lead(lead, " ".join(x for x in (parts, rest) if x), TEXTURE_PROMPT_MAX)
 
 
 def split_prompt(a: MeshAnalysis) -> str | None:
@@ -346,14 +349,18 @@ def split_prompt(a: MeshAnalysis) -> str | None:
     return _fit(text, SPLIT_PROMPT_MAX).rstrip(", ")
 
 
-def conditioning(prompt: str, texture: str, split: str | None, split_on: bool) -> dict[str, Any]:
+def conditioning(prompt: str, texture: str, split: str | None, split_on: bool, clean: str | None = None) -> dict[str, Any]:
     """Where the prompt went: sent to the parameters that act on it, the rest listed as not sendable (and why)."""
     return {
         "prompt": prompt,
-        "sent": {"image_to_3d.texture_prompt": texture, **({"auto_split.prompt": split} if split and split_on else {})},
+        "sent": {
+            **({"image_to_image.prompt": clean} if clean else {}),
+            "image_to_3d.texture_prompt": texture,
+            **({"auto_split.prompt": split} if split and split_on else {}),
+        },
         "notSent": [
             "Geometry, proportions and layout: Meshy Image to 3D has no prompt for geometry (only texture_prompt); "
-            "the photo alone shapes the mesh. They are used to check and name the result instead.",
+            f"the {'cleaned image' if clean else 'photo'} alone shapes the mesh. They are used to check and name the result instead.",
             *([] if split_on or not split else ["The part list: Auto Split is turned off (MESHY_AUTO_SPLIT)."]),
         ],
     }

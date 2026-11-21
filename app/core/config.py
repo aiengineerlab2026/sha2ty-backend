@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     platform_vendor_email: str = "studio@sha2ty.app"
     # After image-to-3D, split the model into its named parts with Meshy Auto Split (10 credits a task).
     meshy_auto_split: bool = True
+    # Before image-to-3D, clean the photo with the configured vision model (plan_vision_model / admin vision setting):
+    # loose objects and contents removed, hidden surfaces rebuilt. The 3D task then builds from that image.
+    # Off: the photo goes straight to image-to-3D.
+    meshy_clean_image: bool = True
+    meshy_image_model: str = "nano-banana"  # Image to Image ai_model (docs: nano-banana, nano-banana-2, gpt-image-2, ...)
 
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"

@@ -26,7 +26,7 @@ class PlanStore:
     async def catalog(self, query: str = "", vendor_id: str | None = None, limit: int = 40, offset: int = 0, model_id: str | None = None, require_3d: bool = True) -> dict[str, Any]:
         params = [
             # animation / parts: the movable parts and the part ids they name (the planner plays them), not the whole document.
-            "select=id,title,description,production_days,price,price_unit,category,furniture_type,listed,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,vendors!inner(id,name,logo_url,location),model_variants(image_url,sort_order)",
+            "select=id,title,description,production_days,price,price_unit,category,furniture_type,listed,shape,length2_m,width_m,height_m,depth_m,glb_url,states,source_image_url,thumbnail_url,vendor_id,status,animation:components->animation,parts:components->components,ar:components->ar,vendors!inner(id,name,logo_url,location),model_variants(image_url,sort_order)",
             "status=eq.ready",
             "vendors.status=eq.approved",  # only approved vendors sell (embedded filter + inner join)
             "order=title.asc",
@@ -91,6 +91,9 @@ class PlanStore:
                     "height_m": _num(row.get("height_m")),
                     "depth_m": _num(row.get("depth_m")),
                     "glb_url": row.get("glb_url"),
+                    # The lighter copy for mobile AR (services/geometry_quality.py), when one is being made; the app
+                    # falls back to glb_url when it is not there.
+                    "ar_glb_url": (row.get("ar") or {}).get("url"),
                     # The open state of a wardrobe with two (supabase/model_states.sql); the row is the closed one.
                     "open_glb_url": ((row.get("states") or {}).get("open") or {}).get("glb_url"),
                     "thumbnail": row.get("thumbnail_url") or (variants[0]["image_url"] if variants else None) or row.get("source_image_url"),  # the saved 3D model first

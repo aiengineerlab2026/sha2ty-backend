@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import mimetypes
 from urllib.parse import quote
 
 import boto3
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -15,6 +18,9 @@ class CdnError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+UPLOAD = TransferConfig(multipart_threshold=8 * 1024 * 1024, multipart_chunksize=8 * 1024 * 1024, max_concurrency=8, use_threads=True)
 
 
 class Cdn:
@@ -57,13 +63,10 @@ class Cdn:
     def upload(self, key: str, data: bytes, content_type: str | None = None) -> str:
         guessed = content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
         try:
-            self._client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=data,
-                ContentType=guessed,
-            )
-        except (BotoCoreError, ClientError) as exc:
+            # Large files in parallel parts (generated models are tens of MB): several connections at once instead of
+            # one long stream; small files stay a single request.
+            self._client.upload_fileobj(io.BytesIO(data), self.bucket, key, ExtraArgs={"ContentType": guessed}, Config=UPLOAD)
+        except (BotoCoreError, ClientError, S3UploadFailedError) as exc:
             raise CdnError(f"Could not upload to CDN: {exc}") from exc
         return self.public_url(key)
 

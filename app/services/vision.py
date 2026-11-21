@@ -9,6 +9,7 @@ the OpenAI Responses API with OPENAI_API_KEY.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -27,6 +28,14 @@ RETRIES = 1  # one extra attempt on 429 / 5xx / timeouts
 
 class VisionSettingError(RuntimeError):
     pass
+
+
+class VisionImageError(RuntimeError):
+    """The configured vision model could not return a cleaned photo."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
 
 
 CACHE_SECONDS = 30.0  # the choice is re-read this often (no restart; other API hosts follow within 30 s)
@@ -121,6 +130,84 @@ async def ask_json(content: list[dict], schema: dict, name: str, settings: Setti
     except (StopIteration, KeyError, IndexError, TypeError) as exc:
         logger.warning("Vision %s returned no text: %s", name, str(exc)[:200])
         return None
+
+
+async def clean_image(prompt: str, image: bytes, mime: str, settings: Settings, client: httpx.AsyncClient, model: str) -> bytes:
+    """One cleaned product photo from the reference image, drawn by the configured vision model."""
+    if not configured(settings, model):
+        raise VisionImageError("The vision model is not configured.")
+    if is_gemini(model):
+        return await _gemini_image(prompt, image, mime, settings, client, model)
+    return await _openai_image(prompt, image, settings, client, model)
+
+
+async def fetch_image(url: str) -> bytes:
+    """The photo bytes when generation was given a URL instead of an upload."""
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url)
+    except httpx.HTTPError as exc:
+        raise VisionImageError("The photo could not be downloaded.") from exc
+    if response.status_code >= 400 or not response.content or len(response.content) > 20 * 1024 * 1024:
+        raise VisionImageError("The photo could not be downloaded.")
+    return response.content
+
+
+async def _gemini_image(prompt: str, image: bytes, mime: str, settings: Settings, client: httpx.AsyncClient, model: str) -> bytes:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime, "data": base64.b64encode(image).decode("ascii")}},
+        ]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    headers = {"x-goog-api-key": settings.gemini_api_key.get_secret_value()}
+    body = await _image_post(url, payload, headers, settings, client, f"image cleaning {model}")
+    blocked = (body.get("promptFeedback") or {}).get("blockReason")
+    if blocked:
+        raise VisionImageError(f"The vision model refused the photo ({blocked}).")
+    for part in ((body.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []:
+        if part.get("thought"):
+            continue
+        blob = part.get("inlineData") or part.get("inline_data") or {}
+        data = blob.get("data")
+        if data:
+            try:
+                return base64.b64decode(data)
+            except ValueError as exc:
+                raise VisionImageError("The vision model returned an unreadable image.") from exc
+    raise VisionImageError("The vision model returned no image.")
+
+
+async def _openai_image(prompt: str, image: bytes, settings: Settings, client: httpx.AsyncClient, model: str) -> bytes:
+    """The vision model (Astra or Sol) edits the photo through its image tool. The tool's pixel model is openai_image_model."""
+    from app.services.image_match import ImageMatchError, ImageMatcher
+
+    try:
+        return await ImageMatcher(settings, client, model).edit(prompt, [image])
+    except ImageMatchError as exc:
+        raise VisionImageError(exc.message) from exc
+
+
+async def _image_post(url: str, payload: dict, headers: dict, settings: Settings, client: httpx.AsyncClient, what: str) -> dict:
+    started = time.monotonic()
+    try:
+        response = await client.post(url, json=payload, headers=headers, timeout=settings.openai_image_timeout_seconds)
+    except httpx.HTTPError as exc:
+        logger.warning("Vision %s request failed: %s", what, exc)
+        raise VisionImageError("Could not reach the vision model.") from exc
+    data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    logger.info("Vision %s: %s in %.1fs", what, response.status_code, time.monotonic() - started)
+    if response.status_code < 400 and isinstance(data, dict):
+        return data
+    message = ""
+    if isinstance(data, dict):
+        err = data.get("error")
+        message = str(err.get("message") if isinstance(err, dict) else err or "")
+    message = message or response.text[:300] or f"HTTP {response.status_code}"
+    logger.warning("Vision %s refused: %s", what, message[:300])
+    raise VisionImageError(message)
 
 
 async def _post(url: str, payload: dict, headers: dict, settings: Settings, client: httpx.AsyncClient, what: str) -> dict | None:

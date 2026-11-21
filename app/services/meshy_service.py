@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 IMAGE_TO_3D_PATH = "/image-to-3d"
 # Meshy's photo-to-3D model (docs: `latest` is meshy-7.1). Named explicitly so a photo is never sent to an image editor.
 IMAGE_TO_3D_MODEL = "meshy-7.1"
-# Kept only so a conversion already in the old Image to Image step can finish. New conversions do not use it:
-# that API redraws a picture (nano-banana / GPT Image) and does not build a 3D model.
+# Meshy Image to Image is not used for generation. Photo cleaning is the configured vision model (services/vision.py).
 IMAGE_TO_IMAGE_PATH = "/image-to-image"
 IMAGE_TO_IMAGE_MODEL = "nano-banana"
+MAX_REFERENCE_BYTES = 20 * 1024 * 1024  # Meshy's own image input limit
 SPLIT_PATH = "/print/split"  # Auto Split (https://docs.meshy.ai/en/api/auto-split)
 
 
@@ -135,7 +135,7 @@ class MeshyService:
         target_polycount: int | None = None,
         input_task_id: str | None = None,
     ) -> str:
-        """`input_task_id`: only for a conversion that already finished the old image step. New conversions pass the photo."""
+        """New conversions pass the cleaned photo as `image`. `input_task_id` remains for an older Meshy image task."""
         source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
         payload: dict[str, Any] = {
             **source,
@@ -152,6 +152,9 @@ class MeshyService:
         if options.should_texture:
             payload["texture_resolution"] = "2k"
             payload["enable_pbr"] = options.enable_pbr
+            # The same photo guides the texture, so the model's colors stay the ones in the picture.
+            if "image_url" in source:
+                payload["texture_image_url"] = source["image_url"]
             if texture_prompt:
                 # What the object is and "keep the photo's colours" (see generation_prompt).
                 payload["texture_prompt"] = texture_prompt
@@ -168,15 +171,26 @@ class MeshyService:
         return f"data:{mime_type};base64,{encoded.decode('ascii')}"
 
     async def create_image_to_image_task(self, prompt: str, image: bytes | None = None, mime_type: str = "image/png", image_url: str | None = None) -> str:
-        """The photo and the prompt in one Image to Image request; one image out (no multi-view), as Image to 3D's
-        `input_task_id` requires."""
+        """Meshy Image to Image. Generation does not call this: cleaning uses the configured vision model."""
         payload = {
-            "ai_model": IMAGE_TO_IMAGE_MODEL,
+            "ai_model": self._settings.meshy_image_model or IMAGE_TO_IMAGE_MODEL,
             "prompt": prompt,
             "reference_image_urls": [await self._image_source(image, mime_type, image_url)],
-            "remove_background": True,
+            "remove_background": True,  # transparent PNG: nothing of the room reaches the mesh
+            "generate_multi_view": False,  # Image to 3D's input_task_id takes exactly one image
         }
         return await self._create(IMAGE_TO_IMAGE_PATH, payload)
+
+    async def download_bytes(self, url: str) -> bytes | None:
+        """A small Meshy asset (the cleaned image) in memory; None when it cannot be fetched or is too big."""
+        try:
+            response = await self._downloads.get(url)
+        except httpx.HTTPError as exc:
+            logger.warning("Meshy asset download failed: %s", exc)
+            return None
+        if not response.is_success or len(response.content) > MAX_REFERENCE_BYTES:
+            return None
+        return response.content
 
     async def get_image_to_image_task(self, task_id: str) -> dict[str, Any]:
         response = await self._request("GET", f"{IMAGE_TO_IMAGE_PATH}/{task_id}")

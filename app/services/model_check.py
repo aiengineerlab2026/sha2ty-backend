@@ -11,6 +11,7 @@ curved pieces; a mesh-mesh intersection test is the upgrade if curved parts get 
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 from app.services.part_names import is_generic
@@ -19,6 +20,12 @@ MIN_SIZE, MAX_SIZE = 0.2, 3.5  # metres: the whole model, on every axis
 OVERLAP = 1e-6  # m³ two fronts may share (touching edges are fine)
 FLOAT_GAP = 0.01  # m: a part this far from every other part and above the floor is floating
 FRONTS = ("door", "drawer")
+
+
+def _is(name: str, *words: str) -> bool:
+    """The part's name has one of these words (any case, singular or plural, anywhere): "door_left" (the procedural
+    wardrobe's ids) and "Left Doors" or "Bottom Drawers" (carpenter names, services/component_grouping.py) alike."""
+    return any(re.search(rf"(^|[^a-z]){w}s?($|[^a-z])", name.lower()) for w in words)
 
 
 def _boxes_overlap(a, b) -> float:
@@ -88,7 +95,7 @@ def check_glb(data: bytes, family: str = "furniture") -> dict[str, Any]:
             warnings.append("Some parts share one material. Recolouring copies it per part before painting, so the shared texture is kept.")
 
     boxes = {n: m.bounds.tolist() for n, m, _ in parts}
-    fronts = [n for n in names if n.startswith(FRONTS)]
+    fronts = [n for n in names if _is(n, *FRONTS)]
     for i, a in enumerate(fronts):
         for b in fronts[i + 1:]:
             if _boxes_overlap(boxes[a], boxes[b]) > OVERLAP:
@@ -99,11 +106,11 @@ def check_glb(data: bytes, family: str = "furniture") -> dict[str, Any]:
                 errors.append(f"{n} floats, touching no other part.")
 
     if family == "wardrobe" and len(parts) > 1:
-        if not any(n.startswith(("wardrobe_body", "body", "frame")) for n in names):
+        if not any(_is(n, "body", "frame", "carcass", "cabinet") for n in names):
             errors.append("No wardrobe body.")
         if not fronts:
             warnings.append("No doors or drawers found.")
-        if fronts and not any(n.startswith("handle") for n in names):
+        if fronts and not any(_is(n, "handle", "knob", "pull") for n in names):
             warnings.append("Doors and drawers without handles.")
 
     return {"ok": not errors, "errors": errors, "warnings": warnings, "parts": len(parts)}

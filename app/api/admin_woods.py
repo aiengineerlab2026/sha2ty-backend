@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import httpx
+from fastapi.concurrency import run_in_threadpool
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 
 from app.api.admin import require_admin
@@ -44,7 +45,7 @@ async def _image(file: UploadFile | None, vendor_id: str, folder: str, request: 
     if len(data) > MAX_IMAGE:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "The image is larger than 15 MB.")
     try:
-        return request.app.state.cdn.upload(f"{vendor_id}/woods/{folder}/{uuid.uuid4()}.{ext}", data, file.content_type)
+        return await run_in_threadpool(request.app.state.cdn.upload, f"{vendor_id}/woods/{folder}/{uuid.uuid4()}.{ext}", data, file.content_type)
     except CdnError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not store the image.") from exc
 

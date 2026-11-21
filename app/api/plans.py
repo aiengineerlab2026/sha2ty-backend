@@ -361,7 +361,7 @@ async def export_plan(
     glb = export_room_glb(plan.get("geometry") or {})
     cdn: Cdn = request.app.state.cdn
     try:
-        url = cdn.upload(f"{user_id}/plans/{plan_id}/room.glb", glb, "model/gltf-binary")
+        url = await run_in_threadpool(cdn.upload, f"{user_id}/plans/{plan_id}/room.glb", glb, "model/gltf-binary")
     except CdnError as exc:
         raise HTTPException(exc.status_code, exc.message) from exc
     await store(request).update_plan(plan_id, user_id, {"glb_url": url})
@@ -382,7 +382,7 @@ async def convert_cad(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     cdn: Cdn = request.app.state.cdn
-    url = cdn.upload(f"{user_id}/converted/{uuid4().hex}.glb", glb, "model/gltf-binary")
+    url = await run_in_threadpool(cdn.upload, f"{user_id}/converted/{uuid4().hex}.glb", glb, "model/gltf-binary")
     return {"glb_url": url, "via": how}
 
 
