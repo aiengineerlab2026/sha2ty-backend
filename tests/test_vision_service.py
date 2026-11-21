@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import admin, vendor
+from app.core import config
 from app.core.config import Settings
 from app.main import app
 from app.schemas.product_details import ProductDetails
@@ -103,7 +104,7 @@ def test_vendor_generate_reads_the_photo_before_meshy(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
-    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
@@ -366,9 +367,9 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "extract_product_details", fake_details)
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
-    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
-    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
+    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), config.get_settings: lambda: s})
     png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
     form = {"category": "furniture", "title": "Oslo sofa"}
     try:
@@ -416,10 +417,10 @@ def test_vendor_measures_a_photo_before_converting(tmp_path, monkeypatch):
 
 
 def test_furniture_type_names_the_object_in_meshy_and_astra_prompts():
-    assert meshy_texture_prompt("furniture", "Oslo", kind="corner sofa").startswith("Photorealistic corner sofa: the same object as the reference image")
+    assert meshy_texture_prompt("furniture", "Oslo", kind="corner sofa").startswith("Carpenter-ready modular corner sofa only.")
     assert "3D reconstruction of the corner sofa shown in the reference image" in astra_prompt("furniture", "Oslo", kind="corner sofa")
     assert "a single corner sofa" in astra_prompt("furniture", "Oslo", kind="corner sofa")
-    assert meshy_texture_prompt("furniture").startswith("Photorealistic piece of furniture")  # no type typed: the category
+    assert meshy_texture_prompt("furniture").startswith("Carpenter-ready modular piece of furniture only.")  # no type typed: the category
     assert "wardrobe" in meshy_texture_prompt("wardrobe", kind="ignored for other categories")
 
 
@@ -490,7 +491,7 @@ def test_photo_only_generation_takes_the_type_from_the_reading(tmp_path, monkeyp
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "vendor-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
-    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
@@ -524,7 +525,7 @@ def test_typed_furniture_type_goes_into_the_meshy_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "take_try", one_try)
     app.dependency_overrides[vendor.current_user] = lambda: "user-1"
     app.dependency_overrides[vendor.get_meshy] = lambda: FakeMeshy()
-    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    app.dependency_overrides[vendor.get_settings] = lambda: Settings(meshy_api_key="msy-test", meshy_clean_image=False, gemini_api_key="gem-test", storage_dir=tmp_path)
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64

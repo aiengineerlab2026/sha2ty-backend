@@ -28,7 +28,7 @@ def test_sofa_parts_go_to_auto_split_not_to_the_texture_prompt():
     details = ProductDetails.model_validate(SOFA)
     prompt = meshy_texture_prompt("furniture", "Oslo sofa", details, "corner sofa")
     assert "Separate named meshes" not in prompt and "corner sofa" in prompt
-    assert "seat cushions" in split_prompt("furniture", "corner sofa")
+    assert "wooden base frame" in split_prompt("furniture", "corner sofa")
     assert len(prompt) <= MESHY_TEXTURE_PROMPT_MAX
 
 

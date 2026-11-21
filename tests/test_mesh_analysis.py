@@ -10,6 +10,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.api import vendor
+from app.core import config
 from app.core.config import Settings
 from app.main import app
 from app.services import mesh_analysis as ma
@@ -56,6 +57,10 @@ def test_the_prompt_goes_where_meshy_accepts_it():
     assert "Model these as independent meshes: wardrobe body, left door, right door." in prompt  # not the inferred back
     texture = ma.texture_prompt(a, "Base brief. " * 200)
     assert len(texture) <= ma.TEXTURE_PROMPT_MAX and "left door: #FFFFFF painted wood" in texture
+    from app.services.generation_prompt import meshy_texture_prompt
+    kept = ma.texture_prompt(a, meshy_texture_prompt("wardrobe") + (" Extra colour note." * 80))
+    assert kept.startswith("Carpenter-ready modular wardrobe only.") and "reflective mirrors exactly as in the reference image." in kept
+    assert len(kept) <= ma.TEXTURE_PROMPT_MAX
     assert ma.split_prompt(a) == "wardrobe body, left door, right door"
     many = copy.deepcopy(WARDROBE)
     many["components"] = [{**WARDROBE["components"][1], "id": f"drawer_{i}", "name": f"Drawer {i}"} for i in range(14)] + WARDROBE["components"][:1]
@@ -145,6 +150,9 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
         def upload(self, path, _data, _type):
             return f"https://cdn.test/{path}"
 
+        def public_url(self, path):  # the original's address is known before its upload (after the response)
+            return f"https://cdn.test/{path}"
+
     async def one_try(*_args):
         return 4
 
@@ -161,9 +169,9 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
     monkeypatch.setattr(vendor, "named", passthrough)
     monkeypatch.setattr(vendor, "sized", unchanged)
     monkeypatch.setattr(vendor, "validated", lambda glb, doc, *_a: doc)
-    s = Settings(meshy_api_key="msy-test", storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, storage_dir=tmp_path)
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
-    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), vendor.get_settings: lambda: s})
+    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), config.get_settings: lambda: s})
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64

@@ -38,11 +38,11 @@ _FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 # The parts each furniture type is cut into (Meshy Auto Split by_parts names 1–10 parts in at most 600 characters):
 # each one a separate, independently editable mesh.
 _PARTS = {
-    "sofa": "frame, seat cushions, back cushions, left armrest, right armrest, throw pillows, legs",
-    "bed": "headboard, bed frame, side rails, mattress, pillows, blanket, legs",
-    "wardrobe": "cabinet body, doors, drawers, handles, legs or plinth",
-    "table": "tabletop, apron frame, legs",
-    "chair": "backrest, seat cushion, frame, front legs, rear legs, armrests",
+    "sofa": "wooden base frame, left armrest frame, right armrest frame, backrest frame, legs",
+    "bed": "headboard, left side panel, right side panel, footboard, base supports, legs",
+    "wardrobe": "left side panel, right side panel, top panel, bottom panel, back panel, doors, shelves, drawers",
+    "table": "tabletop, apron rails, legs",
+    "chair": "backrest frame, seat frame, front legs, rear legs, armrest frames",
     "door": "door leaf, door frame, handle",
 }
 
@@ -187,15 +187,25 @@ def furniture_type(category: str | None, kind: str | None = None, details=None) 
 
 
 def meshy_prompt(category: str | None, kind: str | None = None, details=None) -> str:
-    """Meshy Image to Image `prompt`, sent with the vendor's photo in that one request. Meshy's Image to 3D has no
-    prompt field (docs.meshy.ai/en/api/image-to-3d: only `texture_prompt`, which guides the texture), so the type
-    shapes the model through the image: this edit's result is the image Image to 3D builds the geometry from."""
+    """Prompt for the configured vision model that cleans the photo. Image to 3D then builds from that image."""
     what = furniture_type(category, kind, details)
     return (
-        f"Convert this {what} into a high-quality, realistic, modular 3D model. "
-        "Preserve the reference image's geometry, colors, textures, and proportions. "
-        # What is modelled is decided here (the image Image to 3D builds from), not in the texture prompt.
-        f"{focus_rule(f'the {what}', category)} Show it whole and centred, from the same viewpoint as the photo, on a plain white background."
+        f"Create a clean, isolated product reference image of the {what} shown.\n\n"
+        f"Reconstruct the {what} as a new, empty, fully assembled product while preserving its original recognizable design, proportions, shape, colors, and materials.\n\n"
+        f"Remove all objects placed on, inside, or around the {what}, including decorations, electronic devices, books, stored contents, and loose accessories.\n\n"
+        "Reconstruct any surfaces previously hidden by removed objects.\n\n"
+        "Ensure that:\n"
+        "- Flat wooden panels are perfectly flat.\n"
+        "- Straight edges remain straight.\n"
+        "- Shelves have consistent thickness.\n"
+        "- Structural supports are correctly aligned.\n"
+        "- Curved components preserve their intended curvature.\n"
+        "- All permanent furniture components remain present.\n"
+        "- Colors, patterns, and textures stay exactly as they are in the photo.\n"
+        "- Glass stays transparent and mirrors stay reflective. Do not turn either into an opaque panel.\n"
+        "- No objects float, intersect incorrectly, or appear disconnected.\n\n"
+        f"Show the complete {what} alone against a plain neutral background in a clear three-quarter product view.\n\n"
+        f"Prioritize clean structural geometry and accurate furniture construction over photographic imperfections. Do not add decorative elements or change the {what}'s original design."
     )
 
 
@@ -214,10 +224,11 @@ Geometry and Structure:
 - Avoid warped, melted, stretched, floating, overlapping, or disconnected geometry.
 
 Materials and Textures:
-- Match the reference image's colors, patterns, textures, and materials as closely as possible.
+- Match the reference image's colors, patterns, textures, and materials exactly. Do not recolor a surface or replace its texture with a flat colour.
 - Preserve original material boundaries and component-specific colors.
-- Generate realistic PBR materials with correct UV mapping.
-- Avoid blurry textures, artificial wrinkles, discoloration, and unwanted reflections.
+- Generate realistic PBR materials with correct UV mapping. Patterned and photographed surfaces use a baseColorTexture taken from the reference image.
+- Glass stays transparent: transmission with low roughness. Mirrors stay reflective: metallicFactor 1 and roughnessFactor near 0. Keep both effects.
+- Avoid blurry textures, artificial wrinkles, discoloration, and texture stretching.
 
 Modularity:
 - Separate meaningful physical components into independently editable meshes where supported.
@@ -239,27 +250,65 @@ def reconstruction_prompt(category: str | None, kind: str | None = None, details
     return RECONSTRUCTION_PROMPT.format(object_type=furniture_type(category, kind, details))
 
 
+# Always the start of Meshy's texture_prompt, for every furniture type. Kept in front of the 800-character cut so a
+# long colour list cannot push it off the end.
+# Texture guidance only: removing objects is the Image to Image step's job (meshy_prompt), never texture_prompt's.
+CARPENTER_LEAD = (
+    "Carpenter-ready modular {object_type} only. "
+    "Keep its colors, textures, clear glass, and reflective mirrors exactly as in the reference image. "
+)
+CARPENTER_LEAD_END = "in the reference image. "
+
 # The brief's texture requirements, in its own words: what Meshy's texture_prompt can act on.
 MESHY_TEXTURE_BRIEF = (
     "Photorealistic {object_type}: the same object as the reference image, not a redesigned or stylized variation. "
     "Match the reference image's colors, patterns, textures, and materials as closely as possible. "
     "Preserve original material boundaries and component-specific colors. "
     "Realistic PBR materials with correct UV mapping. "
-    "Avoid blurry textures, artificial wrinkles, discoloration, unwanted reflections, texture stretching, and color changes."
+    "Avoid blurry textures, artificial wrinkles, discoloration, texture stretching, and color changes."
 )
 
 
+def carpenter_lead(object_type: str) -> str:
+    return CARPENTER_LEAD.format(object_type=object_type)
+
+
+def split_carpenter_lead(text: str) -> tuple[str, str]:
+    """The carpenter request, and the rest. Empty lead when this text is not a Meshy texture prompt."""
+    end = text.find(CARPENTER_LEAD_END)
+    if text.startswith("Carpenter-ready modular ") and end != -1:
+        cut = end + len(CARPENTER_LEAD_END)
+        return text[:cut], text[cut:]
+    return "", text
+
+
+def _fit_keeping_lead(lead: str, rest: str, limit: int) -> str:
+    """The carpenter request stays. Only the text after it is shortened to Meshy's limit."""
+    rest = rest.strip()
+    if not lead:
+        if len(rest) <= limit:
+            return rest
+        cut = rest[:limit]
+        return cut[: cut.rfind(".") + 1] or cut
+    if len(lead) + len(rest) <= limit:
+        return f"{lead}{rest}".strip()
+    room = limit - len(lead)
+    if room <= 1:
+        return lead[:limit].rstrip()
+    tail = rest[:room].rstrip()
+    dot = tail.rfind(".")
+    if dot > 40:
+        tail = tail[: dot + 1]
+    return f"{lead}{tail}".strip()
+
+
 def meshy_texture_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
-    """Meshy Image to 3D `texture_prompt`: texture guidance only (docs: "Text that guides the texture, up to 800
-    characters"): the reconstruction brief's texture requirements for this type, then the photo's colours and
-    materials as read, cut at a whole sentence to fit. Geometry and parts go to the settings that act on them."""
-    brief = MESHY_TEXTURE_BRIEF.format(object_type=furniture_type(category, kind, details))
+    """Meshy Image to 3D `texture_prompt`. The carpenter request is always first. Texture guidance and the photo's
+    colours follow it, and are what gets shortened when the whole prompt passes 800 characters."""
+    what = furniture_type(category, kind, details)
     name = (title or "").strip()
-    body = f"{brief} {f'The product: “{name[:80]}”. ' if name else ''}{details_text(details)}".strip()
-    if len(body) <= MESHY_TEXTURE_PROMPT_MAX:
-        return body
-    cut = body[:MESHY_TEXTURE_PROMPT_MAX]
-    return cut[: cut.rfind(".") + 1] or cut  # whole sentences only
+    rest = f"{MESHY_TEXTURE_BRIEF.format(object_type=what)} {f'The product: “{name[:80]}”. ' if name else ''}{details_text(details)}"
+    return _fit_keeping_lead(carpenter_lead(what), rest, MESHY_TEXTURE_PROMPT_MAX)
 
 
 def astra_prompt(category: str | None, title: str | None = None, details=None, kind: str | None = None) -> str:
@@ -272,9 +321,11 @@ def astra_prompt(category: str | None, title: str | None = None, details=None, k
         f"The object: {what}. {focus_rule(what, category)} {details_text(details)} {size_text(details)}{hidden} "
         f"{modular_hint(category, kind, details)} {size_rule(category, kind or _read_type(details))} "
         "Keep its real proportions, standing upright as it does in a room. "
-        "Use few vertices per part and at most 1024 px textures (or plain material colours). "
+        "Bake each photographed color and texture into the material. "
+        "Glass uses transmission and low roughness. Mirrors use metallicFactor 1 and roughnessFactor near 0. "
+        "Use few vertices per part and at most 1024 px textures. "
         "In the code interpreter, write a valid binary glTF file to /mnt/data/model.glb "
-        "(magic bytes glTF), with the colours as materials or vertex colours. Use pygltflib, trimesh, or write "
+        "(magic bytes glTF). Use pygltflib, trimesh, or write "
         "the GLB bytes yourself. The file must be a real .glb, not a description. "
         "After writing it, print the absolute path."
     )

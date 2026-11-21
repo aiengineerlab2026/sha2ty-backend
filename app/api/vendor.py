@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import hashlib
 import json
 import logging
+import time
 from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -25,7 +28,7 @@ from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
-from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_prompt, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import MAX_GLB_BYTES, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
@@ -34,7 +37,7 @@ from app.services.platform import is_platform
 from app.services.product_details import extract_product_details, in_language
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
-from app.services import animation, mesh_analysis
+from app.services import animation, carpenter, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService
 from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
@@ -67,6 +70,12 @@ class GenerateReady(BaseModel):
     states: dict | None = None
 
 
+class GenerationStep(BaseModel):
+    id: Literal["image", "mesh"]
+    status: str
+    progress: int = 0
+
+
 class TaskStatusResponse(BaseModel):
     task_id: str
     status: str
@@ -76,6 +85,8 @@ class TaskStatusResponse(BaseModel):
     retry_after_seconds: float | None = None
     components: dict | None = None
     source_glb_url: str | None = None
+    # Image to image, then image to 3D. Absent on a direct 3D task (cleaning turned off).
+    steps: list[GenerationStep] | None = None
 
 
 def sniff_image_mime(data: bytes) -> str | None:
@@ -258,12 +269,11 @@ def modular(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, 
 
 async def sized(glb: bytes, source_glb: bytes | None, components: dict) -> tuple[bytes, bytes | None, dict]:
     """The GLB made lighter (glb_size: textures and vertex data compacted, parts untouched), aiming for MAX_GLB_BYTES.
-    No size limit: a model still over the target is saved as it is. The untouched original is compacted too."""
+    No size limit: a model still over the target is saved as it is. The untouched original is compacted with its
+    upload, after the response (schedule_source)."""
     glb, report = await run_in_threadpool(fit_glb, glb)
     if report["after"] > MAX_GLB_BYTES:
         logger.info("Generated model kept at %.1f MB (over the %d MB target)", report["after"] / 1048576, MAX_GLB_BYTES // 1048576)
-    if source_glb:
-        source_glb, _ = await run_in_threadpool(fit_glb, source_glb)
     return glb, source_glb, {**components, "file": {"bytes": report["after"], "originalBytes": report["before"], "optimised": report["steps"]}}
 
 
@@ -287,10 +297,131 @@ async def named(request: Request, glb: bytes, doc: dict, category: str | None, k
         return glb, doc
 
 
+async def grouped(request: Request, glb: bytes, source_glb: bytes | None, doc: dict, photo: bytes | None, details: dict | None) -> tuple[bytes, bytes | None, dict]:
+    """The generated meshes grouped into carpenter-named components (services/component_grouping.py), checked
+    against the geometry. Anything unsafe or unidentified keeps the model as it was; the file before grouping is
+    kept as the source (the fallback) when there was none."""
+    settings = get_settings()
+    model = await vision.current_model(settings, request.app.state.auth_http)
+    ask = None
+    if vision.configured(settings, model):
+        client = vision.client_for(request.app.state, model)
+
+        async def ask(content: list[dict], schema: dict) -> str | None:
+            return await vision.ask_json(content, schema, "component_grouping", settings, client, model)
+
+    hints = [str(c.get("name") or c.get("id")) for c in ((doc.get("analysis") or {}).get("components") or []) if c.get("name") or c.get("id")]
+    try:
+        out = await component_grouping.group(glb, photo, ask, hints[:30], (details or {}).get("height_m"))
+    except Exception as exc:  # an optional step: the split model is kept on any failure
+        logger.warning("Component grouping failed: %s", str(exc)[:300])
+        out = None
+    if out is None:
+        return glb, source_glb, doc
+    grouped_glb, extra = out
+    warnings = extra["grouping"]["warnings"]
+    logger.info("Component grouping: %d → %d components %s", extra["grouping"]["partsBefore"], extra["grouping"]["components"], [c["name"] for c in extra["components"]])
+    return grouped_glb, source_glb or glb, {
+        **doc, "separated": True, "components": extra["components"], "grouping": extra["grouping"],
+        "method": f"{doc.get('method') or 'file'}+grouped",
+        **({"limits": " ".join(x for x in (doc.get("limits"), *warnings) if x)} if warnings else {}),
+    }
+
+
+async def quality_checked(glb: bytes, doc: dict, details: dict | None) -> tuple[bytes, dict, dict | None]:
+    """Geometry checked and safely repaired, each part with its own material, its class and size, and the quality
+    report (services/geometry_quality.py); also what the AR copy is made from, or None when it is not worth one."""
+    try:
+        return await run_in_threadpool(geometry_quality.process, glb, doc, (details or {}).get("height_m"), False)
+    except Exception as exc:  # an optional step: the model is kept as it was, and says so
+        logger.warning("Geometry quality step failed: %s", str(exc)[:300])
+        return glb, {**doc, "quality": {"version": geometry_quality.VERSION, "unresolved": [f"Geometry not checked: {str(exc)[:120]}"]}}, None
+
+
+def build_ar_copy(job: dict, cdn: Cdn, key: str) -> None:
+    """Background: the lighter AR copy, compacted like the model and uploaded where its document already points. If it
+    cannot be made (or is not lighter enough), nothing is uploaded and AR keeps opening the full model."""
+    try:
+        result = geometry_quality.ar_copy(job)
+        if result is None:
+            logger.info("AR copy for %s not made: not light enough to be worth it, or a check failed", key)
+            return
+        glb, info = result
+        glb, _ = fit_glb(glb)
+        cdn.upload(key, glb, "model/gltf-binary")
+        logger.info("AR copy %s: %d → %d triangles, %.1f MB", key, info["original"], info["triangles"], len(glb) / 1048576)
+    except Exception:  # noqa: BLE001 - background work: logged, the full model is the fallback
+        logger.exception("AR copy for %s failed", key)
+
+
+def upload_source(source_glb: bytes, cdn: Cdn, key: str) -> None:
+    """Background: the untouched generated model (the fallback and the "Original GLB" download), compacted and uploaded."""
+    try:
+        glb, _ = fit_glb(source_glb)
+        cdn.upload(key, glb, "model/gltf-binary")
+        logger.info("Original model %s uploaded (%.1f MB)", key, len(glb) / 1048576)
+    except Exception:  # noqa: BLE001 - background work: logged; the processed model is already saved
+        logger.exception("Original model upload %s failed", key)
+
+
+def schedule_source(background: BackgroundTasks, source_glb: bytes | None, cdn: Cdn, key: str) -> str | None:
+    """The original's address now, its upload after the response: the processed model is what the vendor waits for
+    (only it is opened in the editor); the original is a fallback and a download, and doubled the upload time."""
+    if not source_glb:
+        return None
+    background.add_task(upload_source, source_glb, cdn, key)
+    return cdn.public_url(key)
+
+
+def schedule_ar(background: BackgroundTasks, job: dict | None, cdn: Cdn, owner: str, object_id: str, doc: dict) -> dict:
+    """The AR copy is made after the response (big models take a while): its address is known now and goes in the
+    document; the AR viewer falls back to the full model until (or unless) the file is there."""
+    if job is None:
+        return doc
+    key = f"{owner}/{object_id}.ar.glb"
+    background.add_task(build_ar_copy, job, cdn, key)
+    return {**doc, "ar": {"url": cdn.public_url(key), "status": "processing"}}
+
+
+def carpenter_copy(components: dict, details: dict | None, kind: str | None, category: str | None, cdn: Cdn, key: str) -> dict:
+    """A separate carpenter GLB. The visual file is left as it is, and a failure here does not fail the generation."""
+    try:
+        built = carpenter.reconstruct(components, details, kind, category)
+        if not built:
+            return components
+        glb, report = built
+        report["url"] = cdn.upload(key, glb, "model/gltf-binary")
+    except Exception:  # noqa: BLE001 - the visual model is the product; this extra file must not fail the generation
+        logger.exception("Carpenter model %s was not built", key)
+        return components
+    return {**components, "carpenter": report}
+
+
 def validated(glb: bytes, components: dict, category: str | None, kind: str | None, photo: bytes | None = None, bbox: list[float] | None = None) -> dict:
     """The model's check (services/model_check.py) in its component document, its colours against the photo
-    included: a damaged or wrongly coloured model is flagged, not presented as a success (the review shows why)."""
-    return {**components, "validation": with_appearance(check_glb(glb, furniture_family(category, kind or None)), glb, photo, bbox)}
+    included: a damaged or wrongly coloured model is flagged, not presented as a success (the review shows why).
+    Loose objects still in the model (books, bedding, vases...) are flagged too: cleaning the image may have missed them."""
+    validation = with_appearance(check_glb(glb, furniture_family(category, kind or None)), glb, photo, bbox)
+    loose = loose_objects(components)
+    if loose:
+        validation = {**validation, "loose_objects": loose, "warnings": [*validation.get("warnings", []), f"Loose objects still in the model: {', '.join(loose[:8])}."]}
+    return {**components, "validation": validation}
+
+
+def loose_objects(components: dict) -> list[str]:
+    """Names of the components classed decorative (not part of the furniture's structure: geometry_quality.classify)."""
+    return [str(c.get("name") or c.get("id")) for c in components.get("components") or [] if geometry_quality.classify(c) == "decorative"]
+
+
+def cleaning_record(pending: dict, cdn: Cdn, key: str) -> dict:
+    """What the image-cleaning step did: its prompt and the cleaned image, copied to the CDN."""
+    record: dict = {"prompt": pending.get("clean_prompt"), "cleaned": bool(pending.get("clean_image_url"))}
+    if pending.get("reference"):
+        try:
+            record["image_url"] = cdn.upload(key, pending["reference"], "image/png")
+        except CdnError as exc:
+            logger.warning("Cleaned reference image not uploaded: %s", exc.message)
+    return record
 
 
 async def analysed(request: Request, settings: Settings, photo: bytes, mime: str, category: str, title: str, kind: str) -> mesh_analysis.MeshAnalysis | None:
@@ -389,9 +520,18 @@ async def procedural_wardrobe(
     return glb, closed, (open_glb, {**wardrobe.components_doc(open_glb, open_names), "validation": open_report})
 
 
+def _log_clean_failure(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Vision image cleaning failed: %s", getattr(exc, "message", exc))
+
+
 @router.post("/generate")
 async def generate_model(
     request: Request,
+    background: BackgroundTasks,
     meshy: Annotated[MeshyService, Depends(get_meshy)],
     astra: Annotated[AstraService, Depends(get_astra)],
     cdn: Annotated[Cdn, Depends(get_cdn)],
@@ -464,8 +604,8 @@ async def generate_model(
         if built:
             glb, components, opened = built
             try:
-                url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
-                states = {"open": {"glb_url": cdn.upload(f"{user_id}/{object_id}.open.glb", opened[0], "model/gltf-binary"), "components": opened[1]}} if opened else None
+                url = await run_in_threadpool(cdn.upload, f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+                states = {"open": {"glb_url": await run_in_threadpool(cdn.upload, f"{user_id}/{object_id}.open.glb", opened[0], "model/gltf-binary"), "components": opened[1]}} if opened else None
             except CdnError as exc:
                 raise HTTPException(exc.status_code, exc.message) from exc
             await remember(url, details, components, states=states)
@@ -482,12 +622,16 @@ async def generate_model(
             details = preread or await read_photo(request, settings, raw, mime, category, title, kind, lang)
             glb = await astra.generate_glb(raw, mime, astra_prompt(category, title, details, kind or None), settings.openai_sol_model if provider == "sol" else None)
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
+            glb, source_glb, components = await grouped(request, glb, source_glb, components, raw, details.model_dump(mode="json") if details else None)
             glb, components = await named(request, glb, components, category, kind)
+            glb, components, ar_job = await quality_checked(glb, components, details.model_dump(mode="json") if details else None)
+            components = schedule_ar(background, ar_job, cdn, user_id, object_id, components)
             glb, components = await run_in_threadpool(animation.configure, glb, components)
             glb, source_glb, components = await sized(glb, source_glb, components)
             components = await run_in_threadpool(validated, glb, components, category, kind, raw, details.bbox if details else None)
-            url = cdn.upload(f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
-            source_url = cdn.upload(f"{user_id}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
+            components = await run_in_threadpool(carpenter_copy, components, details.model_dump(mode="json") if details else None, kind, category, cdn, f"{user_id}/{object_id}.carpenter.glb")
+            url = await run_in_threadpool(cdn.upload, f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+            source_url = schedule_source(background, source_glb, cdn, f"{user_id}/{object_id}.source.glb")
             await remember(url, details, components, source_url)
         except (AstraError, CdnError) as exc:
             await bus.publish(GenerationFailed(user_id, provider), request.app.state)  # refunds the try
@@ -497,41 +641,77 @@ async def generate_model(
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
-    details = preread or (await read_photo(request, settings, raw, mime, category, title, kind, lang) if raw else None)
-    # Image to 3D is the selected Meshy model. Image to Image only redraws a 2D picture (nano-banana / GPT Image)
-    # and is not a 3D conversion. The uploaded bytes go in the request: a public URL Meshy cannot fetch never starts a task.
+    # The listing reading and the component analysis read the same photo independently: asked at the same time
+    # (each takes 30–60 s), not one after the other.
+    async def no_reading() -> None:
+        return None
+
+    details, analysis = await asyncio.gather(
+        no_reading() if preread or not raw else read_photo(request, settings, raw, mime, category, title, kind, lang),
+        analysed(request, settings, raw, mime, category, title, kind) if raw else no_reading(),
+    )
+    details = preread or details
+    # Original photo → the configured vision model cleans it (loose objects and contents removed) → Image to 3D from
+    # that image → Auto Split → grouping, naming, checks. Image to 3D has no geometry prompt, so what is removed
+    # is removed in the image. A public URL is downloaded here: the vision model needs the bytes.
     kind_type = furniture_type(category, kind or None, details)
+    clean_prompt = meshy_prompt(category, kind or None, details) if settings.meshy_clean_image else None
+    clean_model = None
     # Vision mesh analysis first: the photo's components shape the prompt. Meshy takes it where it can act on it
     # (texture_prompt, Auto Split's part list); `conditioning` records where each part went, nothing is dropped.
-    analysis = await analysed(request, settings, raw, mime, category, title, kind) if raw else None
     base_texture = meshy_texture_prompt(category, title, details, kind or None)
     split = split_prompt(category, kind or None)
     conditioning = None
     if analysis:
         base_texture = mesh_analysis.texture_prompt(analysis, base_texture)
         split = mesh_analysis.split_prompt(analysis) or split
-        conditioning = mesh_analysis.conditioning(mesh_analysis.meshy_prompt(analysis), base_texture, split, settings.meshy_auto_split)
+        conditioning = mesh_analysis.conditioning(mesh_analysis.meshy_prompt(analysis), base_texture, split, settings.meshy_auto_split, clean_prompt)
     mesh = {
         "textured": textured,
         "texture_prompt": base_texture,
         "target_polycount": target_polycount(category, kind or None),
     }
+    stage = "mesh"
+    task_id = None
+    clean_job = None
+    if clean_prompt:
+        clean_model = await vision.current_model(settings, request.app.state.auth_http)
+        photo = raw
+        try:
+            if not photo and public_url:
+                photo = await vision.fetch_image(public_url)
+            if not photo or not vision.configured(settings, clean_model):
+                raise vision.VisionImageError("The vision model is not configured." if not vision.configured(settings, clean_model) else "Provide a photo to clean.")
+        except vision.VisionImageError as exc:
+            logger.warning("Image cleaning did not start (%s): 3D generation was not started", exc.message)
+            await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, IMAGE_FAILED) from exc
+        task_id = uuid4().hex
+        clean_job = asyncio.create_task(vision.clean_image(
+            clean_prompt, photo, mime, settings, vision.client_for(request.app.state, clean_model), clean_model,
+        ))
+        clean_job.add_done_callback(_log_clean_failure)
+        stage = "image"
     try:
-        task_id = await meshy.create_image_to_3d_task(
-            GenerationOptions(should_texture=textured, enable_pbr=textured),
-            image=raw or None,
-            mime_type=mime,
-            image_url=None if raw else public_url,
-            texture_prompt=mesh["texture_prompt"] if textured else None,
-            target_polycount=mesh["target_polycount"],
-        )
+        if task_id is None:
+            task_id = await meshy.create_image_to_3d_task(
+                GenerationOptions(should_texture=textured, enable_pbr=textured),
+                image=raw or None,
+                mime_type=mime,
+                image_url=None if raw else public_url,
+                texture_prompt=mesh["texture_prompt"] if textured else None,
+                target_polycount=mesh["target_polycount"],
+            )
     except MeshyError as exc:
         await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
         raise HTTPException(exc.status_code, exc.message) from exc
-    logger.info("Meshy image-to-3d %s: furniture_type=%r category=%r analysed=%s split=%r", task_id, kind_type, category, bool(analysis), split)
+    logger.info("%s %s: furniture_type=%r category=%r analysed=%s split=%r vision_model=%s", "Vision image cleaning" if stage == "image" else "Meshy image-to-3d", task_id, kind_type, category, bool(analysis), split, clean_model)
     request.app.state.pending_cdn[task_id] = {
-        "stage": "mesh",
-        "mesh_task_id": task_id,
+        "stage": stage,
+        "mesh_task_id": task_id if stage == "mesh" else None,
+        "clean_prompt": clean_prompt,
+        "clean_job": clean_job,
+        "clean_started": time.monotonic() if clean_job else None,
         "mesh": mesh,
         "mime": mime,
         "image_url": public_url,
@@ -545,48 +725,92 @@ async def generate_model(
         "textured": textured,
         "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
     }
+    if clean_job:
+        await asyncio.sleep(0)  # the cleaning request starts before this response is sent
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
 IMAGE_STAGE = 20  # % of the progress bar the Image to Image step takes
+IMAGE_FAILED = "Image to image failed, so the 3D model was not generated."
+
+
+def _steps(image: tuple[str, int] | None, mesh: tuple[str, int] | None) -> list[GenerationStep] | None:
+    rows = []
+    if image:
+        rows.append(GenerationStep(id="image", status=image[0], progress=image[1]))
+    if mesh:
+        rows.append(GenerationStep(id="mesh", status=mesh[0], progress=mesh[1]))
+    return rows or None
+
+
+def _mesh_steps(pending: dict, status: str, progress: int) -> list[GenerationStep] | None:
+    """Image to 3D, with the cleaning step marked done when this task went through it."""
+    image = ("SUCCEEDED", 100) if pending.get("image_step") or pending.get("clean_prompt") else None
+    return _steps(image, (status, progress))
+
+
+async def _clean_failed(request: Request, task_id: str, pending: dict, reason: str, progress: int) -> TaskStatusResponse:
+    logger.warning("Image cleaning %s failed (%s): 3D generation was not started", task_id, reason)
+    owner = pending.get("user_id") or ""
+    request.app.state.pending_cdn.pop(task_id, None)
+    if owner:
+        await bus.publish(GenerationFailed(owner, "meshy"), request.app.state)
+    return TaskStatusResponse(
+        task_id=task_id, status="FAILED", progress=progress,
+        error=f"{IMAGE_FAILED} {reason}".strip() if reason else IMAGE_FAILED,
+        steps=_steps(("FAILED", progress), ("PENDING", 0)),
+    )
 
 
 async def conditioned_image(request: Request, meshy: MeshyService, task_id: str, pending: dict) -> TaskStatusResponse | None:
-    """The Image to Image step: its progress while it runs; once done, Image to 3D started from its image (None: poll
-    the 3D task). If it failed, Image to 3D starts from the photo itself and the model's notes say so."""
-    try:
-        image = await meshy.get_image_to_image_task(task_id)
-    except MeshyError as exc:
-        raise HTTPException(exc.status_code, exc.message) from exc
-    state = str(image.get("status") or "IN_PROGRESS")
-    if state in {"PENDING", "IN_PROGRESS"}:
-        return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=int(image.get("progress") or 0) * IMAGE_STAGE // 100, retry_after_seconds=4)
-    conditioned = state == "SUCCEEDED" and len(image.get("image_urls") or []) == 1  # Image to 3D needs exactly one image
-    if not conditioned:
-        err = image.get("task_error") or {}
-        reason = err.get("message") if isinstance(err, dict) else str(err)
-        logger.warning("Meshy Image to Image %s ended %s (%s): Image to 3D starts from the photo itself", task_id, state, reason)
-        pending["conditioning"] = "The furniture type could not shape this model (Meshy's image step failed); it was made from the photo alone."
-    mesh = pending["mesh"]
-    try:
-        pending["mesh_task_id"] = await meshy.create_image_to_3d_task(
-            # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
-            # file within its limit).
-            GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
-            image=None if conditioned or pending.get("image_url") else pending.get("photo"),
-            mime_type=pending.get("mime") or "image/png",
-            image_url=None if conditioned else pending.get("image_url"),
-            texture_prompt=mesh["texture_prompt"],
-            target_polycount=mesh["target_polycount"],
-            input_task_id=task_id if conditioned else None,
+    """The vision model's cleaning step. While it runs, report progress. When it returns one image, Image to 3D
+    starts from those bytes. A failed cleaning step stops the conversion: 3D is not generated from the original photo."""
+    lock = pending.setdefault("_clean_lock", asyncio.Lock())
+    async with lock:
+        if pending.get("stage") != "image":
+            return None
+        job = pending.get("clean_job")
+        if not isinstance(job, asyncio.Task):
+            return await _clean_failed(request, task_id, pending, "Image cleaning did not start.", 0)
+        if not job.done():
+            elapsed = time.monotonic() - float(pending.get("clean_started") or time.monotonic())
+            image_progress = min(95, int(elapsed / 30 * 100))
+            return TaskStatusResponse(
+                task_id=task_id, status="IN_PROGRESS", progress=image_progress * IMAGE_STAGE // 100, retry_after_seconds=4,
+                steps=_steps(("IN_PROGRESS", image_progress), ("PENDING", 0)),
+            )
+        exc = job.exception()
+        cleaned = None if exc else job.result()
+        if exc or not isinstance(cleaned, (bytes, bytearray)) or not cleaned:
+            reason = getattr(exc, "message", None) or (str(exc) if exc else "The vision model returned no image.")
+            return await _clean_failed(request, task_id, pending, reason, 0)
+        pending["clean_image_url"] = "vision"
+        # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
+        pending["reference"] = bytes(cleaned)
+        mesh = pending["mesh"]
+        try:
+            pending["mesh_task_id"] = await meshy.create_image_to_3d_task(
+                # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
+                # file within its limit). The cleaned image is the only input.
+                GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
+                image=bytes(cleaned),
+                mime_type=pending.get("mime") or "image/png",
+                texture_prompt=mesh["texture_prompt"],
+                target_polycount=mesh["target_polycount"],
+            )
+        except MeshyError as exc:
+            if request.app.state.pending_cdn.pop(task_id, None) is not None:  # nothing more will come of it: the try is given back
+                await bus.publish(GenerationFailed(pending.get("user_id") or "", "meshy"), request.app.state)
+            return TaskStatusResponse(
+                task_id=task_id, status="FAILED", progress=IMAGE_STAGE, error=exc.message,
+                steps=_steps(("SUCCEEDED", 100), ("FAILED", 0)),
+            )
+        pending["stage"] = "mesh"
+        pending["image_step"] = True  # this task spent the first part of the bar on image cleaning
+        return TaskStatusResponse(
+            task_id=task_id, status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5,
+            steps=_steps(("SUCCEEDED", 100), ("IN_PROGRESS", 0)),
         )
-    except MeshyError as exc:
-        if request.app.state.pending_cdn.pop(task_id, None) is not None:  # nothing more will come of it: the try is given back
-            await bus.publish(GenerationFailed(pending.get("user_id") or "", "meshy"), request.app.state)
-        return TaskStatusResponse(task_id=task_id, status="FAILED", progress=IMAGE_STAGE, error=exc.message)
-    pending["stage"] = "mesh"
-    pending["image_step"] = True  # this task spent the first part of the bar on Image to Image
-    return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -596,6 +820,7 @@ async def get_task(
     meshy: Annotated[MeshyService, Depends(get_meshy)],
     cdn: Annotated[Cdn, Depends(get_cdn)],
     user_id: Annotated[str, Depends(current_user)],
+    background: BackgroundTasks,
 ) -> TaskStatusResponse:
     pending = request.app.state.pending_cdn.get(task_id) or {}
     if pending.get("user_id") and pending["user_id"] != user_id:
@@ -621,6 +846,7 @@ async def get_task(
             status="FAILED" if status_value == "EXPIRED" else status_value,
             progress=progress,
             error=str(err),
+            steps=_mesh_steps(pending, "FAILED", progress),
         )
     splitting = bool(pending.get("split"))
     if status_value != "SUCCEEDED":
@@ -631,6 +857,7 @@ async def get_task(
             status=status_value,
             progress=base + progress * ((90 if splitting else 100) - base) // 100,
             retry_after_seconds=retry_after or 5,
+            steps=_mesh_steps(pending, "IN_PROGRESS", progress),
         )
 
     # Meshy image-to-3D returns one mesh; Auto Split cuts it into the vendor's furniture parts. Any split
@@ -647,7 +874,7 @@ async def get_task(
         else:
             split_status = str(split.get("status"))
             if split_status in {"PENDING", "IN_PROGRESS"}:
-                return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 10, retry_after_seconds=5)
+                return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 10, retry_after_seconds=5, steps=_mesh_steps(pending, "IN_PROGRESS", 100))
             split_glb_url = (split.get("model_urls") or {}).get("glb") if split_status == "SUCCEEDED" else None
             logger.info("Meshy Auto Split %s: status=%s part_count=%s prompt_ignored=%s error=%s", pending["split_task_id"], split_status, split.get("part_count"), split.get("prompt_ignored"), split.get("task_error"))
     owner = pending.get("user_id") or user_id
@@ -658,12 +885,12 @@ async def get_task(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Meshy finished but did not return a GLB.")
     dest = request.app.state.storage.models_dir / f"{task_id}.glb"
     try:
-        await meshy.download_file(glb_url, dest)
+        split_dest = dest.with_suffix(".split.glb")
+        # The model and its split at the same time (tens of MB each).
+        await asyncio.gather(meshy.download_file(glb_url, dest), *([meshy.download_file(split_glb_url, split_dest)] if split_glb_url else []))
         data = dest.read_bytes()
         components = None
         if split_glb_url:
-            split_dest = dest.with_suffix(".split.glb")
-            await meshy.download_file(split_glb_url, split_dest)
             info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
             logger.info("Meshy Auto Split GLB for %s: separated=%s components=%s", task_id, info.get("separated"), [c["name"] for c in info.get("components", [])])
             if info.get("separated"):  # independently editable meshes in the file, not just a reported count
@@ -671,14 +898,22 @@ async def get_task(
         if components is None:
             data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
         components = analysis_checked(components, pending)
+        reference = pending.get("reference") or pending.get("photo")
+        data, source_glb, components = await grouped(request, data, source_glb, components, reference, pending.get("details"))
         data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        data, components, ar_job = await quality_checked(data, components, pending.get("details"))
+        components = schedule_ar(background, ar_job, cdn, owner, object_id, components)
         data, components = await run_in_threadpool(animation.configure, data, components)  # movable parts, estimated interior
         if pending.get("conditioning"):  # said, not hidden: the type did not shape this model's image
             components = {**components, "limits": " ".join(x for x in (components.get("limits"), pending["conditioning"]) if x)}
         data, source_glb, components = await sized(data, source_glb, components)
-        components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), pending.get("photo"), (pending.get("details") or {}).get("bbox"))
-        url = cdn.upload(f"{owner}/{object_id}.glb", data, "model/gltf-binary")
-        source_url = cdn.upload(f"{owner}/{object_id}.source.glb", source_glb, "model/gltf-binary") if source_glb else None
+        # The photo reading's box is in the original photo: the cleaned image is framed differently, so no box for it.
+        bbox = None if pending.get("reference") else (pending.get("details") or {}).get("bbox")
+        components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), reference, bbox)
+        components = {**components, "cleaning": await run_in_threadpool(cleaning_record, pending, cdn, f"{owner}/{object_id}.clean.png")}
+        components = await run_in_threadpool(carpenter_copy, components, pending.get("details"), pending.get("kind"), pending.get("category"), cdn, f"{owner}/{object_id}.carpenter.glb")
+        url = await run_in_threadpool(cdn.upload, f"{owner}/{object_id}.glb", data, "model/gltf-binary")
+        source_url = schedule_source(background, source_glb, cdn, f"{owner}/{object_id}.source.glb")
     except (MeshyError, CdnError) as exc:
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
     if pending.get("cache_key"):

@@ -206,3 +206,12 @@ def test_meshes_sharing_one_material_get_their_own_copies():
     assert doc["materials"][legs_mat]["pbrMetallicRoughness"]["roughnessFactor"] == 0.55
     assert all(doc["materials"][i]["pbrMetallicRoughness"]["baseColorFactor"] == [0.6, 0.5, 0.4, 1] for i in (seat_mat, legs_mat))
     assert positions(rm.realistic_glb(doc, views)) == positions(data)
+
+
+def test_stored_files_are_read_by_key_whatever_host_the_url_names():
+    from app.api.realistic import _stored_key
+
+    assert _stored_key("http://localhost:8010/api/files/u1/designs/d/model/a%20b.glb") == "u1/designs/d/model/a b.glb"
+    assert _stored_key("https://api.sha2ty.net/api/files/u1/x.glb") == "u1/x.glb"
+    assert _stored_key("https://elsewhere.example/chair.glb") is None
+    assert _stored_key("http://localhost:8010/api/files/../secret") is None
