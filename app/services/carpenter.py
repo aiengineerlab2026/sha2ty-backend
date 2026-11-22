@@ -18,6 +18,7 @@ from app.services.generation_prompt import furniture_family
 from app.services.glb_size import write_glb
 
 BOARD_CM = 1.8
+PANE_CM = 0.6  # glass or mirror
 NOTE = "Not fabrication-ready until dimensions, materials, structural design, and assembly are verified."
 
 # Longer words first so "backrest" is not read as a wardrobe back.
@@ -90,9 +91,11 @@ def reconstruct(components: dict[str, Any], details: dict[str, Any] | None = Non
                 kept.append(_solid(_frame_box(box, role, board), _frame_name(role), role, "inferred", "wood", lo, estimated, spec_id=part.get("specId")))
                 roles.add(role)
             continue
-        material = _category(spec) if spec else "glass" if role == "glass" else "metal" if role == "handle" else "wood"
+        material = _category(spec) if spec else "glass" if role == "glass" or _pane(part) else "metal" if role == "handle" else "wood"
         source = "inferred" if part.get("inferred") else "observed"
-        kept.append(_solid(_thicken(box, board), str(part.get("name") or role), role, source, material, lo, estimated, spec, part.get("specId")))
+        # A glass or mirror pane keeps its own thickness (at least PANE_CM): padded to a board it would pass through
+        # the wood behind it and show on the inside face.
+        kept.append(_solid(_thicken(box, np.full(3, PANE_CM / 100.0) if material == "glass" else board), str(part.get("name") or role), role, source, material, lo, estimated, spec, part.get("specId")))
         roles.add(role)
     for role in _MISSING.get(family, ()):
         if role in roles:
@@ -144,6 +147,12 @@ def _role(part: dict[str, Any]) -> str:
     return str(part.get("type") or "other")
 
 
+def _pane(part: dict[str, Any]) -> bool:
+    """Named as a door's glass or mirror ("Door mirror"), not its frame or the wood behind it ("mirror backing")."""
+    name = str(part.get("name") or "").lower()
+    return bool(re.search(r"\b(mirror|glass)\b", name)) and not re.search(r"\b(backing|frame|back)\b", name)
+
+
 def _box(part: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
     raw = part.get("box")
     if not isinstance(raw, (list, tuple)) or len(raw) != 2:
@@ -162,7 +171,10 @@ def _thicken(box: tuple[np.ndarray, np.ndarray], board: np.ndarray) -> tuple[np.
         return lo, hi
     mid = (lo[thin] + hi[thin]) / 2
     lo, hi = lo.copy(), hi.copy()
-    lo[thin], hi[thin] = mid - board[thin] / 2, mid + board[thin] / 2
+    if thin == 2:  # a front-facing panel keeps its seen face; it thickens backwards, never into what is in front of it
+        lo[2] = hi[2] - board[2]
+    else:
+        lo[thin], hi[thin] = mid - board[thin] / 2, mid + board[thin] / 2
     return lo, hi
 
 

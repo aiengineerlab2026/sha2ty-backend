@@ -82,5 +82,18 @@ def test_glass_stays_and_identical_solids_are_flagged():
     assert any("occupy the same space" in warning for warning in report["checks"]["warnings"])
 
 
+def test_a_mirror_pane_keeps_its_thickness_in_front_of_its_backing():
+    """Padded to an 18 mm board, a 5 mm mirror would reach through its wooden backing and show on the inside face."""
+    _, report = reconstruct({"components": [
+        _part("Door mirror", "glass", [[0.1, 0.1, 0.3125], [0.9, 1.9, 0.3175]]),
+        _part("Door mirror backing", "door", [[0.1, 0.1, 0.298], [0.9, 1.9, 0.310]]),
+    ]}, kind="wardrobe", category="furniture")
+    by = {c["name"]: c for c in report["components"]}
+    assert by["Door mirror"]["sizeCm"]["depth"] == 0.6  # 5 mm read, the 6 mm pane minimum; never a board
+    mirror_back = by["Door mirror"]["positionCm"]["z"] - 0.3
+    backing_front = by["Door mirror backing"]["positionCm"]["z"] + by["Door mirror backing"]["sizeCm"]["depth"] / 2
+    assert mirror_back >= backing_front - 0.05  # the pane stays in front of the wood behind it
+
+
 def test_nothing_measurable_makes_no_carpenter_file():
     assert reconstruct({"components": [{"name": "Blob", "type": "other"}]}) is None

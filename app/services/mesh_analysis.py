@@ -443,6 +443,23 @@ def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
+# A panel's surface layer, by its own words: a door is often a mirror or glass pane in front of a wooden backing, both
+# with the same outline seen from the front. The photo only shows the front layer.
+_LAYERS = (("backing", r"\b(backing|back ?board|substrate)\b|ظهر"), ("mirror", r"\bmirror\b|مرآة|مراية"), ("glass", r"\b(glass|glazed|glazing|pane)\b|زجاج"))
+
+
+def layer(text: str) -> str | None:
+    """"backing", "mirror", "glass" or None: the surface layer a part's own name or material says it is."""
+    t = _norm(text)
+    return next((name for name, pattern in _LAYERS if re.search(pattern, t)), None)
+
+
+def _fits(mesh: dict[str, Any], c: Component) -> bool:
+    """A mesh that says which layer it is (its id or name in the file) only takes a photo component of that layer."""
+    own = layer(f"{mesh.get('id') or ''} {mesh.get('name') or ''}")
+    return own is None or own == (layer(f"{c.name} {c.material}") or ("mirror" if c.materialClass == "mirror" else "glass" if c.materialClass == "glass" else None))
+
+
 def match(doc: dict[str, Any], analysis: MeshAnalysis | None) -> dict[str, Any]:
     """The component document with each mesh matched to the analysis component it is: by name when the file's
     mesh carries one (Auto Split names its parts after the prompt), else by where it sits (front boxes, one to one,
@@ -465,9 +482,11 @@ def match(doc: dict[str, Any], analysis: MeshAnalysis | None) -> dict[str, Any]:
         if hit and hit.id not in {p.id for p in pairs.values()}:
             pairs[m["id"]] = hit
     fronts = _front_boxes(meshes)
+    # Equal outlines (a mirror and its backing): the front-most layer is what the photo shows, so it is matched first.
+    front_z = {m["id"]: float(m["box"][1][2]) for m in meshes if m.get("box")}
     scored = sorted(
-        ((_iou(fronts[m["id"]], c.box), m["id"], c) for m in meshes if m["id"] in fronts and m["id"] not in pairs for c in analysis.components if c.box),
-        key=lambda s: -s[0],
+        ((_iou(fronts[m["id"]], c.box), m["id"], c) for m in meshes if m["id"] in fronts and m["id"] not in pairs for c in analysis.components if c.box and _fits(m, c)),
+        key=lambda s: (-round(s[0], 3), -front_z.get(s[1], 0.0)),
     )
     taken = {c.id for c in pairs.values()}
     for score, mesh_id, c in scored:

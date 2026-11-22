@@ -98,6 +98,30 @@ def test_a_model_missing_parts_is_partially_modular_and_a_fused_one_is_not_modul
     assert ma.match(doc, None) is doc  # no analysis: the document as it was
 
 
+def test_a_mirror_door_s_layers_keep_their_own_photo_parts():
+    """A mirror pane and its wooden backing have the same outline from the front: the photo's mirror goes to the pane
+    (the front-most layer, whatever order the file lists them in), never to the backing behind it, and a layer whose
+    own name says mirror is never relabelled as the door's frame."""
+    a = ma.parse(json.dumps({"objectType": "wardrobe", "summary": "", "components": [
+        {"id": "door", "name": "Right door frame", "box": [0.5, 0.0, 1.0, 1.0], "material": "walnut", "materialClass": "solid_wood"},
+        {"id": "mirror", "name": "Right door mirror", "box": [0.55, 0.05, 0.95, 0.95], "material": "mirror", "materialClass": "mirror"},
+    ]}))
+    meshes = [
+        mesh("right_door_frame", "Right door frame", [1.0, 0.0, 0.295], [2.0, 2.0, 0.322]),
+        mesh("right_door_mirror_backing", "Right door mirror backing", [1.1, 0.1, 0.298], [1.9, 1.9, 0.310]),  # behind
+        mesh("right_door_mirror", "Right door mirror", [1.1, 0.1, 0.3125], [1.9, 1.9, 0.3175]),  # in front
+    ]
+    out = ma.match({"separated": True, "components": copy.deepcopy(meshes)}, a)
+    by = {c["id"]: c for c in out["components"]}
+    assert by["right_door_mirror"]["analysisId"] == "mirror" and by["right_door_frame"]["analysisId"] == "door"
+    assert "analysisId" not in by["right_door_mirror_backing"] and by["right_door_mirror_backing"]["name"] == "Right door mirror backing"
+    # Unnamed layers (Meshy part_1…): the front-most still wins the photo's mirror.
+    plain = [mesh("p1", "Part 1", *meshes[0]["box"]), mesh("p2", "Part 2", *meshes[1]["box"]), mesh("p3", "Part 3", *meshes[2]["box"])]
+    out = ma.match({"separated": True, "components": plain}, a)
+    assert {c["id"]: c.get("analysisId") for c in out["components"]} == {"p1": "door", "p2": None, "p3": "mirror"}
+    assert ma.layer("Left_outer_mirrored_door_walnut") is None and ma.layer("door mirror backing") == "backing"
+
+
 def test_auto_split_part_names_match_by_name():
     a = ma.parse(json.dumps(WARDROBE))
     doc = {"separated": True, "components": [mesh("a", "right door", [5, 5, 5], [6, 6, 6]), mesh("b", "Left Door", [7, 7, 7], [8, 8, 8]), mesh("c", "wardrobe_body", [0, 0, 0], [9, 9, 9])]}
