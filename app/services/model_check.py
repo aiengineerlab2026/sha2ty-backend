@@ -205,11 +205,27 @@ def _face_colours(mesh):
     factor = factor / 255 if factor.max() > 1 else factor
     uv = getattr(visual, "uv", None)
     if image is not None and uv is not None and len(uv) == len(mesh.vertices):
+        uv = _dequantized(uv)
         tex = np.asarray(image.convert("RGB"), dtype=float)
         th, tw = tex.shape[:2]
         fuv = uv[mesh.faces].mean(axis=1) % 1.0  # trimesh's UVs: origin bottom left
         return tex[((1 - fuv[:, 1]) * (th - 1)).astype(int), (fuv[:, 0] * (tw - 1)).astype(int)] * factor
     return np.tile(factor * 255, (len(mesh.faces), 1))
+
+
+def _dequantized(uv):
+    """trimesh returns KHR_mesh_quantization's normalised UVs (what glb_size.fit_glb writes) as raw integers. glTF
+    readers (three.js, Filament) divide them by the type's maximum; so does this, or every processed model's colours
+    are read from its texture's corner pixel.
+    ponytail: detected from the values (all integers above 1.5); reading the accessor's `normalized` flag is the upgrade."""
+    import numpy as np
+
+    uv = np.asarray(uv, dtype=float)
+    top = float(uv.max()) if uv.size else 0.0
+    if top > 1.5 and np.allclose(uv, np.round(uv)):
+        q = 65535.0 if top > 255 else 255.0
+        uv = uv / q  # trimesh already flipped V on the integers: only the scale is missing
+    return uv
 
 
 RENDER = 96  # columns of the front-view render

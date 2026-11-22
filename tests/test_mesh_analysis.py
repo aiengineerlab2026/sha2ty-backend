@@ -65,7 +65,7 @@ def test_the_prompt_goes_where_meshy_accepts_it():
     many = copy.deepcopy(WARDROBE)
     many["components"] = [{**WARDROBE["components"][1], "id": f"drawer_{i}", "name": f"Drawer {i}"} for i in range(14)] + WARDROBE["components"][:1]
     split = ma.split_prompt(ma.parse(json.dumps(many)))
-    assert split == "drawers, wardrobe body" and len(split.split(", ")) <= ma.SPLIT_MAX_PARTS  # Meshy reads 1–10 names
+    assert split == "wardrobe body, drawers" and len(split.split(", ")) <= ma.SPLIT_MAX_PARTS  # Meshy reads 1–10 names
     record = ma.conditioning(prompt, texture, "a, b", split_on=False)
     assert record["prompt"] == prompt and "auto_split.prompt" not in record["sent"]
     assert any("no prompt for geometry" in n for n in record["notSent"]) and any("Auto Split is turned off" in n for n in record["notSent"])
@@ -146,8 +146,13 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
         async def get_split_task(self, _id):
             return {"status": "SUCCEEDED", "model_urls": {"glb": "https://meshy.test/s.glb"}}
 
-        async def download_file(self, _url, dest):
-            dest.write_bytes(b"glTF")
+        async def download_file(self, url, dest):
+            # Meshy's model is one fused mesh; Auto Split's the same three boxes as three meshes.
+            import trimesh
+
+            boxes = [trimesh.creation.box(bounds=[p["box"][0], p["box"][1]]) for p in parts]
+            fused = trimesh.util.concatenate(boxes).export(file_type="glb")
+            dest.write_bytes(fused if url.endswith("/m.glb") else trimesh.Scene(boxes).export(file_type="glb"))
 
     class FakeCdn:
         def upload(self, path, _data, _type):

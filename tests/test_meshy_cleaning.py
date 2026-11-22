@@ -29,13 +29,13 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
 ])
 def test_the_cleaning_prompt_removes_loose_objects_for_any_type(category, kind, expected):
     p = meshy_prompt(category, kind or None)
-    assert p.startswith(f"Create a clean, isolated product reference image of the {expected} shown.")
-    assert f"Remove all objects placed on, inside, or around the {expected}" in p
-    assert "Reconstruct any surfaces previously hidden by removed objects." in p
-    assert "Flat wooden panels are perfectly flat." in p and "three-quarter product view" in p
-    assert "Glass stays transparent and mirrors stay reflective." in p
-    assert "Colors, patterns, and textures stay exactly as they are" in p
-    assert "Do not add decorative elements" in p
+    assert p.startswith(f"Edit this photo into a clean product reference image of the {expected} shown. This is an edit of the photo, not a new picture.")
+    assert f"Remove only the loose objects placed on, inside, or in front of the {expected}" in p
+    assert "continue the furniture's own surface behind it" in p
+    # The same camera and framing: a new viewpoint ("three-quarter product view") changed the furniture's proportions.
+    assert "The same camera viewpoint, perspective, framing and image proportions" in p and "three-quarter" not in p
+    assert "same material boundaries" in p and "Glass stays transparent and mirrors stay reflective." in p
+    assert f"Do not redesign, simplify, straighten, restyle or relight the {expected}" in p
 
 
 def test_removal_is_not_asked_of_the_texture_prompt():

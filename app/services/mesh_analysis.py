@@ -358,20 +358,46 @@ def texture_prompt(a: MeshAnalysis, base: str) -> str:
     return _fit_keeping_lead(lead, " ".join(x for x in (parts, rest) if x), TEXTURE_PROMPT_MAX)
 
 
+_POSITION_WORDS = (r"\b(left|right|top|bottom|upper|lower|front|back|rear|middle|centre|center|inner|outer|highest|lowest|"
+                   r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+)\b")
+
+
+def _kind(name: str) -> str:
+    """"Second upper cupboard door" and "Left door 2" are both a cupboard door / door: one Auto Split name per kind."""
+    return " ".join(re.sub(_POSITION_WORDS, " ", name.lower()).replace("-", " ").split()) or name.lower()
+
+
+def split_parts(a: MeshAnalysis) -> list[str]:
+    """The genuine physical components to cut the visual model into: visible (an inferred back panel is not on the
+    surface to cut), separate, structural or functional parts (no ornaments), largest first. Same-kind parts share a
+    name when there are more than Auto Split's ten ("doors"), handles last: they are the smallest."""
+    real = [c for c in a.components if c.separateMesh and c.visibility == "visible" and c.role != "decorative"]
+    area = lambda c: (c.box[2] - c.box[0]) * (c.box[3] - c.box[1]) if c.box else 0.0  # noqa: E731
+    real.sort(key=lambda c: (bool(re.search(r"handle|knob|pull", c.name.lower())), -area(c)))
+    names = [c.name.lower() for c in real]
+    if len(names) > SPLIT_MAX_PARTS:
+        groups: dict[str, list[str]] = {}
+        for n in names:
+            groups.setdefault(_kind(n), []).append(n)
+        # A part alone of its kind keeps its own name ("top panel"); a kind of several is one plural name.
+        names = [v[0] if len(v) == 1 else _plural(k) for k, v in groups.items()][:SPLIT_MAX_PARTS]
+    return list(dict.fromkeys(names))
+
+
+def _plural(name: str) -> str:
+    head, _, last = name.rpartition(" ")
+    if last.endswith("s"):
+        return name
+    last = last[:-1] + "ves" if last.endswith("f") else last[:-1] + "ies" if last.endswith("y") and last[-2:-1] not in "aeiou" else last + "s"
+    return f"{head} {last}".strip()
+
+
 def split_prompt(a: MeshAnalysis) -> str | None:
-    """Auto Split `prompt`: the separate parts to cut, by name (Meshy reads 1–10 names). Same-kind parts beyond ten
-    share a name ("doors"); None when there are fewer than two separate parts."""
-    names = [c.name.lower() for c in a.components if c.separateMesh]
+    """Auto Split `prompt` (mode by_parts): 1–10 part names, at most 600 characters; None under two parts."""
+    names = split_parts(a)
     if len(names) < 2:
         return None
-    if len(names) > SPLIT_MAX_PARTS:
-        groups: dict[str, int] = {}
-        for n in names:
-            key = re.sub(r"\b(left|right|top|bottom|upper|lower|front|back|rear|middle|centre|center|inner|outer|\d+)\b", "", n).strip() or n
-            groups[key] = groups.get(key, 0) + 1
-        names = [k if v == 1 else f"{k}s" for k, v in groups.items()][:SPLIT_MAX_PARTS]
-    text = ", ".join(names)
-    return _fit(text, SPLIT_PROMPT_MAX).rstrip(", ")
+    return _fit(", ".join(names), SPLIT_PROMPT_MAX).rstrip(", ")
 
 
 def conditioning(prompt: str, texture: str, split: str | None, split_on: bool, clean: str | None = None) -> dict[str, Any]:

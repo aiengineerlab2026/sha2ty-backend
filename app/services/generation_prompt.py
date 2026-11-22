@@ -187,25 +187,24 @@ def furniture_type(category: str | None, kind: str | None = None, details=None) 
 
 
 def meshy_prompt(category: str | None, kind: str | None = None, details=None) -> str:
-    """Prompt for the configured vision model that cleans the photo. Image to 3D then builds from that image."""
+    """Prompt for the configured vision model that cleans the photo. Image to 3D then builds from that image, so this is
+    an EDIT of the photo, never a redraw: the same camera, framing and furniture, only the loose objects gone. (It
+    used to ask for "a new product" in "a three-quarter product view", which redrew the furniture from another angle
+    and changed its proportions.) Whatever it returns is still compared with the original before Meshy sees it."""
     what = furniture_type(category, kind, details)
     return (
-        f"Create a clean, isolated product reference image of the {what} shown.\n\n"
-        f"Reconstruct the {what} as a new, empty, fully assembled product while preserving its original recognizable design, proportions, shape, colors, and materials.\n\n"
-        f"Remove all objects placed on, inside, or around the {what}, including decorations, electronic devices, books, stored contents, and loose accessories.\n\n"
-        "Reconstruct any surfaces previously hidden by removed objects.\n\n"
-        "Ensure that:\n"
-        "- Flat wooden panels are perfectly flat.\n"
-        "- Straight edges remain straight.\n"
-        "- Shelves have consistent thickness.\n"
-        "- Structural supports are correctly aligned.\n"
-        "- Curved components preserve their intended curvature.\n"
-        "- All permanent furniture components remain present.\n"
-        "- Colors, patterns, and textures stay exactly as they are in the photo.\n"
-        "- Glass stays transparent and mirrors stay reflective. Do not turn either into an opaque panel.\n"
-        "- No objects float, intersect incorrectly, or appear disconnected.\n\n"
-        f"Show the complete {what} alone against a plain neutral background in a clear three-quarter product view.\n\n"
-        f"Prioritize clean structural geometry and accurate furniture construction over photographic imperfections. Do not add decorative elements or change the {what}'s original design."
+        f"Edit this photo into a clean product reference image of the {what} shown. This is an edit of the photo, not a new picture.\n\n"
+        f"Remove only the loose objects placed on, inside, or in front of the {what}: decorations, plants, devices, books, bags, "
+        "clothes, boxes, stored contents and loose accessories. Replace the room around it with a plain white background.\n\n"
+        "Where a removed object covered the furniture, continue the furniture's own surface behind it: the same material, "
+        "colour, grain and edges.\n\n"
+        "Keep everything else exactly as photographed:\n"
+        "- The same camera viewpoint, perspective, framing and image proportions. Do not rotate, re-frame, crop, stretch or re-pose it.\n"
+        "- Every permanent component in place: panels, doors, drawers, shelves, frames, handles, legs, glass and mirrors, "
+        "with the same count, size and position.\n"
+        "- The same material boundaries, colours, patterns, wood grain, gloss and matte finishes.\n"
+        "- Glass stays transparent and mirrors stay reflective.\n\n"
+        f"Do not redesign, simplify, straighten, restyle or relight the {what}, and add nothing."
     )
 
 

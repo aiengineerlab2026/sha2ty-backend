@@ -9,7 +9,7 @@ def test_prompt_names_the_object_and_keeps_photo_colours():
     assert "ceiling light" in p and "Brass pendant" in p
     assert "Match the reference image's colors, patterns, textures, and materials" in p  # the brief's texture part
     assert "clear glass, and reflective mirrors" in p and "Remove" not in p
-    assert "plain neutral background" in meshy_prompt("ceiling_light") and "ceiling light" in meshy_prompt("ceiling_light")
+    assert "plain white background" in meshy_prompt("ceiling_light") and "ceiling light" in meshy_prompt("ceiling_light")
     assert len(p) <= MESHY_TEXTURE_PROMPT_MAX
 
 
@@ -36,8 +36,8 @@ def test_prompts_focus_on_the_product_and_ignore_its_surroundings():
     assert "one object of this type" in prompt and "any other furniture or objects" in prompt and "plants" in prompt
     assert "chairs at it" not in prompt
     image = meshy_prompt("furniture", "sofa")
-    assert image.startswith("Create a clean, isolated product reference image of the sofa shown.")
-    assert "Remove all objects placed on, inside, or around the sofa" in image
+    assert image.startswith("Edit this photo into a clean product reference image of the sofa shown.")
+    assert "Remove only the loose objects placed on, inside, or in front of the sofa" in image
 
 
 def test_a_table_keeps_its_chairs_and_nothing_else():
@@ -45,5 +45,5 @@ def test_a_table_keeps_its_chairs_and_nothing_else():
     assert "the table and the chairs at it, nothing else" in prompt
     assert "any other furniture or objects" in prompt and "tableware" in prompt
     image = meshy_prompt("table")
-    assert "the table shown" in image and "plain neutral background" in image and "three-quarter product view" in image
+    assert "the table shown" in image and "plain white background" in image and "three-quarter" not in image
     assert len(meshy_texture_prompt("table", "x" * 80)) <= MESHY_TEXTURE_PROMPT_MAX

@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.schemas.product_details import ProductDetails
 from app.schemas.vendor import GenerationOptions
 from app.services.generation_prompt import meshy_texture_prompt, split_prompt
-from app.services.meshy_service import MeshyService
+from app.services.meshy_service import MeshyService, texture_conditioning
 from tests.test_vision_service import SOFA
 
 
@@ -34,7 +34,7 @@ def test_texture_prompt_and_split_prompt_are_in_the_outgoing_payloads(caplog):
 
     async def run():
         with caplog.at_level(logging.INFO):
-            await meshy.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=False), image=b"\x89PNG photo", texture_prompt=prompt)
+            await meshy.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=False), image=b"\x89PNG photo", texture_prompt=prompt, texture_source="prompt")
             await meshy.create_split_task("task-123", parts, keep_texture=True)
 
     anyio.run(run)
@@ -42,6 +42,7 @@ def test_texture_prompt_and_split_prompt_are_in_the_outgoing_payloads(caplog):
     assert image_req.url.path == "/openapi/v1/image-to-3d"
     body = json.loads(image_req.content)
     assert body["texture_prompt"] == prompt and "seat cushions" in body["texture_prompt"]
+    assert "texture_image_url" not in body and texture_conditioning(body) == "texture_prompt"  # one texture guide, never both
     assert body["should_texture"] is True and body["ai_model"] == "meshy-7.1" and body["image_enhancement"] is False
 
     assert split_req.url.path == "/openapi/v1/print/split"
@@ -65,7 +66,7 @@ def test_meshy_is_asked_for_a_light_model_and_both_prompts_carry_the_size_rule()
 
     sent: list[httpx.Request] = []
     prompt = meshy_texture_prompt("furniture", "Oslo chair", None, "dining chair")
-    anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True), image=b"x", texture_prompt=prompt, target_polycount=target_polycount("furniture", "dining chair")))
+    anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True), image=b"x", texture_prompt=prompt, target_polycount=target_polycount("furniture", "dining chair"), texture_source="prompt"))
     body = json.loads(sent[0].content)
     # Remesh is left off: it replaces the generated surface. Textures stay 2k; glb_size shrinks the file afterwards.
     assert body["should_remesh"] is False and "target_polycount" not in body and body["texture_resolution"] == "2k"
@@ -96,7 +97,8 @@ def test_the_photo_goes_straight_to_meshy_image_to_3d(caplog):
     assert body["ai_model"] == "meshy-7.1" and body["image_enhancement"] is False
     assert body["image_url"].startswith("data:image/png;base64,") and body["texture_image_url"] == body["image_url"]
     assert "input_task_id" not in body and "prompt" not in body
-    assert body["texture_prompt"] == "A child wardrobe."
+    # Image-guided texture by default: a texture_prompt would override the photo (Meshy's precedence), so none is sent.
+    assert "texture_prompt" not in body and texture_conditioning(body) == "texture_image_url"
     assert "base64," not in caplog.text and "msy-secret" not in caplog.text
 
 

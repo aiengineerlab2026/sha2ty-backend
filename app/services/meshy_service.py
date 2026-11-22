@@ -3,7 +3,7 @@
 import base64
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import httpx
@@ -37,6 +37,50 @@ def _loggable(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(out.get("reference_image_urls"), list):
         out["reference_image_urls"] = [_redact(u) if isinstance(u, str) else u for u in out["reference_image_urls"]]
     return out
+
+
+TextureSource = Literal["image", "input", "prompt"]
+
+
+def image_to_3d_payload(options: GenerationOptions, source: dict[str, Any], texture_prompt: str | None, target_polycount: int | None,
+                        texture_source: TextureSource = "image") -> dict[str, Any]:
+    """The Image to 3D request body. Meshy reads ONE texture guide: with both `texture_prompt` and `texture_image_url`
+    in the body, texture_prompt wins (docs.meshy.ai/en/api/image-to-3d), so a generic text used to replace the photo as
+    the texture reference. Exactly one is sent now:
+      image  → texture_image_url = the image being meshed (the photo's own colours, grain, glass, metal); no prompt
+      input  → neither: Meshy textures from the input image itself
+      prompt → texture_prompt only (text guidance, the old behaviour)."""
+    payload: dict[str, Any] = {
+        **source,
+        "ai_model": IMAGE_TO_3D_MODEL,
+        # false keeps the photo as given. true restyles it before meshing, which is a different model than the one selected.
+        "image_enhancement": False,
+        "target_formats": ["glb"],
+        "should_texture": options.should_texture,
+    }
+    # Remeshing replaces the generated surface with a decimated one and is what warped furniture. The photo
+    # is meshed as Meshy generated it. File size is reduced afterwards by re-encoding textures (glb_size).
+    if target_polycount:
+        payload["should_remesh"] = False
+    if options.should_texture:
+        payload["texture_resolution"] = "2k"
+        payload["enable_pbr"] = options.enable_pbr  # metallic, roughness and normal maps besides the colour
+        if texture_source == "image" and "image_url" in source:
+            payload["texture_image_url"] = source["image_url"]
+        elif texture_source == "prompt" and texture_prompt:
+            payload["texture_prompt"] = texture_prompt
+    return payload
+
+
+def texture_conditioning(payload: dict[str, Any]) -> str:
+    """What Meshy will actually texture from, by its documented precedence."""
+    if not payload.get("should_texture"):
+        return "none"
+    if payload.get("texture_prompt"):
+        return "texture_prompt"
+    if payload.get("texture_image_url"):
+        return "texture_image_url"
+    return "input_image"
 
 
 class MeshyError(Exception):
@@ -134,31 +178,12 @@ class MeshyService:
         texture_prompt: str | None = None,
         target_polycount: int | None = None,
         input_task_id: str | None = None,
+        texture_source: TextureSource | None = None,
     ) -> str:
-        """New conversions pass the cleaned photo as `image`. `input_task_id` remains for an older Meshy image task."""
+        """`image` is exactly what Meshy meshes (the original photo, or a cleaned one that passed validation).
+        `input_task_id` remains for an older Meshy image task. `texture_source`: settings.meshy_texture_source."""
         source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
-        payload: dict[str, Any] = {
-            **source,
-            "ai_model": IMAGE_TO_3D_MODEL,
-            # false keeps the photo as given. true restyles it before meshing, which is a different model than the one selected.
-            "image_enhancement": False,
-            "target_formats": ["glb"],
-            "should_texture": options.should_texture,
-        }
-        # Remeshing replaces the generated surface with a decimated one and is what warped furniture. The photo
-        # is meshed as Meshy generated it. File size is reduced afterwards by re-encoding textures (glb_size).
-        if target_polycount:
-            payload["should_remesh"] = False
-        if options.should_texture:
-            payload["texture_resolution"] = "2k"
-            payload["enable_pbr"] = options.enable_pbr
-            # The same photo guides the texture, so the model's colors stay the ones in the picture.
-            if "image_url" in source:
-                payload["texture_image_url"] = source["image_url"]
-            if texture_prompt:
-                # What the object is and "keep the photo's colours" (see generation_prompt).
-                payload["texture_prompt"] = texture_prompt
-
+        payload = image_to_3d_payload(options, source, texture_prompt, target_polycount, texture_source or self._settings.meshy_texture_source)
         return await self._create(IMAGE_TO_3D_PATH, payload)
 
     async def _image_source(self, image: bytes | None, mime_type: str, image_url: str | None) -> str:

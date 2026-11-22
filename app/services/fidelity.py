@@ -9,8 +9,13 @@
 Each stage is ok / not ok / not judged (None) with its issues; `lostAt` names the first stage that failed, and a
 model with any failed stage is quality "low": flagged for review, never shown as a clean success.
 
-ponytail: colour palettes and box sizes, no GPU render or SSIM (same ceiling as model_check.appearance: it catches
-lost colours, lost maps, resized or decimated models; it cannot judge a subtly wrong shape).
+Beyond colour palettes, each image pair is compared as camera-aligned images: the GLB rendered from the front
+(orthographic, +z, y up: `front_render`) against the product's box in the photo, cell by cell on an 8 × 8 grid
+(where the major components and colour regions sit) and by edge structure (gradient correlation).
+
+ponytail: a point-sampled z-buffer render without lighting, no GPU or SSIM. A photo taken from three-quarters
+does not line up exactly with a front render, so layout is a diagnostic with a loose threshold; a learned
+perceptual metric is the upgrade if shape mistakes need finer judging.
 """
 
 from __future__ import annotations
@@ -27,7 +32,13 @@ logger = logging.getLogger(__name__)
 
 SIZE_TOLERANCE = 0.02  # processed bounding box may differ from the raw one by this share
 TRIANGLE_LOSS = 0.05  # processed may have this share fewer triangles (degenerate ones removed)
-ASPECT_TOLERANCE = 0.2  # cleaned product's aspect ratio against the photo's
+ASPECT_TOLERANCE = 0.12  # cleaned product's aspect ratio against the photo's: more and the cleaned image is rejected
+GRID = 8  # layout cells per side
+CELL_DE = 25  # a cell whose mean colour is this far (CIE76 ΔE) looks different
+CLEAN_LAYOUT_SHARE = 0.35  # more cells than this changed by cleaning: components changed, not just objects removed
+CLEAN_STRUCTURE_MIN = 0.4  # edge-structure correlation below this: cleaning redrew the furniture
+MODEL_ASPECT_TOLERANCE = 0.12  # the provider model's width : height against the photo reading's
+MODEL_LAYOUT_SHARE = 0.5  # front render cells unlike the photo (loose: a three-quarter photo is not a front view)
 MAP_KINDS = ("baseColorTexture", "metallicRoughnessTexture", "normalTexture", "occlusionTexture", "emissiveTexture")
 
 
@@ -59,8 +70,59 @@ def _foreground_box(image: bytes) -> tuple[list[float] | None, float | None]:
     return box, (xs.max() - xs.min() + 1) / max(ys.max() - ys.min() + 1, 1)
 
 
+def _crop(image: bytes, box: list[float] | None) -> tuple[np.ndarray, np.ndarray]:
+    """The product's box of an image as RGB (0..255) and its mask (not transparent, not plain white background)."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image)).convert("RGBA")
+    if box and len(box) == 4 and box[2] > box[0] and box[3] > box[1]:
+        w, h = img.size
+        img = img.crop((int(box[0] * w), int(box[1] * h), max(int(box[2] * w), int(box[0] * w) + 1), max(int(box[3] * h), int(box[1] * h) + 1)))
+    a = np.asarray(img.resize((64, 64)), dtype=float)
+    return a[..., :3], a[..., 3] > 16
+
+
+def _cells(rgb: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Mean Lab per grid cell and whether the cell has enough of the product in it."""
+    h, w = mask.shape
+    labs, valid = np.zeros((GRID, GRID, 3)), np.zeros((GRID, GRID), bool)
+    for i in range(GRID):
+        for j in range(GRID):
+            sl = (slice(i * h // GRID, (i + 1) * h // GRID), slice(j * w // GRID, (j + 1) * w // GRID))
+            m = mask[sl]
+            if m.mean() > 0.3:
+                labs[i, j] = model_check._lab(rgb[sl][m].mean(axis=0, keepdims=True))[0]
+                valid[i, j] = True
+    return labs, valid
+
+
+def layout_difference(a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.ndarray]) -> float | None:
+    """Share of the grid cells (product in both) whose colour differs: where the components and colour regions sit."""
+    la, va = _cells(*a)
+    lb, vb = _cells(*b)
+    both = va & vb
+    if both.sum() < GRID:
+        return None
+    de = np.linalg.norm(la - lb, axis=-1)[both]
+    return float((de > CELL_DE).mean())
+
+
+def structure_correlation(a: np.ndarray, b: np.ndarray) -> float | None:
+    """Correlation of the two images' edge maps (gradient magnitude of luminance): 1 the same edges, 0 unrelated."""
+    def edges(rgb: np.ndarray) -> np.ndarray:
+        g = rgb @ np.array([0.299, 0.587, 0.114])
+        gy, gx = np.gradient(g)
+        return np.hypot(gx, gy).ravel()
+
+    ea, eb = edges(a), edges(b)
+    if ea.std() < 1e-6 or eb.std() < 1e-6:
+        return None
+    return float(np.corrcoef(ea, eb)[0, 1])
+
+
 def compare_images(original: bytes, cleaned: bytes, bbox: list[float] | None) -> dict[str, Any]:
-    """Stage 1: did cleaning keep the product's colours and proportions?"""
+    """Stage 1: did cleaning keep the product's colours, proportions and visible components? A failed stage means the
+    cleaned image must not be meshed (vendor.conditioned_image rejects it before Meshy sees it)."""
     from PIL import Image
 
     try:
@@ -68,33 +130,186 @@ def compare_images(original: bytes, cleaned: bytes, bbox: list[float] | None) ->
         ref = model_check._palette(*model_check._photo_colours(original, bbox))
         out = model_check._palette(*model_check._photo_colours(cleaned, fg))
         w, h = Image.open(io.BytesIO(original)).size
+        before, after = _crop(original, bbox), _crop(cleaned, fg)
     except Exception as exc:  # noqa: BLE001 - nothing to compare is not judged
         return {"stage": "cleaning", "ok": None, "issues": [], "notes": [f"Not compared ({str(exc)[:80]})."]}
     issues = _missing_colours(ref, out, "The photo", "the cleaned image")
+    metrics: dict[str, Any] = {}
     if bbox and aspect:
         photo_aspect = (bbox[2] - bbox[0]) * w / max((bbox[3] - bbox[1]) * h, 1e-6)
         change = abs(aspect - photo_aspect) / photo_aspect
+        metrics["aspect"] = [round(photo_aspect, 3), round(float(aspect), 3)]
         if change > ASPECT_TOLERANCE:
-            issues.append(f"Cleaning changed the product's proportions (width : height {photo_aspect:.2f} → {aspect:.2f}).")
-    return {"stage": "cleaning", "ok": not issues, "issues": issues,
+            issues.append(f"Cleaning changed the product's proportions (width : height {photo_aspect:.2f} → {aspect:.2f}, {change:.0%}).")
+    # The original's box has the room around the product: compare every cell of the box (mask all), the cleaned one's
+    # product only.
+    layout = layout_difference((before[0], np.ones_like(before[1])), after)
+    structure = structure_correlation(before[0], after[0])
+    metrics.update(layout=layout, structure=structure)
+    if layout is not None and layout > CLEAN_LAYOUT_SHARE:
+        issues.append(f"Cleaning changed the product's visible layout: {layout:.0%} of it looks different, more than removed objects explain.")
+    if structure is not None and structure < CLEAN_STRUCTURE_MIN:
+        issues.append(f"Cleaning redrew the furniture's edges and components (edge match {structure:.2f}).")
+    return {"stage": "cleaning", "ok": not issues, "issues": issues, "metrics": metrics,
             "reference": [h for h, _, _ in ref], "cleaned": [h for h, _, _ in out]}
 
 
-def provider(raw_glb: bytes, original: bytes | None, bbox: list[float] | None, cleaned: bytes | None = None) -> dict[str, Any]:
-    """Stage 2: the raw provider model's front against the original photo. When the photo was cleaned, a colour that
-    only the removed objects had is not the provider's loss: the model passes if it matches either image."""
+RENDER_COLS = 96
+
+
+def front_render(glb: bytes, cols: int = RENDER_COLS) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The GLB from the front: orthographic along -z (glTF's front is +z), y up, base colours and textures, no
+    lighting. (RGB rows top → down, the product mask, the model's extents x y z.) The same camera for every model."""
+    import trimesh
+
+    scene = trimesh.load(io.BytesIO(glb), file_type="glb", force="scene")
+    pts, cols_ = [], []
+    meshes = []
+    for node in scene.graph.nodes_geometry:
+        transform, geom = scene.graph[node]
+        mesh = scene.geometry.get(geom)
+        if isinstance(mesh, trimesh.Trimesh) and len(mesh.faces) and mesh.area > 0:
+            meshes.append((mesh, np.asarray(transform)))
+    total = sum(m.area for m, _ in meshes) or 1.0
+    for mesh, transform in meshes:
+        n = max(400, int(max(200_000, cols * cols * 20) * mesh.area / total))
+        p, faces = trimesh.sample.sample_surface(mesh, n, seed=0)
+        pts.append(trimesh.transform_points(p, transform))
+        cols_.append(model_check._face_colours(mesh)[faces])
+    if not pts:
+        raise ValueError("no surface to render")
+    pts, colours = np.vstack(pts), np.vstack(cols_)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    span = np.maximum(hi - lo, 1e-9)
+    rows = max(1, int(round(cols * span[1] / span[0])))
+    ix = np.minimum(((pts[:, 0] - lo[0]) / span[0] * cols).astype(int), cols - 1)
+    iy = np.minimum(((hi[1] - pts[:, 1]) / span[1] * rows).astype(int), rows - 1)  # row 0 = top
+    cell = iy * cols + ix
+    order = np.lexsort((pts[:, 2], cell))  # nearest to the camera (largest z) last
+    last = np.flatnonzero(np.r_[cell[order][1:] != cell[order][:-1], True])
+    image, mask = np.zeros((rows * cols, 3)), np.zeros(rows * cols, bool)
+    image[cell[order[last]]] = colours[order[last]]
+    mask[cell[order[last]]] = True
+    return image.reshape(rows, cols, 3), mask.reshape(rows, cols), span
+
+
+def render_png(glb: bytes, cols: int = 256) -> bytes:
+    """The front render as a PNG (white where there is no model), for side-by-side comparisons."""
+    from PIL import Image
+
+    rgb, mask, _ = front_render(glb, cols)
+    rgb[~mask] = 255
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _resized(rgb: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    from PIL import Image
+
+    img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).resize((64, 64))
+    m = Image.fromarray(mask.astype(np.uint8) * 255).resize((64, 64))
+    return np.asarray(img, dtype=float), np.asarray(m) > 127
+
+
+def proportions(span: np.ndarray, expected: list[float] | None) -> tuple[list[str], dict[str, Any]]:
+    """The model's width : height : depth against the photo reading's (`expected` width : depth : height, largest 1),
+    and whether an axis looks swapped (the reading's width shows up as the model's depth, or it lies on its side)."""
+    if not expected or len(expected) != 3 or min(expected) <= 0:
+        return [], {}
+    w, d, h = expected
+    x, y, z = (float(v) for v in span)
+    issues: list[str] = []
+    model_aspect, photo_aspect = x / y, w / h
+    change = model_aspect / photo_aspect - 1
+    if abs(change) > MODEL_ASPECT_TOLERANCE:
+        issues.append(f"The model is {abs(change):.0%} {'wider' if change > 0 else 'narrower'} than the photo for its height "
+                      f"(width : height {model_aspect:.2f}, photo {photo_aspect:.2f}).")
+    target = np.array([w, h, d]) / max(w, h, d)
+    got = np.array([x, y, z]) / max(x, y, z)
+    fits = {name: float(np.abs(np.log(np.maximum(got[list(perm)], 1e-6) / np.maximum(target, 1e-6))).sum())
+            for name, perm in (("as is", (0, 1, 2)), ("width and depth swapped", (2, 1, 0)), ("on its side", (1, 0, 2)), ("on its back", (0, 2, 1)))}
+    best = min(fits, key=fits.get)
+    if best != "as is" and fits[best] < 0.6 * fits["as is"]:
+        issues.append(f"The model's axes look wrong ({best}): its width × height × depth is {x:.2f} × {y:.2f} × {z:.2f}.")
+    return issues, {"modelWHD": [round(x / y, 3), 1.0, round(z / y, 3)], "photoWHD": [round(w / h, 3), 1.0, round(d / h, 3)], "axisFit": {k: round(v, 3) for k, v in fits.items()}}
+
+
+def provider(raw_glb: bytes, original: bytes | None, bbox: list[float] | None, cleaned: bytes | None = None,
+             expected: list[float] | None = None, layout: bool = False) -> dict[str, Any]:
+    """Stage 2: the raw provider model against the original photo. When the photo was cleaned, a colour that only the
+    removed objects had is not the provider's loss: the colours pass if they match either image. `layout`: also the
+    camera-aligned render (proportions, axes, where the components sit), for Meshy."""
     if not original:
         return {"stage": "provider", "ok": None, "issues": [], "notes": ["No photo to compare with."]}
     look = model_check.appearance(raw_glb, original, bbox)
-    result = {"stage": "provider", "ok": look["ok"], "issues": look["issues"], "reference": look.get("reference"), "model": look.get("model")}
+    result: dict[str, Any] = {"stage": "provider", "ok": look["ok"], "issues": list(look["issues"]), "reference": look.get("reference"), "model": look.get("model")}
     if look.get("note"):
         result.update(ok=None, notes=[look["note"]])
     if not look["ok"] and cleaned:
         fg, _ = _foreground_box(cleaned)
         again = model_check.appearance(raw_glb, cleaned, fg)
         if again["ok"]:
-            result.update(ok=True, notes=["Matches the cleaned image; the photo's other colours were the removed objects."])
+            result.update(ok=True, issues=[], notes=["Matches the cleaned image; the photo's other colours were the removed objects."])
+    if not layout:
+        return result
+    try:
+        rgb, mask, span = front_render(raw_glb)
+        ref = _crop(cleaned, _foreground_box(cleaned)[0]) if cleaned else _crop(original, bbox)
+    except Exception as exc:  # noqa: BLE001 - an unreadable model or photo is not judged on layout
+        result.setdefault("notes", []).append(f"Layout not compared ({str(exc)[:80]}).")
+        return result
+    shape_issues, metrics = proportions(span, expected)
+    share = layout_difference(_resized(rgb, mask), (ref[0], ref[1] if cleaned else np.ones_like(ref[1])))
+    metrics["layout"] = share
+    if share is not None and share > MODEL_LAYOUT_SHARE:
+        shape_issues.append(f"Major components are not where the photo shows them: {share:.0%} of the front view differs.")
+    result["metrics"] = metrics
+    if shape_issues:
+        result.update(ok=False, issues=[*result["issues"], *shape_issues])
     return result
+
+
+def mesh_count(glb: bytes) -> int:
+    """Independent meshes in the file: geometry instances with faces (one fused mesh is 1)."""
+    import trimesh
+
+    scene = trimesh.load(io.BytesIO(glb), file_type="glb", force="scene")
+    return sum(1 for node in scene.graph.nodes_geometry if len(getattr(scene.geometry.get(scene.graph[node][1]), "faces", [])))
+
+
+def split_check(raw: bytes, split: bytes | None, task: dict[str, Any]) -> dict[str, Any]:
+    """Meshy Auto Split's result, accepted only when it really is the same model in several meshes: SUCCEEDED, the
+    part names read (not prompt_ignored), more than one mesh in the file, the raw model's size and triangles, and
+    its texture maps (keep_texture). Otherwise the unsplit model stays the visual one and `reasons` say why."""
+    report: dict[str, Any] = {"stage": "split", **{k: task.get(k) for k in ("status", "taskId", "partCount", "promptIgnored", "error", "prompt")}}
+    reasons: list[str] = []
+    try:
+        report["meshesBefore"] = mesh_count(raw)
+    except Exception:  # noqa: BLE001
+        report["meshesBefore"] = None
+    if task.get("status") != "SUCCEEDED" or split is None:
+        reasons.append(f"Auto Split did not finish ({task.get('status') or 'no result'}{': ' + str(task.get('error')) if task.get('error') else ''}).")
+    else:
+        if task.get("promptIgnored"):
+            reasons.append("Auto Split ignored the part names (prompt_ignored): its cut would follow no real component.")
+        try:
+            report["meshesAfter"] = mesh_count(split)
+        except Exception as exc:  # noqa: BLE001 - an unreadable split file is a failed split
+            report["meshesAfter"] = None
+            reasons.append(f"Auto Split's file cannot be read ({str(exc)[:80]}).")
+            report.update(ok=False, accepted=False, issues=reasons)
+            return report
+        if report["meshesAfter"] < 2:
+            reasons.append("Auto Split returned one fused mesh.")
+        for stage in compare_glbs(raw, split):
+            reasons += [f"After splitting: {issue}" for issue in stage["issues"] if "triangles" not in issue or stage["stage"] != "processing"]
+            if stage["stage"] == "processing":
+                tris = stage.get("metrics", {}).get("triangles") or [0, 0]
+                if tris[0] and abs(tris[1] - tris[0]) / tris[0] > 0.1:
+                    reasons.append(f"After splitting: the triangle count changed {tris[0]} → {tris[1]}: the surface was rebuilt.")
+    report.update(ok=not reasons, accepted=not reasons, issues=reasons)
+    return report
 
 
 def _maps(doc: dict[str, Any]) -> tuple[set[str], set[str], int]:
@@ -155,8 +370,13 @@ def compare_glbs(raw: bytes, processed: bytes) -> list[dict[str, Any]]:
     out_kinds, out_exts, out_images = _maps(out_doc)
     mats: list[str] = []
     notes: list[str] = []
+    flattened = [m.get("name") or "" for m in out_doc.get("materials") or [] if ((m.get("extras") or {}).get("sha2ty") or {}).get("flattened")]
     for k in sorted(raw_kinds - out_kinds):
+        if k == "baseColorTexture" and flattened:
+            continue  # replaced on purpose (surface_finish): said in the notes below, not a loss
         mats.append(f"The processed model lost its {k.replace('Texture', '')} map.")
+    if flattened:
+        notes.append(f"{len(flattened)} material(s) had photographed lighting tiled across them and now show their own even colour.")
     for e in sorted(raw_exts - out_exts - {"KHR_mesh_quantization", "KHR_texture_transform"}):
         mats.append(f"The processed model lost the {e} material extension.")
     if out_images < raw_images:
@@ -164,8 +384,9 @@ def compare_glbs(raw: bytes, processed: bytes) -> list[dict[str, Any]]:
     raw_side, out_side = _texture_side(raw_doc, _views(raw_doc, raw_bin)), _texture_side(out_doc, _views(out_doc, out_bin))
     if raw_side and out_side and out_side < raw_side:
         notes.append(f"Textures re-encoded from {raw_side} px to {out_side} px to fit the 8 MB file target.")
+    meshes = [mesh_count(raw), mesh_count(processed)]
     return [
-        {"stage": "processing", "ok": not geo, "issues": geo, "metrics": {"triangles": [raw_tris, out_tris], "extents": [raw_ext.round(4).tolist(), out_ext.round(4).tolist()]}},
+        {"stage": "processing", "ok": not geo, "issues": geo, "metrics": {"triangles": [raw_tris, out_tris], "meshes": meshes, "extents": [raw_ext.round(4).tolist(), out_ext.round(4).tolist()]}},
         {"stage": "materials", "ok": not mats, "issues": mats, "notes": notes, "metrics": {"maps": sorted(out_kinds), "images": [raw_images, out_images], "textureSide": [raw_side, out_side]}},
     ]
 
@@ -181,7 +402,8 @@ def structural(report: dict[str, Any] | None) -> dict[str, Any]:
 
 def report(stages: list[dict[str, Any]]) -> dict[str, Any]:
     failed = [s for s in stages if s.get("ok") is False]
-    visual_failed = [s for s in failed if s["stage"] != "structural"]
+    # A rejected split or cleaned image was not used: reported, but the visual model did not lose fidelity by it.
+    visual_failed = [s for s in failed if s["stage"] not in ("structural", "split") and not s.get("rejected")]
     return {
         "version": 1,
         "ok": not visual_failed,
