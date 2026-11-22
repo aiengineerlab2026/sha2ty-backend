@@ -193,10 +193,14 @@ def configure(glb: bytes, doc: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
             motion = a.get("motion") or {}
             if motion.get("type") not in (None, "none"):
                 movers.append((by_analysis.get(a["id"]), motion, a.get("name") or a["id"], a.get("nameAr") or None, "vision"))
-    else:
-        for c in components:
-            if guess := _guess(c):
-                movers.append((c, guess, c.get("name") or c["id"], c.get("nameAr"), "names"))
+    # Meshes the analysis did not match (a model of 129 meshes against 30 read components): their names still say
+    # what they are, so a glazed door the reading saw as one component still moves.
+    # Only when the reading says it has moving parts at all: a static object (a table) never gets name-guessed doors.
+    matched = {id(c) for c, *_ in movers if c is not None}
+    names_count = not analysis or bool(analysis.get("movable")) or bool(movers)
+    for c in components:
+        if names_count and id(c) not in matched and not (analysis and c.get("analysisId")) and (guess := _guess(c)):
+            movers.append((c, guess, c.get("name") or c["id"], c.get("nameAr"), "names"))
     for c, motion, label, label_ar, source in movers:
         why = _blocked(c, components, whole, separated)
         if why:

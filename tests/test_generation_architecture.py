@@ -280,7 +280,7 @@ class FakeMeshy:
         return {"status": "SUCCEEDED", "progress": 100, "model_urls": {"glb": "https://meshy.test/m.glb"}}, None
 
     async def create_split_task(self, *_a):
-        raise AssertionError("Auto Split is not called by default")
+        raise AssertionError("Auto Split is off in this test")
 
     async def download_file(self, _url, dest):
         dest.write_bytes(self.glb)
@@ -311,7 +311,7 @@ def run_meshy(tmp_path, monkeypatch, spec_json):
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor.bus, "publish", quiet)
     meshy, cdn = FakeMeshy(raw), FakeCdn()
-    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, meshy_auto_split=False)  # the minimum-cost path
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: meshy, vendor.get_cdn: lambda: cdn, config.get_settings: lambda: s})
     try:

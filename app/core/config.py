@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,9 +22,16 @@ class Settings(BaseSettings):
     meshy_download_timeout_seconds: float = 300.0
     # The platform's own vendor (admin-added catalogue models): its system user's email (services/platform.py).
     platform_vendor_email: str = "studio@sha2ty.app"
-    # After image-to-3D, split the visual model into named parts with Meshy Auto Split (10 credits a task, and it
-    # rewrites the visual mesh). Off: the editable parts are the structural model's, built from the spec for free.
-    meshy_auto_split: bool = False
+    # After image-to-3D, Meshy Auto Split (by_parts, 10 credits) cuts the visual model into the photo reading's
+    # physical components. Its result is used only when the file really has several meshes with the raw model's
+    # size, geometry and textures; otherwise the unsplit model is kept and the report says why. Off: no split call.
+    meshy_auto_split: bool = True
+    # What Meshy textures from (meshy_service.image_to_3d_payload): "image" the meshed photo as texture_image_url,
+    # "input" Meshy's default from the input image, "prompt" texture_prompt text only.
+    meshy_texture_source: Literal["image", "input", "prompt"] = "image"
+    # A cleaned photo that fails validation (proportions, layout, colours) is not meshed: the original photo is
+    # used instead when the product reading is confident, and the model's notes say so.
+    meshy_use_original_on_bad_cleaning: bool = True
     # Vision calls on the generated visual model (grouping its meshes, naming them). Off: one vision call per photo,
     # parts named from their geometry and matched to the spec.
     visual_part_ai: bool = False

@@ -35,11 +35,11 @@ from app.services.model_check import check_glb, check_states, with_appearance
 from app.services.part_names import name_components
 from app.services.platform import is_platform
 from app.services.product_details import in_language
-from app.services import fidelity, furniture_spec, material_spec, structural
+from app.services import fidelity, furniture_spec, material_spec, structural, surface_finish
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
-from app.services.meshy_service import MeshyError, MeshyService
+from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, texture_conditioning
 from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
 
@@ -431,13 +431,19 @@ def upload_raw(raw: bytes, cdn: Cdn, key: str) -> None:
         logger.exception("Raw provider model %s was not uploaded", key)
 
 
-def fidelity_checked(components: dict, raw: bytes, glb: bytes, photo: bytes | None, cleaned: bytes | None, bbox: list[float] | None) -> dict:
+def fidelity_checked(components: dict, raw: bytes, glb: bytes, photo: bytes | None, cleaned: bytes | None, bbox: list[float] | None,
+                     cleaning: dict | None = None, split: dict | None = None, expected: list[float] | None = None, layout: bool = False) -> dict:
     """Where the visual model lost fidelity (services/fidelity.py), stage by stage. A failed stage flags the model
-    (quality "low", its issues in the validation warnings) instead of passing it as a success."""
+    (quality "low", its issues in the validation warnings) instead of passing it as a success. `cleaning`: the check
+    already made before meshing; `split`: Auto Split's; `layout`: the camera-aligned render checks (Meshy)."""
     stages = []
-    if cleaned and photo:
+    if cleaning:
+        stages.append(cleaning)
+    elif cleaned and photo:
         stages.append(fidelity.compare_images(photo, cleaned, bbox))
-    stages.append(fidelity.provider(raw, photo, bbox, cleaned))
+    stages.append(fidelity.provider(raw, photo, bbox, cleaned, expected, layout))
+    if split:
+        stages.append(split)
     stages += fidelity.compare_glbs(raw, glb)
     stages.append(fidelity.structural(components.get("structural") and {**(components.get("carpenter") or {}), **components["structural"]}))
     result = fidelity.report(stages)
@@ -466,14 +472,56 @@ def loose_objects(components: dict) -> list[str]:
 
 
 def cleaning_record(pending: dict, cdn: Cdn, key: str) -> dict:
-    """What the image-cleaning step did: its prompt and the cleaned image, copied to the CDN."""
+    """What the image-cleaning step did: its prompt, its check against the original, and the cleaned image (used or
+    rejected), copied to the CDN."""
     record: dict = {"prompt": pending.get("clean_prompt"), "cleaned": bool(pending.get("clean_image_url"))}
-    if pending.get("reference"):
+    if pending.get("cleaning_check"):
+        record["check"] = pending["cleaning_check"]
+        record["rejected"] = bool(pending["cleaning_check"].get("rejected"))
+    image = pending.get("reference") or pending.get("rejected_clean")
+    if image:
         try:
-            record["image_url"] = cdn.upload(key, pending["reference"], "image/png")
+            record["image_url"] = cdn.upload(key, image, "image/png")
         except CdnError as exc:
             logger.warning("Cleaned reference image not uploaded: %s", exc.message)
     return record
+
+
+def meshy_input(image: bytes | None, mime: str, source: str, mesh: dict, url: str | None = None) -> dict:
+    """What Meshy Image to 3D was given: which image (its hash and size), and what it textures from, computed from
+    the same payload builder the request uses."""
+    settings = get_settings()
+    payload = image_to_3d_payload(GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]), {"image_url": "<image>"},
+                                  mesh.get("texture_prompt"), mesh.get("target_polycount"), settings.meshy_texture_source)
+    return {
+        "source": source, "mime": mime, "bytes": len(image) if image else None, "url": url,
+        "sha256": hashlib.sha256(image).hexdigest() if image else None,
+        "texture": texture_conditioning(payload), "textureSource": settings.meshy_texture_source,
+        "fields": sorted(payload),
+    }
+
+
+def meshy_input_uploaded(record: dict | None, image: bytes | None, cdn: Cdn, key: str) -> dict | None:
+    """The exact image Meshy meshed, kept beside the model (its record gets the address)."""
+    if not record or not image:
+        return record
+    ext = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp"}.get(record.get("mime") or "", "png")
+    try:
+        return {**record, "url": cdn.upload(f"{key}.{ext}", image, record.get("mime") or "image/png")}
+    except CdnError as exc:
+        logger.warning("Meshy input image not uploaded: %s", exc.message)
+        return record
+
+
+def meshy_parts(glb: bytes, category: str | None, kind: str | None) -> tuple[bytes, None, dict]:
+    """The meshes Meshy's file really has. One fused mesh stays one: it is never cut into guessed parts by its
+    geometry (that is Astra's `modular`); the structural model is where the components are edited."""
+    family = furniture_family(category, kind or None)
+    info = inspect_glb(glb, family)
+    if info.get("separated"):
+        return glb, None, {**info, "method": "file"}
+    return glb, None, {**info, "method": "none", "limits": "Meshy returned one fused mesh: the visual model is not modular. "
+                       "Edit its components in the structural model."}
 
 
 def analysis_checked(components: dict, pending: dict) -> dict:
@@ -665,8 +713,9 @@ async def generate_model(
             )
             raw_glb = glb  # the provider's file before any change, kept and compared with
             background.add_task(upload_raw, raw_glb, cdn, f"{user_id}/{object_id}.raw.glb")
+            glb, surfaces = await run_in_threadpool(surface_finish.flatten, glb)  # photographed lighting tiled on panels
             glb, source_glb, components = await run_in_threadpool(modular, glb, category, kind)
-            components = mesh_analysis.match(components, spec.analysis if spec else None)
+            components = {**mesh_analysis.match(components, spec.analysis if spec else None), **({"surfaces": surfaces} if surfaces else {})}
             glb, source_glb, components = await grouped(request, glb, source_glb, components, raw, details.model_dump(mode="json") if details else None)
             glb, components = await named(request, glb, components, category, kind)
             glb, components, ar_job = await quality_checked(glb, components, details.model_dump(mode="json") if details else None)
@@ -739,6 +788,7 @@ async def generate_model(
         ))
         clean_job.add_done_callback(_log_clean_failure)
         stage = "image"
+    direct_input = meshy_input(raw or None, mime, "original", mesh, None if raw else public_url) if task_id is None else None
     try:
         if task_id is None:
             task_id = await meshy.create_image_to_3d_task(
@@ -773,6 +823,8 @@ async def generate_model(
         "meshy_conditioning": conditioning,
         "spec": spec_doc,
         "structural": built,
+        "meshy_input": direct_input,  # the cleaning step records it when the photo is cleaned first
+        "meshy_input_bytes": (raw or None) if direct_input else None,
         "textured": textured,
         "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
     }
@@ -814,8 +866,10 @@ async def _clean_failed(request: Request, task_id: str, pending: dict, reason: s
 
 
 async def conditioned_image(request: Request, meshy: MeshyService, task_id: str, pending: dict) -> TaskStatusResponse | None:
-    """The vision model's cleaning step. While it runs, report progress. When it returns one image, Image to 3D
-    starts from those bytes. A failed cleaning step stops the conversion: 3D is not generated from the original photo."""
+    """The vision model's cleaning step. While it runs, report progress. When it returns an image, it is compared with
+    the original first (fidelity.compare_images): if it changed the furniture's proportions, layout or colours it is
+    rejected, and the original photo is meshed when the reading is confident (else the conversion stops). A failed
+    cleaning step stops the conversion."""
     lock = pending.setdefault("_clean_lock", asyncio.Lock())
     async with lock:
         if pending.get("stage") != "image":
@@ -835,17 +889,37 @@ async def conditioned_image(request: Request, meshy: MeshyService, task_id: str,
         if exc or not isinstance(cleaned, (bytes, bytearray)) or not cleaned:
             reason = getattr(exc, "message", None) or (str(exc) if exc else "The vision model returned no image.")
             return await _clean_failed(request, task_id, pending, reason, 0)
-        pending["clean_image_url"] = "vision"
-        # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
-        pending["reference"] = bytes(cleaned)
+        cleaned = bytes(cleaned)
+        photo = pending.get("photo")
+        details = pending.get("details") or {}
+        # Checked against the original BEFORE Meshy sees it: a cleaned image that changed the furniture is not meshed.
+        check = await run_in_threadpool(fidelity.compare_images, photo, cleaned, details.get("bbox")) if photo else \
+            {"stage": "cleaning", "ok": None, "issues": [], "notes": ["No original photo to compare with."]}
+        pending["cleaning_check"] = check
+        if check.get("ok") is False:
+            check["rejected"] = True
+            pending["rejected_clean"] = cleaned
+            confident = details.get("matches_category", True) and float(details.get("confidence") or 0) >= 0.5
+            if not (get_settings().meshy_use_original_on_bad_cleaning and photo and confident):
+                return await _clean_failed(request, task_id, pending, "The cleaned image changed the furniture: " + "; ".join(check["issues"][:2]), 0)
+            pending["conditioning"] = ("The cleaned photo was rejected (" + "; ".join(check["issues"][:2]) + "). The original photo was "
+                                       "meshed instead: objects on or in the furniture may be part of the model.")
+            meshed, meshed_mime, source = photo, pending.get("mime") or "image/png", "original"
+        else:
+            pending["clean_image_url"] = "vision"
+            # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
+            pending["reference"] = cleaned
+            meshed, meshed_mime, source = cleaned, sniff_image_mime(cleaned) or "image/png", "cleaned"
         mesh = pending["mesh"]
+        pending["meshy_input"] = meshy_input(meshed, meshed_mime, source, mesh)
+        pending["meshy_input_bytes"] = meshed
         try:
             pending["mesh_task_id"] = await meshy.create_image_to_3d_task(
                 # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
-                # file within its limit). The cleaned image is the only input.
+                # file within its limit). Exactly the image recorded in meshy_input.
                 GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
-                image=bytes(cleaned),
-                mime_type=pending.get("mime") or "image/png",
+                image=meshed,
+                mime_type=meshed_mime,
                 texture_prompt=mesh["texture_prompt"],
                 target_polycount=mesh["target_polycount"],
             )
@@ -911,23 +985,29 @@ async def get_task(
             steps=_mesh_steps(pending, "IN_PROGRESS", progress),
         )
 
-    # Meshy image-to-3D returns one mesh; Auto Split cuts it into the vendor's furniture parts. Any split
-    # failure keeps the generated model (split from its geometry by `modular`, or left whole).
+    # Auto Split (by_parts, the photo reading's components): its result is checked against the raw model below and
+    # used only when it really is that model in several meshes. Its actual status, error and prompt_ignored are kept.
     split_glb_url = None
+    split_task: dict | None = None
     if splitting:
+        split_task = {"prompt": pending["split"], "status": None}
         try:
             if not pending.get("split_task_id"):
                 pending["split_task_id"] = await meshy.create_split_task(mesh_id, pending["split"], bool(pending.get("textured")))
             split = await meshy.get_split_task(pending["split_task_id"])
         except MeshyError as exc:
             logger.warning("Meshy Auto Split for %s failed: %s", task_id, exc.message)
+            split_task.update(status="REQUEST_FAILED", error=exc.message, taskId=pending.get("split_task_id"))
             pending["split"] = None
         else:
             split_status = str(split.get("status"))
             if split_status in {"PENDING", "IN_PROGRESS"}:
                 return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 10, retry_after_seconds=5, steps=_mesh_steps(pending, "IN_PROGRESS", 100))
             split_glb_url = (split.get("model_urls") or {}).get("glb") if split_status == "SUCCEEDED" else None
-            logger.info("Meshy Auto Split %s: status=%s part_count=%s prompt_ignored=%s error=%s", pending["split_task_id"], split_status, split.get("part_count"), split.get("prompt_ignored"), split.get("task_error"))
+            err = split.get("task_error")
+            split_task.update(status=split_status, taskId=pending["split_task_id"], partCount=split.get("part_count"), promptIgnored=split.get("prompt_ignored"),
+                              error=(err.get("message") if isinstance(err, dict) else err) or None)
+            logger.info("Meshy Auto Split %s: status=%s part_count=%s prompt_ignored=%s error=%s", pending["split_task_id"], split_status, split.get("part_count"), split.get("prompt_ignored"), err)
     owner = pending.get("user_id") or user_id
     object_id = pending.get("model_id") or task_id
     model_urls = task.get("model_urls") or {}
@@ -943,13 +1023,22 @@ async def get_task(
         raw_glb = data  # the provider's file before any change, kept and compared with
         background.add_task(upload_raw, raw_glb, cdn, f"{owner}/{object_id}.raw.glb")
         components = None
-        if split_glb_url:
-            info = await run_in_threadpool(inspect_glb, split_dest.read_bytes(), furniture_family(pending.get("category"), pending.get("kind") or None))
-            logger.info("Meshy Auto Split GLB for %s: separated=%s components=%s", task_id, info.get("separated"), [c["name"] for c in info.get("components", [])])
-            if info.get("separated"):  # independently editable meshes in the file, not just a reported count
-                data, source_glb, components = split_dest.read_bytes(), data, {**info, "method": "meshy_auto_split"}
+        split_report = None
+        if split_task is not None:
+            split_bytes = split_dest.read_bytes() if split_glb_url else None
+            split_report = await run_in_threadpool(fidelity.split_check, raw_glb, split_bytes, split_task)
+            logger.info("Meshy Auto Split check for %s: accepted=%s meshes %s → %s %s", task_id, split_report["accepted"], split_report.get("meshesBefore"), split_report.get("meshesAfter"), split_report["issues"])
+            if split_report["accepted"]:
+                info = await run_in_threadpool(inspect_glb, split_bytes, furniture_family(pending.get("category"), pending.get("kind") or None))
+                data, source_glb, components = split_bytes, raw_glb, {**info, "method": "meshy_auto_split"}  # the unsplit original kept as source
+        data, surfaces = await run_in_threadpool(surface_finish.flatten, data)  # a no-op on UV atlases (not tiled)
         if components is None:
-            data, source_glb, components = await run_in_threadpool(modular, data, pending.get("category"), pending.get("kind"))
+            data, source_glb, components = await run_in_threadpool(meshy_parts, data, pending.get("category"), pending.get("kind"))
+            if split_report and not split_report["accepted"]:
+                source_glb = None
+                components = {**components, "limits": " ".join(x for x in (components.get("limits"), "Auto Split was not used: " + " ".join(split_report["issues"][:2])) if x)}
+        if surfaces:
+            components = {**components, "surfaces": surfaces}
         components = analysis_checked(components, pending)
         reference = pending.get("reference") or pending.get("photo")
         data, source_glb, components = await grouped(request, data, source_glb, components, reference, pending.get("details"))
@@ -967,7 +1056,11 @@ async def get_task(
         # Built from the spec when the task was submitted (older tasks without one: built now, from the same spec).
         built = pending.get("structural") if "structural" in pending else await run_in_threadpool(structural_model, pending.get("spec"), pending.get("category"), pending.get("kind"), cdn, f"{owner}/{object_id}.carpenter.glb")
         components = {**with_structural(components, built, pending.get("spec")), "raw_glb_url": cdn.public_url(f"{owner}/{object_id}.raw.glb")}
-        components = await run_in_threadpool(fidelity_checked, components, raw_glb, data, pending.get("photo"), pending.get("reference"), (pending.get("details") or {}).get("bbox"))
+        details = pending.get("details") or {}
+        components = await run_in_threadpool(fidelity_checked, components, raw_glb, data, pending.get("photo"), pending.get("reference"), details.get("bbox"),
+                                             pending.get("cleaning_check"), split_report, details.get("proportions"), True)
+        components = {**components, "meshyInput": await run_in_threadpool(meshy_input_uploaded, pending.get("meshy_input"), pending.get("meshy_input_bytes"), cdn, f"{owner}/{object_id}.meshy-input"),
+                      **({"split": split_report} if split_report else {})}
         url = await run_in_threadpool(cdn.upload, f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = schedule_source(background, source_glb, cdn, f"{owner}/{object_id}.source.glb")
     except (MeshyError, CdnError) as exc:
