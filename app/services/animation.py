@@ -67,7 +67,9 @@ def _guess(c: dict[str, Any]) -> dict[str, Any] | None:
     if "door" in words or "doors" in words or "leaf" in words:
         side = "left" if "left" in words else "right" if "right" in words else None
         # No side in the name: the viewer takes it from the geometry (the handle, the other door of a pair).
-        return {"type": "rotate", "hinge": side or "left", "limit": DEFAULT_LIMIT["rotate"], "confidence": 0.8 if side else 0.7,
+        # No side in the name: no side is claimed. _entry records it as undetected and the viewer settles it from the
+        # geometry (hinges, handle, the file's open pose, a pair) or flags it for the vendor.
+        return {"type": "rotate", "hinge": side, "limit": DEFAULT_LIMIT["rotate"], "confidence": 0.8 if side else 0.7,
                 "reason": "named a door" + ("" if side else "; hinge side from the geometry"), "revealsInterior": True}
     return None
 
