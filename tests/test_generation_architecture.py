@@ -225,6 +225,13 @@ def strip_textures(glb: bytes) -> bytes:
     return write_glb(doc, views)
 
 
+def big_photo(colour) -> bytes:
+    """A usable cleaned image (Image to Image output is at least 256 px): the plain colour, same 1:1 framing."""
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 400), colour).save(buf, "PNG")
+    return buf.getvalue()
+
+
 def photo(colour) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (100, 100), colour).save(buf, "PNG")
@@ -269,8 +276,20 @@ class FakeCdn:
 
 
 class FakeMeshy:
-    def __init__(self, glb):
-        self.glb, self.calls = glb, []
+    """Meshy with every paid call mocked: Image to Image returns `cleaned`, Image to 3D the GLB."""
+
+    def __init__(self, glb, cleaned: bytes | None = None):
+        self.glb, self.calls, self.cleaned = glb, [], cleaned
+
+    async def create_image_to_image_task(self, prompt, **kwargs):
+        self.calls.append(("image-to-image", {"prompt": prompt, **kwargs}))
+        return "img-1"
+
+    async def get_image_to_image_task(self, _id):
+        return {"status": "SUCCEEDED", "progress": 100, "image_urls": ["https://assets.meshy.test/clean.png?Signature=secret"]}
+
+    async def download_bytes(self, _url):
+        return self.cleaned
 
     async def create_image_to_3d_task(self, _options, **kwargs):
         self.calls.append(("image-to-3d", kwargs))
@@ -287,7 +306,7 @@ class FakeMeshy:
         return len(self.glb)
 
 
-def run_meshy(tmp_path, monkeypatch, spec_json):
+def run_meshy(tmp_path, monkeypatch, spec_json, **settings):
     vision_calls, cleaned = [], []
     raw = textured_glb((139, 90, 43))
 
@@ -310,42 +329,53 @@ def run_meshy(tmp_path, monkeypatch, spec_json):
     monkeypatch.setattr(vendor.vision, "clean_image", clean)
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor.bus, "publish", quiet)
-    meshy, cdn = FakeMeshy(raw), FakeCdn()
-    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, meshy_auto_split=False)  # the minimum-cost path
+    meshy, cdn = FakeMeshy(raw, cleaned=big_photo((139, 90, 43))), FakeCdn()
+    s = Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, meshy_auto_split=False, **settings)  # the minimum-cost path
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: meshy, vendor.get_cdn: lambda: cdn, config.get_settings: lambda: s})
     try:
         with TestClient(app) as client:
             first = client.post("/api/vendor/generate", files={"image": ("p.png", photo((139, 90, 43)), "image/png")}, data={"category": spec_json["category"], "lang": "en"}).json()
             done = first
-            for _ in range(5):
+            for _ in range(8):
                 done = client.get(f"/api/vendor/tasks/{first['task_id']}").json()
                 if done["status"] in ("SUCCEEDED", "FAILED"):
                     break
-                asyncio.run(asyncio.sleep(0.05))
     finally:
         app.dependency_overrides.clear()
     return done, vision_calls, cleaned, meshy, cdn, raw
 
 
-def test_a_clean_photo_costs_one_vision_call_and_one_image_to_3d_call(tmp_path, monkeypatch):
+def test_meshy_makes_no_vision_call_and_cleans_with_meshy(tmp_path, monkeypatch):
     done, vision_calls, cleaned, meshy, cdn, raw = run_meshy(tmp_path, monkeypatch, WARDROBE)
+    assert done["status"] == "SUCCEEDED" and done["phase"] == "completed"
+    assert vision_calls == [] and cleaned == []  # no Gemini / OpenAI call anywhere on the Meshy path
+    assert [c[0] for c in meshy.calls] == ["image-to-image", "image-to-3d"]
+    assert meshy.calls[1][1]["input_task_id"] == "img-1"  # Image to 3D from the cleaned image's task
+    doc = done["components"]
+    assert doc["cleaning"]["used"] == "cleaned" and doc["cleaning"]["provider"] == "meshy-image-to-image"
+    assert not doc["structural"]["built"] and "No structural specification" in doc["structural"]["uncertain"][0] and "carpenter" not in doc
+    assert cdn.uploads["vendor-1/" + doc["raw_glb_url"].rsplit("/", 1)[1]] == raw  # kept byte for byte
+
+
+def test_the_optional_analysis_reads_once_and_still_cleans_with_meshy(tmp_path, monkeypatch):
+    done, vision_calls, cleaned, meshy, cdn, raw = run_meshy(tmp_path, monkeypatch, WARDROBE, meshy_vision_analysis=True)
     assert done["status"] == "SUCCEEDED"
-    assert vision_calls == ["furniture_spec"] and cleaned == []  # nothing on it: not cleaned
-    assert [c[0] for c in meshy.calls] == ["image-to-3d"]
+    assert vision_calls == ["furniture_spec"] and cleaned == []  # read once; the vision model never cleans for Meshy
+    assert [c[0] for c in meshy.calls] == ["image-to-image", "image-to-3d"]
     doc = done["components"]
     assert doc["structural"]["built"] and doc["carpenter"]["url"].endswith(".carpenter.glb")
     assert cdn.uploads["vendor-1/" + doc["raw_glb_url"].rsplit("/", 1)[1]] == raw  # kept byte for byte
     assert doc["materials"]["parts"]["door_left"]["class"] == "mirror"
     stages = {s["stage"]: s for s in doc["fidelity"]["stages"]}
-    assert set(stages) == {"provider", "processing", "materials", "structural"} and stages["materials"]["ok"]
+    assert set(stages) == {"cleaning", "provider", "processing", "materials", "structural"} and stages["materials"]["ok"]
 
 
-def test_a_table_with_objects_is_cleaned_once_and_the_objects_are_named(tmp_path, monkeypatch):
-    done, vision_calls, cleaned, meshy, _cdn, _raw = run_meshy(tmp_path, monkeypatch, TABLE)
-    assert done["status"] == "SUCCEEDED" and vision_calls == ["furniture_spec"]
-    assert len(cleaned) == 1 and "vase, books, phone" in cleaned[0]
-    assert meshy.calls[0][1]["image"] == photo((139, 90, 43))  # Image to 3D got the cleaned image
+def test_with_the_optional_analysis_the_objects_it_saw_go_into_the_meshy_prompt(tmp_path, monkeypatch):
+    done, vision_calls, cleaned, meshy, _cdn, _raw = run_meshy(tmp_path, monkeypatch, TABLE, meshy_vision_analysis=True)
+    assert done["status"] == "SUCCEEDED" and vision_calls == ["furniture_spec"] and cleaned == []
+    assert meshy.calls[0][0] == "image-to-image" and "vase, books, phone" in meshy.calls[0][1]["prompt"]
+    assert meshy.calls[1][1]["input_task_id"] == "img-1"  # Image to 3D got the cleaned image
     assert "cleaning" in {s["stage"] for s in done["components"]["fidelity"]["stages"]}
 
 

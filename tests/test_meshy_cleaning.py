@@ -1,10 +1,8 @@
-"""Photo → configured vision model cleans it → Image to 3D from those bytes → checks against the cleaned image."""
+"""Cleaning prompts and the image editors. The Meshy pipeline itself (Meshy Image to Image → Image to 3D) is in
+tests/test_meshy_pipeline.py; vision.clean_image is no longer on the Meshy path (scripts/meshy_experiment.py uses it)."""
 
-from tests.conftest import spec_of
-import asyncio
 import base64
 import json
-from types import SimpleNamespace
 
 import anyio
 import httpx
@@ -14,7 +12,7 @@ from pydantic import SecretStr
 from app.core.config import Settings
 from app.services import vision
 from app.services.generation_prompt import meshy_prompt, meshy_texture_prompt
-from app.services.meshy_service import MeshyError, MeshyService
+from app.services.meshy_service import MeshyService
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
 
@@ -60,176 +58,6 @@ def test_image_to_image_payload_is_one_cleaned_view():
     assert body["ai_model"] == "nano-banana-2" and body["prompt"] == "clean it"
     assert body["generate_multi_view"] is False and body["remove_background"] is True
     assert len(body["reference_image_urls"]) == 1 and body["reference_image_urls"][0].startswith("data:image/png;base64,")
-
-
-class FakeMeshy:
-    def __init__(self, image_task=None, refuse_image=False):
-        self.calls: dict = {}
-        self.image_task = image_task
-        self.refuse_image = refuse_image
-
-    async def create_image_to_image_task(self, prompt, **kwargs):
-        if self.refuse_image:
-            raise MeshyError(400, "nope")
-        self.calls["clean"] = {"prompt": prompt, **kwargs}
-        return "img-1"
-
-    async def get_image_to_image_task(self, _task_id):
-        return self.image_task
-
-    async def download_bytes(self, url):
-        self.calls["downloaded"] = url
-        return b"cleaned-png"
-
-    async def create_image_to_3d_task(self, options, **kwargs):
-        self.calls["mesh"] = kwargs
-        return "mesh-1"
-
-
-async def cluttered(*_args, **_kwargs):
-    """The photo reading found things on the desk: the photo is cleaned before 3D."""
-    from app.schemas.product_details import ProductDetails
-    from app.services.furniture_spec import FurnitureSpec
-
-    return FurnitureSpec(details=ProductDetails(object_type="desk"), loose_objects=["books", "phone"])
-
-
-def _generate(tmp_path, monkeypatch, meshy: FakeMeshy, **settings):
-    from fastapi.testclient import TestClient
-
-    from app.api import vendor
-    from app.main import app
-
-    async def one_try(*_args):
-        return 4
-
-    async def nothing(*_args, **_kwargs):
-        return None
-
-    async def admin_chose_meshy(*_args, **_kwargs):
-        return "meshy"
-
-    seen: dict = {}
-
-    async def clean_image(prompt, image, mime, settings, client, model):
-        seen.update(prompt=prompt, image=image, model=model)
-        return b"cleaned-png"
-
-    async def chosen(*_args, **_kwargs):
-        return "gemini-3.1-pro-preview"
-
-    monkeypatch.setattr(vendor, "take_try", one_try)
-    monkeypatch.setattr(vendor, "read_furniture_spec", cluttered)
-    monkeypatch.setattr(vendor.vision, "current_model", chosen)
-    monkeypatch.setattr(vendor.vision, "clean_image", clean_image)
-    monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
-    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: meshy,
-                                     vendor.get_settings: lambda: Settings(meshy_api_key="msy-test", gemini_api_key="gem-test", storage_dir=tmp_path, **settings)})
-    try:
-        with TestClient(app) as client:
-            body = client.post("/api/vendor/generate", files={"image": ("t.png", PNG, "image/png")}, data={"category": "table", "kind": "desk"}).json()
-            pending = dict(app.state.pending_cdn.get(body.get("task_id"), {}))
-    finally:
-        app.dependency_overrides.clear()
-    return body, pending, seen
-
-
-def test_generate_cleans_the_photo_first(tmp_path, monkeypatch):
-    meshy = FakeMeshy()
-    body, pending, seen = _generate(tmp_path, monkeypatch, meshy)
-    assert pending["stage"] == "image" and pending["mesh_task_id"] is None and body["task_id"]
-    assert seen["image"] == PNG and seen["model"] == "gemini-3.1-pro-preview"
-    assert "product reference image of the table (desk)" in seen["prompt"]
-    assert "clean" not in meshy.calls and "mesh" not in meshy.calls  # Meshy waits until the vision model returns the image
-    assert pending["clean_prompt"] == seen["prompt"]
-
-
-def test_a_refused_cleaning_step_does_not_start_3d(tmp_path, monkeypatch):
-    from app.api import vendor
-
-    async def quiet(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(vendor.bus, "publish", quiet)
-    meshy = FakeMeshy(refuse_image=True)
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    async def one_try(*_args):
-        return 4
-
-    async def nothing(*_args, **_kwargs):
-        return None
-
-    async def admin_chose_meshy(*_args, **_kwargs):
-        return "meshy"
-
-    async def chosen(*_args, **_kwargs):
-        return "gemini-3.1-pro-preview"
-
-    monkeypatch.setattr(vendor, "take_try", one_try)
-    monkeypatch.setattr(vendor, "read_furniture_spec", cluttered)
-    monkeypatch.setattr(vendor.vision, "current_model", chosen)
-    monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
-    app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: meshy,
-                                     vendor.get_settings: lambda: Settings(meshy_api_key="msy-test", gemini_api_key="", openai_api_key="", plan_vision_model="gemini-3.1-pro-preview", storage_dir=tmp_path)})
-    try:
-        with TestClient(app) as client:
-            res = client.post("/api/vendor/generate", files={"image": ("t.png", PNG, "image/png")}, data={"category": "table", "kind": "desk"})
-    finally:
-        app.dependency_overrides.clear()
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Image to image failed, so the 3D model was not generated."
-    assert "mesh" not in meshy.calls
-
-
-def _request():
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pending_cdn={})))
-
-
-def _pending():
-    return {"stage": "image", "mesh": {"textured": True, "texture_prompt": "t", "target_polycount": 30000}, "photo": PNG, "mime": "image/png"}
-
-
-def test_the_cleaned_image_feeds_image_to_3d_and_becomes_the_reference():
-    from app.api.vendor import conditioned_image
-
-    async def go():
-        async def cleaned():
-            return b"cleaned-png"
-
-        meshy = FakeMeshy()
-        pending = _pending()
-        pending["clean_job"] = asyncio.create_task(cleaned())
-        await asyncio.sleep(0)
-        out = await conditioned_image(_request(), meshy, "local-1", pending)
-        return out, pending, meshy
-
-    out, pending, meshy = anyio.run(go)
-    assert out.status == "IN_PROGRESS" and pending["stage"] == "mesh" and pending["mesh_task_id"] == "mesh-1"
-    assert meshy.calls["mesh"]["image"] == b"cleaned-png" and meshy.calls["mesh"].get("input_task_id") is None
-    assert pending["reference"] == b"cleaned-png"
-    assert [(s.id, s.status) for s in out.steps] == [("image", "SUCCEEDED"), ("mesh", "IN_PROGRESS")]
-
-
-def test_a_failed_cleaning_task_does_not_start_3d():
-    from app.api.vendor import conditioned_image
-
-    async def go():
-        async def refused():
-            raise vision.VisionImageError("x")
-
-        meshy = FakeMeshy()
-        pending = _pending()
-        pending["clean_job"] = asyncio.create_task(refused())
-        await asyncio.sleep(0)
-        return await conditioned_image(_request(), meshy, "local-1", pending), meshy
-
-    out, meshy = anyio.run(go)
-    assert "mesh" not in meshy.calls
-    assert out.status == "FAILED" and out.steps[0].status == "FAILED" and out.steps[1].status == "PENDING"
-    assert "not generated" in out.error and "x" in out.error
 
 
 def test_gemini_cleans_the_photo_itself():

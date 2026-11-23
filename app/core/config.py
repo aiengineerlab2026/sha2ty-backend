@@ -29,16 +29,32 @@ class Settings(BaseSettings):
     # What Meshy textures from (meshy_service.image_to_3d_payload): "image" the meshed photo as texture_image_url,
     # "input" Meshy's default from the input image, "prompt" texture_prompt text only.
     meshy_texture_source: Literal["image", "input", "prompt"] = "image"
-    # A cleaned photo that fails validation (proportions, layout, colours) is not meshed: the original photo is
-    # used instead when the product reading is confident, and the model's notes say so.
+    # Fallback policy for the Meshy cleaning step. True: when Image to Image fails, times out, returns nothing usable or
+    # its image fails validation (furniture changed), the ORIGINAL photo is meshed and the model's notes say so.
+    # False: the conversion stops and the try is refunded.
     meshy_use_original_on_bad_cleaning: bool = True
     # Vision calls on the generated visual model (grouping its meshes, naming them). Off: one vision call per photo,
-    # parts named from their geometry and matched to the spec.
+    # parts named from their geometry and matched to the spec. Never used for Meshy unless meshy_vision_analysis is on.
     visual_part_ai: bool = False
-    # Before image-to-3D, clean the photo with the configured vision model (plan_vision_model / admin vision setting),
-    # only when the photo reading found loose objects on or in the product. Off: the photo always goes straight to 3D.
+    # Meshy only: before Image to 3D, clean the photo with Meshy Image to Image (furniture cleaning prompt, background
+    # removed). Off: the photo goes straight to Image to 3D. Never uses the configured vision model.
     meshy_clean_image: bool = True
-    meshy_image_model: str = "nano-banana"  # Image to Image ai_model (docs: nano-banana, nano-banana-2, gpt-image-2, ...)
+    meshy_image_model: str = "gpt-image-2-5-sunburst"  # Image to Image ai_model (validated: meshy_service.IMAGE_TO_IMAGE_MODELS)
+    # "" = the built-in furniture cleaning prompt (generation_prompt.MESHY_CLEAN_PROMPT); any text replaces it.
+    meshy_clean_prompt: str = ""
+    # Optional extra cleaning instruction per furniture family (bed, wardrobe, sofa, table, chair, door or a catalogue
+    # category), e.g. MESHY_CLEAN_HINTS='{"bed": "Keep the upholstered headboard."}'. No vision model writes these.
+    meshy_clean_hints: dict[str, str] = {}
+    meshy_clean_timeout_seconds: float = 600.0  # an Image to Image task still running after this counts as failed
+    # Optional advanced analysis for Meshy: read the photo with the configured vision model (listing, estimated size,
+    # components, structural model, analysis-based split parts). Off (default): the Meshy path makes no vision call.
+    meshy_vision_analysis: bool = False
+    # Meshy Image to 3D quality (docs.meshy.ai/en/api/image-to-3d). Checked before submission (meshy_service.check_image_to_3d).
+    meshy_geometry_resolution: Literal["standard", "2k", "4k"] = "standard"  # 2k / 4k: the Ultra pass (more credits, time)
+    meshy_texture_resolution: Literal["2k", "4k", "8k"] = "2k"
+    meshy_texture_model: Literal["", "meshy-7", "meshy-n1", "meshy-6-lite"] = ""  # "" = Meshy's default for the ai_model
+    meshy_image_enhancement: bool = False  # true lets Meshy restyle the input before meshing (less faithful)
+    meshy_should_remesh: bool = False  # remeshing replaced the generated surface and warped furniture
 
     openai_api_key: SecretStr = SecretStr("")
     openai_astra_model: str = "gpt-6-astra"

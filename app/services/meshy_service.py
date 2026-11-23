@@ -16,9 +16,21 @@ logger = logging.getLogger(__name__)
 IMAGE_TO_3D_PATH = "/image-to-3d"
 # Meshy's photo-to-3D model (docs: `latest` is meshy-7.1). Named explicitly so a photo is never sent to an image editor.
 IMAGE_TO_3D_MODEL = "meshy-7.1"
-# Meshy Image to Image is not used for generation. Photo cleaning is the configured vision model (services/vision.py).
+# Meshy Image to Image cleans the photo before Image to 3D (vendor.generate_model, Meshy only).
 IMAGE_TO_IMAGE_PATH = "/image-to-image"
-IMAGE_TO_IMAGE_MODEL = "nano-banana"
+IMAGE_TO_IMAGE_MODEL = "gpt-image-2-5-sunburst"
+# docs.meshy.ai/en/api/image-to-image (nano-banana-pro needs a Pro plan: Meshy answers 402 otherwise).
+IMAGE_TO_IMAGE_MODELS = frozenset({
+    "nano-banana", "nano-banana-2", "nano-banana-2-lite", "nano-banana-2-1", "nano-banana-pro", "gpt-image-2",
+    "gpt-image-2-5-flare", "gpt-image-2-5-sunburst", "gpt-image-2-6-flare", "gpt-image-2-6-sunburst",
+})
+# Every Image to Image model takes these; GPT Image models also 3:2 / 2:3 (nano-banana answers 400). Default 1:1
+# would re-frame most photos.
+ASPECT_RATIOS = {"1:1": 1.0, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4}
+GPT_ASPECT_RATIOS = {**ASPECT_RATIOS, "3:2": 3 / 2, "2:3": 2 / 3}
+TEXTURE_MODELS = frozenset({"meshy-7", "meshy-n1", "meshy-6-lite"})
+GEOMETRY_MODELS = {"2k": {"meshy-7.1", "latest", "meshy-7"}, "4k": {"meshy-7.1", "latest"}}
+TEXTURE_PROMPT_MAX = 800
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024  # Meshy's own image input limit
 SPLIT_PATH = "/print/split"  # Auto Split (https://docs.meshy.ai/en/api/auto-split)
 
@@ -42,8 +54,61 @@ def _loggable(payload: dict[str, Any]) -> dict[str, Any]:
 TextureSource = Literal["image", "input", "prompt"]
 
 
+def quality_options(settings: Settings) -> dict[str, Any]:
+    """The Image to 3D quality settings, as image_to_3d_payload's keyword arguments."""
+    return {"geometry_resolution": settings.meshy_geometry_resolution, "texture_resolution": settings.meshy_texture_resolution,
+            "texture_model": settings.meshy_texture_model, "image_enhancement": settings.meshy_image_enhancement,
+            "should_remesh": settings.meshy_should_remesh}
+
+
+def nearest_aspect_ratio(image: bytes | None, model: str = IMAGE_TO_IMAGE_MODEL) -> str | None:
+    """The Image to Image aspect_ratio closest to the photo's, so the cleaned image keeps its framing (None: unknown)."""
+    if not image:
+        return None
+    import io
+
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        w, h = Image.open(io.BytesIO(image)).size
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+    ratios = GPT_ASPECT_RATIOS if model.startswith("gpt-image") else ASPECT_RATIOS
+    return min(ratios, key=lambda k: abs(ratios[k] - w / max(h, 1)))
+
+
+def check_image_to_3d(payload: dict[str, Any]) -> list[str]:
+    """Combinations Meshy documents as 400s, caught before a paid request is sent."""
+    errors = []
+    ai, geometry, tm = payload.get("ai_model"), payload.get("geometry_resolution", "standard"), payload.get("texture_model")
+    if geometry not in ("standard", "2k", "4k"):
+        errors.append(f"geometry_resolution {geometry!r} is not standard, 2k or 4k")
+    elif geometry in GEOMETRY_MODELS and ai not in GEOMETRY_MODELS[geometry]:
+        errors.append(f"geometry_resolution {geometry} needs ai_model {' or '.join(sorted(GEOMETRY_MODELS[geometry]))}")
+    if tm is not None and tm not in TEXTURE_MODELS:
+        errors.append(f"texture_model {tm!r} is not one of {', '.join(sorted(TEXTURE_MODELS))}")
+    if payload.get("texture_resolution", "2k") not in ("2k", "4k", "8k"):
+        errors.append("texture_resolution must be 2k, 4k or 8k")
+    if payload.get("texture_resolution") in ("4k", "8k") and tm in ("meshy-n1", "meshy-6-lite"):
+        errors.append(f"texture_resolution {payload['texture_resolution']} needs the meshy-7 texture model, not {tm}")
+    if payload.get("enable_pbr") and not payload.get("should_texture"):
+        errors.append("enable_pbr needs should_texture")
+    if tm == "meshy-n1" and payload.get("enable_pbr"):
+        errors.append("texture_model meshy-n1 does not take enable_pbr")
+    if tm == "meshy-n1" and payload.get("texture_prompt"):
+        errors.append("texture_model meshy-n1 does not take texture_prompt")
+    if len(payload.get("texture_prompt") or "") > TEXTURE_PROMPT_MAX:
+        errors.append(f"texture_prompt is over {TEXTURE_PROMPT_MAX} characters")
+    if payload.get("texture_prompt") and payload.get("texture_image_url"):
+        errors.append("texture_prompt and texture_image_url together: Meshy would ignore the image")
+    if not (payload.get("image_url") or payload.get("input_task_id")):
+        errors.append("no image_url or input_task_id")
+    return errors
+
+
 def image_to_3d_payload(options: GenerationOptions, source: dict[str, Any], texture_prompt: str | None, target_polycount: int | None,
-                        texture_source: TextureSource = "image") -> dict[str, Any]:
+                        texture_source: TextureSource = "image", *, geometry_resolution: str = "standard", texture_resolution: str = "2k",
+                        texture_model: str = "", image_enhancement: bool = False, should_remesh: bool = False) -> dict[str, Any]:
     """The Image to 3D request body. Meshy reads ONE texture guide: with both `texture_prompt` and `texture_image_url`
     in the body, texture_prompt wins (docs.meshy.ai/en/api/image-to-3d), so a generic text used to replace the photo as
     the texture reference. Exactly one is sent now:
@@ -54,20 +119,28 @@ def image_to_3d_payload(options: GenerationOptions, source: dict[str, Any], text
         **source,
         "ai_model": IMAGE_TO_3D_MODEL,
         # false keeps the photo as given. true restyles it before meshing, which is a different model than the one selected.
-        "image_enhancement": False,
+        "image_enhancement": image_enhancement,
         "target_formats": ["glb"],
         "should_texture": options.should_texture,
+        # Remeshing replaces the generated surface with a decimated one and is what warped furniture. The photo
+        # is meshed as Meshy generated it. File size is reduced afterwards by re-encoding textures (glb_size).
+        "should_remesh": should_remesh,
     }
-    # Remeshing replaces the generated surface with a decimated one and is what warped furniture. The photo
-    # is meshed as Meshy generated it. File size is reduced afterwards by re-encoding textures (glb_size).
-    if target_polycount:
-        payload["should_remesh"] = False
+    if should_remesh and target_polycount:
+        payload["target_polycount"] = target_polycount
+    if geometry_resolution != "standard":
+        payload["geometry_resolution"] = geometry_resolution
     if options.should_texture:
-        payload["texture_resolution"] = "2k"
-        payload["enable_pbr"] = options.enable_pbr  # metallic, roughness and normal maps besides the colour
+        payload["texture_resolution"] = texture_resolution
+        if texture_model:
+            payload["texture_model"] = texture_model
+        # metallic, roughness and normal maps besides the colour (meshy-n1 makes base colour only)
+        payload["enable_pbr"] = options.enable_pbr and texture_model != "meshy-n1"
+        # With input_task_id (the cleaned Image to Image result) there is no image_url: Meshy textures from that input
+        # image, which is the cleaned one, never the cluttered original.
         if texture_source == "image" and "image_url" in source:
             payload["texture_image_url"] = source["image_url"]
-        elif texture_source == "prompt" and texture_prompt:
+        elif texture_source == "prompt" and texture_prompt and texture_model != "meshy-n1":
             payload["texture_prompt"] = texture_prompt
     return payload
 
@@ -181,9 +254,15 @@ class MeshyService:
         texture_source: TextureSource | None = None,
     ) -> str:
         """`image` is exactly what Meshy meshes (the original photo, or a cleaned one that passed validation).
-        `input_task_id` remains for an older Meshy image task. `texture_source`: settings.meshy_texture_source."""
+        `input_task_id`: a SUCCEEDED Image to Image task with exactly one image (the cleaned photo), used as the input
+        without re-uploading it. `texture_source`: settings.meshy_texture_source. Invalid combinations are refused
+        here (400) before anything is paid for."""
         source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
-        payload = image_to_3d_payload(options, source, texture_prompt, target_polycount, texture_source or self._settings.meshy_texture_source)
+        payload = image_to_3d_payload(options, source, texture_prompt, target_polycount, texture_source or self._settings.meshy_texture_source,
+                                      **quality_options(self._settings))
+        errors = check_image_to_3d(payload)
+        if errors:
+            raise MeshyError(400, "Invalid Meshy Image to 3D settings: " + "; ".join(errors))
         return await self._create(IMAGE_TO_3D_PATH, payload)
 
     async def _image_source(self, image: bytes | None, mime_type: str, image_url: str | None) -> str:
@@ -195,23 +274,32 @@ class MeshyService:
         encoded = await anyio.to_thread.run_sync(base64.b64encode, image)
         return f"data:{mime_type};base64,{encoded.decode('ascii')}"
 
-    async def create_image_to_image_task(self, prompt: str, image: bytes | None = None, mime_type: str = "image/png", image_url: str | None = None) -> str:
-        """Meshy Image to Image. Generation does not call this: cleaning uses the configured vision model."""
+    async def create_image_to_image_task(self, prompt: str, image: bytes | None = None, mime_type: str = "image/png", image_url: str | None = None,
+                                         aspect_ratio: str | None = None) -> str:
+        """Meshy Image to Image: the photo cleaned for 3D (vendor.generate_model, Meshy only)."""
+        model = self._settings.meshy_image_model or IMAGE_TO_IMAGE_MODEL
+        if model not in IMAGE_TO_IMAGE_MODELS:
+            raise MeshyError(400, f"Invalid Meshy Image to Image model {model!r} (MESHY_IMAGE_MODEL).")
+        if not prompt.strip():
+            raise MeshyError(400, "The Meshy Image to Image prompt is empty.")
         payload = {
-            "ai_model": self._settings.meshy_image_model or IMAGE_TO_IMAGE_MODEL,
+            "ai_model": model,
             "prompt": prompt,
             "reference_image_urls": [await self._image_source(image, mime_type, image_url)],
             "remove_background": True,  # transparent PNG: nothing of the room reaches the mesh
             "generate_multi_view": False,  # Image to 3D's input_task_id takes exactly one image
         }
+        if aspect_ratio in (GPT_ASPECT_RATIOS if model.startswith("gpt-image") else ASPECT_RATIOS):  # one view: allowed
+            payload["aspect_ratio"] = aspect_ratio
         return await self._create(IMAGE_TO_IMAGE_PATH, payload)
 
     async def download_bytes(self, url: str) -> bytes | None:
-        """A small Meshy asset (the cleaned image) in memory; None when it cannot be fetched or is too big."""
+        """A small Meshy asset (the cleaned image) in memory; None when it cannot be fetched or is too big. The signed
+        URL is never logged."""
         try:
             response = await self._downloads.get(url)
         except httpx.HTTPError as exc:
-            logger.warning("Meshy asset download failed: %s", exc)
+            logger.warning("Meshy asset download failed (%s)", type(exc).__name__)
             return None
         if not response.is_success or len(response.content) > MAX_REFERENCE_BYTES:
             return None

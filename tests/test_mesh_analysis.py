@@ -37,6 +37,15 @@ WARDROBE = {
 }
 
 
+
+def poll(client, task_id: str) -> dict:
+    """Polls a Meshy task until it ends (the processing poll comes one poll after Meshy reports success)."""
+    for _ in range(6):
+        done = client.get(f"/api/vendor/tasks/{task_id}").json()
+        if done.get("status") in ("SUCCEEDED", "FAILED", "CANCELED"):
+            break
+    return done
+
 def mesh(id_, name, lo, hi):
     return {"id": id_, "name": name, "mesh": 0, "primitive": 0, "material": 0, "node": 0, "box": [lo, hi], "editable": True}
 
@@ -200,14 +209,14 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
     monkeypatch.setattr(vendor, "named", passthrough)
     monkeypatch.setattr(vendor, "sized", unchanged)
     monkeypatch.setattr(vendor, "validated", lambda glb, doc, *_a: doc)
-    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, meshy_auto_split=True, storage_dir=tmp_path)
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, meshy_vision_analysis=True, meshy_auto_split=True, storage_dir=tmp_path)
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), config.get_settings: lambda: s})
     try:
         with TestClient(app) as client:
             png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
             first = client.post("/api/vendor/generate", files={"image": ("w.png", png, "image/png")}, data={"category": "furniture", "kind": "sofa"}).json()
-            done = client.get(f"/api/vendor/tasks/{first['task_id']}").json()
+            done = poll(client, first["task_id"])
     finally:
         app.dependency_overrides.clear()
     assert "left door: #FFFFFF painted wood" in calls["texture_prompt"] and calls["split"] == "wardrobe body, left door, right door"
