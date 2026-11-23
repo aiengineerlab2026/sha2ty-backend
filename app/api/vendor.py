@@ -906,7 +906,13 @@ async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pendi
                       url: str | None = None, input_task_id: str | None = None) -> TaskStatusResponse:
     """Image to 3D from the cleaned image (its Image to Image task, no re-upload) or the original photo."""
     mesh, mime = pending["mesh"], (sniff_image_mime(image) if image else None) or pending.get("mime") or "image/png"
+    if source == "cleaned" and (not input_task_id or input_task_id != pending.get("image_task_id")):
+        # never mesh "the cleaned image" from anything but the Image to Image task that produced it
+        raise RuntimeError(f"cleaned handoff without its Image to Image task ({input_task_id!r} != {pending.get('image_task_id')!r})")
     record = meshy_input(image, mime, source, mesh, url, input_task_id)
+    logger.info("Meshy image-to-3d for %s: image_source=%s image_to_image_task=%s input_task_id=%s", task_id,
+                "input_task_id" if input_task_id else ("image_url (original, URL)" if url else "image_url (original, data URI)"),
+                pending.get("image_task_id"), input_task_id)  # ids only: no signed URL, no image data
     try:
         mesh_id = await meshy.create_image_to_3d_task(
             # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal.
@@ -918,6 +924,7 @@ async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pendi
         await _refund(request, pending)  # nothing more will come of it
         return _finish(request, task_id, pending, _status(task_id, pending, "failed", status="FAILED", progress=IMAGE_STAGE, error=exc.message,
                                                           steps=_steps((pending.get("image_step_status") or "SUCCEEDED", 100), ("FAILED", 0))))
+    logger.info("Meshy image-to-3d task %s created for %s from %s", mesh_id, task_id, input_task_id or "the original photo")
     pending.update(stage="mesh", mesh_task_id=mesh_id, image_step=True, meshy_input=record, meshy_input_bytes=image)
     return _status(task_id, pending, "mesh_generation", status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5,
                    steps=_mesh_steps(pending, "IN_PROGRESS", 0))
@@ -984,7 +991,9 @@ async def conditioned_image(request: Request, meshy: MeshyService, cdn: Cdn | No
         check["rejected"] = True
         pending["rejected_clean"] = cleaned
         return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image changed the furniture: " + "; ".join(check["issues"][:2]))
-    if check.get("ok") is None:
+    # No photo reading (the default Meshy path) means no box to compare layout in: that is recorded in the check's notes,
+    # not raised as a warning on every model. Any other unjudged check is.
+    if check.get("ok") is None and (not photo or (pending.get("details") or {}).get("bbox")):
         pending["warnings"].append("The cleaned image was used but could not be fully checked against the original photo: " + "; ".join(check.get("notes", [])[:1]))
     # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
     pending["reference"] = cleaned

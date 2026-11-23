@@ -168,6 +168,17 @@ REMOVAL_FRAME_TOLERANCE = 0.15  # canvas width:height change allowed (Meshy outp
 REMOVAL_MIN_SIDE = 256  # px: smaller is not a usable reconstruction input
 REMOVAL_MIN_PRODUCT = 0.04  # the furniture's share of the canvas: less means it was removed or shrunk away
 REMOVAL_ASPECT_TOLERANCE = 0.2  # looser than ASPECT_TOLERANCE: removed pillows above a headboard change the box a little
+REMOVAL_SEE_THROUGH = 0.25  # share of the product left semi-transparent: Meshy meshes and textures it black
+
+
+def _see_through(cleaned: bytes) -> float:
+    """Share of the cleaned product (visible, not plain white) whose alpha is below 200: background removal that ate
+    into the furniture (light doors against a light wall)."""
+    from PIL import Image
+
+    a = np.asarray(Image.open(io.BytesIO(cleaned)).convert("RGBA"), dtype=float)
+    product = (a[..., 3] > 16) & ~((a[..., :3] > 242).all(axis=-1))
+    return float((a[..., 3][product] < 200).mean()) if product.any() else 0.0
 
 
 def _compare_removal(original: bytes, cleaned: bytes, bbox: list[float] | None) -> dict[str, Any]:
@@ -188,6 +199,10 @@ def _compare_removal(original: bytes, cleaned: bytes, bbox: list[float] | None) 
     fg, _ = _foreground_box(cleaned)
     if fg is None or (fg[2] - fg[0]) * (fg[3] - fg[1]) < REMOVAL_MIN_PRODUCT:
         return out(["The cleaned image has no furniture left in it (or almost none)."], [])
+    see_through = _see_through(cleaned)
+    if see_through > REMOVAL_SEE_THROUGH:
+        return out([f"Background removal made {see_through:.0%} of the furniture see-through: Meshy would mesh and texture it black."],
+                   [], {"seeThrough": round(see_through, 3)})
     try:
         w, h = Image.open(io.BytesIO(original)).size
     except Exception:  # noqa: BLE001
@@ -197,21 +212,25 @@ def _compare_removal(original: bytes, cleaned: bytes, bbox: list[float] | None) 
     if frame > REMOVAL_FRAME_TOLERANCE:
         # Different canvas proportions: positions cannot be compared cell by cell. Not judged rather than guessed.
         return out([], [f"The cleaned image is framed differently ({w}×{h} → {cw}×{ch}): layout not compared."], metrics, judged=False)
-    # Same framing: the furniture sits where it sat. With no box from a photo reading, the cleaned image's own product
-    # box is the region compared in both (the original's still has the removed objects in it).
-    region = bbox or fg
+    # Without a photo reading's box the furniture's place in the original is unknown: Meshy re-frames the product
+    # (centred, rescaled), so the cleaned image's own box is a different region there and comparing it rejected good
+    # cleanings (edge match ~0). Not judged, never guessed; the checks above still ran.
+    # ponytail: the default Meshy path has no box; MESHY_VISION_ANALYSIS=true gives one and turns this comparison on.
+    if not (bbox and len(bbox) == 4):
+        return out([], ["No photo reading locates the furniture in the original: layout and edges not compared."], metrics, judged=False)
+    region = bbox
     before, after = _crop(original, region), _crop(cleaned, fg)
     layout = layout_difference((before[0], np.ones_like(before[1])), after)
     structure = structure_correlation(before[0], after[0])
     metrics.update(layout=layout, structure=structure)
     issues, notes = [], []
-    if bbox and len(bbox) == 4:  # a reading's box of the product in the original: its proportions must survive
-        before_aspect = (bbox[2] - bbox[0]) * w / max((bbox[3] - bbox[1]) * h, 1e-6)
-        after_aspect = (fg[2] - fg[0]) * cw / max((fg[3] - fg[1]) * ch, 1e-6)
-        change = abs(after_aspect - before_aspect) / before_aspect
-        metrics["aspect"] = [round(before_aspect, 3), round(after_aspect, 3)]
-        if change > REMOVAL_ASPECT_TOLERANCE:
-            issues.append(f"Cleaning changed the furniture's proportions (width : height {before_aspect:.2f} → {after_aspect:.2f}, {change:.0%}).")
+    # the reading's box of the product in the original: its proportions must survive
+    before_aspect = (bbox[2] - bbox[0]) * w / max((bbox[3] - bbox[1]) * h, 1e-6)
+    after_aspect = (fg[2] - fg[0]) * cw / max((fg[3] - fg[1]) * ch, 1e-6)
+    change = abs(after_aspect - before_aspect) / before_aspect
+    metrics["aspect"] = [round(before_aspect, 3), round(after_aspect, 3)]
+    if change > REMOVAL_ASPECT_TOLERANCE:
+        issues.append(f"Cleaning changed the furniture's proportions (width : height {before_aspect:.2f} → {after_aspect:.2f}, {change:.0%}).")
     if layout is not None and layout > REMOVAL_LAYOUT_SHARE:
         issues.append(f"Cleaning changed {layout:.0%} of the furniture's visible layout: more than removing accessories explains.")
     if structure is not None and structure < REMOVAL_STRUCTURE_MIN:

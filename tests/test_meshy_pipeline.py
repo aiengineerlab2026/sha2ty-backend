@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
+import numpy as np
 from PIL import Image, ImageDraw
 from pydantic import SecretStr
 
@@ -50,6 +51,19 @@ def bed(clutter=False, stretch=1.0, white=False, W=600, H=420) -> bytes:
 
 PHOTO = bed(clutter=True)
 CLEANED = bed(white=True)
+BOX = [round(float(v), 4) for v in fidelity._foreground_box(CLEANED)[0]]  # the bed in PHOTO, as a photo reading gives it
+
+
+def see_through(cleaned: bytes = CLEANED, alpha: int = 60) -> bytes:
+    """`cleaned` as background removal that ate the furniture: the room transparent, the bed itself semi-transparent
+    (light doors against a light wall, Meshy gpt-image-2-5-sunburst on a wardrobe)."""
+    img = Image.open(io.BytesIO(cleaned)).convert("RGBA")
+    a = np.asarray(img).copy()
+    white = (a[..., :3] > 242).all(axis=-1)
+    a[..., 3] = np.where(white, 0, alpha)
+    buf = io.BytesIO()
+    Image.fromarray(a).save(buf, "PNG")
+    return buf.getvalue()
 
 
 class Meshy:
@@ -197,7 +211,9 @@ def test_meshy_cleans_with_image_to_image_then_meshes_that_task_with_no_vision_c
     assert done["status"] == "SUCCEEDED" and done["glb_url"] == "https://cdn.test/vendor-1/" + done["glb_url"].rsplit("/", 1)[1]
     assert done["clean_image_url"].endswith(".clean.png") and not done["warnings"]
     doc = done["components"]
-    assert doc["cleaning"]["used"] == "cleaned" and doc["cleaning"]["check"]["mode"] == "removal" and doc["cleaning"]["check"]["ok"]
+    check = doc["cleaning"]["check"]
+    # no photo reading: no box to compare layout in, so the absolute checks ran and the layout was not judged (not faked)
+    assert doc["cleaning"]["used"] == "cleaned" and check["mode"] == "removal" and check["ok"] is None and "No photo reading" in check["notes"][0]
     assert doc["meshyInput"]["inputTaskId"] == "img-1" and doc["meshyInput"]["texture"] == "input_image"
     # 10. no spec: no structural model, said plainly; parts named from geometry
     assert not doc["structural"]["built"] and "No structural specification" in doc["structural"]["uncertain"][0] and "carpenter" not in doc
@@ -246,12 +262,53 @@ def test_a_refused_image_to_image_request_meshes_the_original(tmp_path, monkeypa
     assert r.done["status"] == "SUCCEEDED" and "Image cleaning failed (Too many Meshy tasks)" in r.done["warnings"][0]
 
 
-def test_a_cleaned_image_that_distorts_the_furniture_is_rejected_and_the_original_meshed(tmp_path, monkeypatch):
-    r = run(tmp_path, monkeypatch, Meshy(cleaned=bed(white=True, stretch=1.4)), meshy_auto_split=False)
-    assert r.meshy.made("image-to-3d")[0]["image"] == PHOTO
+def test_a_see_through_cleaned_image_is_rejected_and_the_original_meshed(tmp_path, monkeypatch):
+    r = run(tmp_path, monkeypatch, Meshy(cleaned=see_through()), meshy_auto_split=False)
+    mesh = r.meshy.made("image-to-3d")[0]
+    assert mesh["image"] == PHOTO and mesh["input_task_id"] is None  # the rejected task is never the input
     doc = r.done["components"]
     assert doc["cleaning"]["rejected"] and doc["cleaning"]["used"] == "original" and doc["cleaning"]["check"]["ok"] is False
+    assert "see-through" in doc["cleaning"]["check"]["issues"][0]
+    assert doc["cleaning"]["image_url"].endswith(".clean.png")  # the rejected image kept for debugging, not as the used one
     assert any("rejected" in w for w in r.done["warnings"]) and r.done["clean_image_url"] is None
+
+
+class WireMeshy(Meshy):
+    """The fake Meshy, but Image to 3D goes through the real MeshyService request builder to a mock transport: the
+    test sees the exact HTTP body Meshy would receive."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sent: list = []
+        self.real = _service(self.sent)
+
+    async def create_image_to_3d_task(self, options, **kwargs):
+        self.calls.append(("image-to-3d", kwargs))
+        await self.real.create_image_to_3d_task(options, **kwargs)
+        return "mesh-1"
+
+
+def test_after_a_successful_cleaning_the_outgoing_image_to_3d_body_references_that_task_and_not_the_photo(tmp_path, monkeypatch, caplog):
+    meshy = WireMeshy()
+    with caplog.at_level(logging.INFO, logger=vendor.logger.name):
+        r = run(tmp_path, monkeypatch, meshy, meshy_auto_split=False)
+    assert r.done["status"] == "SUCCEEDED" and not r.done["warnings"]
+    (request,) = [q for q in meshy.sent if q.url.path.endswith("/image-to-3d")]
+    body = json.loads(request.content)
+    image_task = r.meshy.made("image-to-image") and "img-1"  # the fake's Image to Image task id
+    assert body["input_task_id"] == image_task == r.done["components"]["cleaning"]["imageTaskId"]
+    assert "image_url" not in body and "texture_image_url" not in body and "texture_prompt" not in body
+    assert b"base64" not in request.content  # the original photo is not in the request in any form
+    assert "image_source=input_task_id image_to_image_task=img-1 input_task_id=img-1" in caplog.text
+    assert "base64," not in caplog.text and "Signature" not in caplog.text
+
+
+def test_the_cleaned_handoff_refuses_any_task_but_the_one_that_produced_the_image():
+    pending = {"mesh": {"textured": True, "texture_prompt": None, "target_polycount": None}, "image_task_id": "img-1"}
+    with pytest.raises(RuntimeError):
+        anyio.run(lambda: vendor._start_mesh(None, Meshy(), "t", pending, "cleaned", image=CLEANED, input_task_id="img-OTHER"))
+    with pytest.raises(RuntimeError):
+        anyio.run(lambda: vendor._start_mesh(None, Meshy(), "t", pending, "cleaned", image=CLEANED))
 
 
 def test_more_than_one_cleaned_image_is_not_used_as_the_input_task(tmp_path, monkeypatch):
@@ -435,19 +492,31 @@ def test_logs_redact_images_keys_and_signed_urls(caplog):
 
 
 def test_removing_bedding_passes_removal_mode_but_failed_the_strict_check():
-    legit = fidelity.compare_images(PHOTO, CLEANED, None, removal=True)
+    legit = fidelity.compare_images(PHOTO, CLEANED, BOX, removal=True)
     assert legit["ok"] is True and legit["mode"] == "removal"
-    box = legit["metrics"]["productBox"]
-    assert fidelity.compare_images(PHOTO, CLEANED, box)["ok"] is False  # the old check rejected legitimate cleanup
+    assert fidelity.compare_images(PHOTO, CLEANED, BOX)["ok"] is False  # the old check rejected legitimate cleanup
 
 
-@pytest.mark.parametrize(("cleaned", "why"), [
-    (bed(white=True, stretch=1.4), "redrew"),
-    (bed(white=True, stretch=1.15), "redrew"),
-    (bed(white=True, W=200, H=140), "too small"),
+def test_without_a_reading_a_reframed_cleaning_is_not_rejected_by_comparing_the_wrong_region():
+    """Meshy centres and rescales the product: the cleaned image's box is another region of the original. That
+    compared a good cleaning with a patch of wall (edge match ~0) and meshed the original instead."""
+    img = Image.open(io.BytesIO(CLEANED))
+    reframed = Image.new("RGB", (600, 420), (255, 255, 255))
+    reframed.paste(img.crop((60, 40, 540, 400)).resize((300, 225)), (220, 120))
+    buf = io.BytesIO()
+    reframed.save(buf, "PNG")
+    check = fidelity.compare_images(PHOTO, buf.getvalue(), None, removal=True)
+    assert check["ok"] is None and not check["issues"]
+
+
+@pytest.mark.parametrize(("cleaned", "box", "why"), [
+    (bed(white=True, stretch=1.4), BOX, "proportions"),
+    (bed(white=True, stretch=1.25), BOX, "proportions"),
+    (bed(white=True, W=200, H=140), None, "too small"),
+    (see_through(), None, "see-through"),
 ])
-def test_destructive_cleaning_is_rejected(cleaned, why):
-    check = fidelity.compare_images(PHOTO, cleaned, None, removal=True)
+def test_destructive_cleaning_is_rejected(cleaned, box, why):
+    check = fidelity.compare_images(PHOTO, cleaned, box, removal=True)
     assert check["ok"] is False and any(why in i for i in check["issues"])
 
 
