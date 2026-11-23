@@ -28,7 +28,7 @@ from app.services.carpet_extract import CarpetNotFound, extract_carpet
 from app.schemas.product_details import ProductDetails
 from app.services import furniture_design, vision, wardrobe
 from app.services.image_match import ImageMatchError, reference_png
-from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_prompt, meshy_texture_prompt, split_prompt, target_polycount
+from app.services.generation_prompt import astra_prompt, furniture_family, furniture_type, object_description, meshy_clean_prompt, meshy_texture_prompt, split_prompt, target_polycount
 from app.services.glb_size import MAX_GLB_BYTES, fit_glb
 from app.services.glb_parts import inspect_glb, segment_glb, write_names
 from app.services.model_check import check_glb, check_states, with_appearance
@@ -39,7 +39,7 @@ from app.services import fidelity, furniture_spec, material_spec, structural, su
 from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
-from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, texture_conditioning
+from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, nearest_aspect_ratio, quality_options, texture_conditioning
 from app.services import generator_setting
 from app.services.quota import generation_usage, use_generation
 
@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 GLB_CACHE_VERSION = "vendor-glb-v7"  # v7: one vision spec, structural model from it, raw GLB kept (v6: animation)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+# Bound now, not by name at the first request: with postponed annotations FastAPI would resolve `get_settings` from
+# this module's globals lazily, so a test that had monkeypatched it pinned every later request to its settings.
+SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
 class GenerateAccepted(BaseModel):
@@ -88,6 +91,10 @@ class TaskStatusResponse(BaseModel):
     source_glb_url: str | None = None
     # Image to image, then image to 3D. Absent on a direct 3D task (cleaning turned off).
     steps: list[GenerationStep] | None = None
+    # Meshy: image_preprocessing, image_validation, mesh_generation, auto_split, postprocessing, completed or failed.
+    phase: str | None = None
+    warnings: list[str] | None = None  # e.g. cleaning skipped / failed / rejected: the original photo was meshed
+    clean_image_url: str | None = None  # the Meshy-cleaned image actually meshed (absent when the original was)
 
 
 def sniff_image_mime(data: bytes) -> str | None:
@@ -190,6 +197,8 @@ def glb_cache_key(raw: bytes, user_id: str, provider: str, category: str, title:
     other = f"|{kind.strip()}" if kind.strip() else ""  # only typed furniture carries a kind: older keys stay valid
     if procedural:  # a built wardrobe is never served for a request the admin's generator makes, nor the reverse
         other += "|procedural-2"  # 2: colours, decoration and the appearance check (1 made white wardrobes)
+    elif provider == "meshy":
+        other += "|meshy-i2i-1"  # Meshy Image to Image cleaning, no vision reading: earlier Meshy models are not reused
     return hashlib.sha256(raw + f"|{user_id}|{provider}|{category}|{title.strip()}|{textured}{other}|{GLB_CACHE_VERSION}".encode()).hexdigest()
 
 
@@ -227,7 +236,7 @@ async def read_photo(request: Request, settings: Settings, photo: bytes, mime: s
 @router.post("/product-details", response_model=ProductDetails)
 async def product_details(
     request: Request,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: SettingsDep,
     user_id: Annotated[str, Depends(current_user)],
     image: Annotated[UploadFile, File()],
     category: Annotated[str, Form(max_length=40)] = "furniture",
@@ -287,14 +296,16 @@ async def sized(glb: bytes, source_glb: bytes | None, components: dict) -> tuple
     return glb, source_glb, {**components, "file": {"bytes": report["after"], "originalBytes": report["before"], "optimised": report["steps"]}}
 
 
-async def named(request: Request, glb: bytes, doc: dict, category: str | None, kind: str | None) -> tuple[bytes, dict]:
-    """Descriptive part names (services/part_names.py), saved in the component document and in the GLB itself."""
+async def named(request: Request, glb: bytes, doc: dict, category: str | None, kind: str | None, allow_vision: bool = True) -> tuple[bytes, dict]:
+    """Descriptive part names (services/part_names.py), saved in the component document and in the GLB itself.
+    allow_vision=False (Meshy without the optional analysis): names from geometry and the furniture type only."""
     settings = get_settings()
-    model = await vision.current_model(settings, request.app.state.auth_http)
+    use_vision = allow_vision and settings.visual_part_ai
+    model = await vision.current_model(settings, request.app.state.auth_http) if use_vision else ""
 
     async def ask(prompt: str, schema: dict) -> str | None:
         # Geometry names every part without a call; the vision model only when the admin turned it on.
-        if not settings.visual_part_ai or not vision.configured(settings, model):
+        if not use_vision or not vision.configured(settings, model):
             return None
         return await vision.ask_json([{"type": "input_text", "text": prompt}], schema, "part_names", settings, vision.client_for(request.app.state, model), model)
 
@@ -308,14 +319,15 @@ async def named(request: Request, glb: bytes, doc: dict, category: str | None, k
         return glb, doc
 
 
-async def grouped(request: Request, glb: bytes, source_glb: bytes | None, doc: dict, photo: bytes | None, details: dict | None) -> tuple[bytes, bytes | None, dict]:
+async def grouped(request: Request, glb: bytes, source_glb: bytes | None, doc: dict, photo: bytes | None, details: dict | None,
+                  allow_vision: bool = True) -> tuple[bytes, bytes | None, dict]:
     """The generated meshes grouped into carpenter-named components (services/component_grouping.py), checked
     against the geometry. Anything unsafe or unidentified keeps the model as it was; the file before grouping is
     kept as the source (the fallback) when there was none."""
     settings = get_settings()
-    model = await vision.current_model(settings, request.app.state.auth_http)
     ask = None
-    if settings.visual_part_ai and vision.configured(settings, model):  # an extra vision call: off unless the admin turns it on
+    model = await vision.current_model(settings, request.app.state.auth_http) if allow_vision and settings.visual_part_ai else ""
+    if model and vision.configured(settings, model):  # an extra vision call: off unless the admin turns it on
         client = vision.client_for(request.app.state, model)
 
         async def ask(content: list[dict], schema: dict) -> str | None:
@@ -474,10 +486,18 @@ def loose_objects(components: dict) -> list[str]:
 def cleaning_record(pending: dict, cdn: Cdn, key: str) -> dict:
     """What the image-cleaning step did: its prompt, its check against the original, and the cleaned image (used or
     rejected), copied to the CDN."""
-    record: dict = {"prompt": pending.get("clean_prompt"), "cleaned": bool(pending.get("clean_image_url"))}
+    cleaned = pending.get("reference") is not None
+    record: dict = {"prompt": pending.get("clean_prompt"), "cleaned": cleaned, "used": "cleaned" if cleaned else "original",
+                    "provider": "meshy-image-to-image" if pending.get("image_task_id") or pending.get("cleaning_fallback") else None,
+                    "imageTaskId": pending.get("image_task_id")}
+    if pending.get("cleaning_fallback"):
+        record["fallback"] = pending["cleaning_fallback"]
     if pending.get("cleaning_check"):
         record["check"] = pending["cleaning_check"]
         record["rejected"] = bool(pending["cleaning_check"].get("rejected"))
+    if cleaned and pending.get("clean_image_url"):
+        record["image_url"] = pending["clean_image_url"]  # uploaded when it was validated
+        return record
     image = pending.get("reference") or pending.get("rejected_clean")
     if image:
         try:
@@ -487,14 +507,15 @@ def cleaning_record(pending: dict, cdn: Cdn, key: str) -> dict:
     return record
 
 
-def meshy_input(image: bytes | None, mime: str, source: str, mesh: dict, url: str | None = None) -> dict:
-    """What Meshy Image to 3D was given: which image (its hash and size), and what it textures from, computed from
-    the same payload builder the request uses."""
+def meshy_input(image: bytes | None, mime: str, source: str, mesh: dict, url: str | None = None, input_task_id: str | None = None) -> dict:
+    """What Meshy Image to 3D was given: which image (its hash and size; the Image to Image task when the cleaned image
+    went by input_task_id), and what it textures from, computed from the same payload builder the request uses."""
     settings = get_settings()
-    payload = image_to_3d_payload(GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]), {"image_url": "<image>"},
-                                  mesh.get("texture_prompt"), mesh.get("target_polycount"), settings.meshy_texture_source)
+    payload = image_to_3d_payload(GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
+                                  {"input_task_id": "<task>"} if input_task_id else {"image_url": "<image>"},
+                                  mesh.get("texture_prompt"), mesh.get("target_polycount"), settings.meshy_texture_source, **quality_options(settings))
     return {
-        "source": source, "mime": mime, "bytes": len(image) if image else None, "url": url,
+        "source": source, "mime": mime, "bytes": len(image) if image else None, "url": url, "inputTaskId": input_task_id,
         "sha256": hashlib.sha256(image).hexdigest() if image else None,
         "texture": texture_conditioning(payload), "textureSource": settings.meshy_texture_source,
         "fields": sorted(payload),
@@ -535,7 +556,9 @@ def analysis_checked(components: dict, pending: dict) -> dict:
     if (components.get("modularity") or {}).get("level") == "partial":
         components = {**components, "limits": " ".join(x for x in (components.get("limits"), components["modularity"]["note"]) if x)}
     if analysis is None:
-        components = {**components, "limits": " ".join(x for x in (components.get("limits"), "The photo was not analysed into components before generation (no vision model answer).") if x)}
+        why = ("Parts are named from the model's own geometry and the furniture type: Meshy generation makes no vision analysis of the photo."
+               if pending.get("vision_off") else "The photo was not analysed into components before generation (no vision model answer).")
+        components = {**components, "limits": " ".join(x for x in (components.get("limits"), why) if x)}
     return components
 
 
@@ -603,14 +626,6 @@ async def procedural_wardrobe(
     return glb, closed, (open_glb, {**wardrobe.components_doc(open_glb, open_names), "validation": open_report})
 
 
-def _log_clean_failure(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.warning("Vision image cleaning failed: %s", getattr(exc, "message", exc))
-
-
 @router.post("/generate")
 async def generate_model(
     request: Request,
@@ -618,7 +633,7 @@ async def generate_model(
     meshy: Annotated[MeshyService, Depends(get_meshy)],
     astra: Annotated[AstraService, Depends(get_astra)],
     cdn: Annotated[Cdn, Depends(get_cdn)],
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: SettingsDep,
     user_id: Annotated[str, Depends(current_user)],
     image: Annotated[UploadFile | None, File()] = None,
     image_url: Annotated[str | None, Form()] = None,
@@ -650,6 +665,9 @@ async def generate_model(
     object_id = model_id or uuid4().hex
     textured = should_texture.strip().lower() not in {"0", "false", "no"}
     db = request.app.state.auth_http
+    # Meshy reads nothing with the vision model unless the optional analysis is on (the two-state wardrobe builder,
+    # which is not Meshy, still reads its photos).
+    vision_reading = provider != "meshy" or settings.meshy_vision_analysis
     # The same photo, vendor and options → the model generated before (model_cache): no vision call,
     # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
     cache_key = glb_cache_key(raw + open_raw, user_id, provider, category, title, textured, kind, builds_wardrobe(provider, category, kind, bool(open_raw))) if raw else None
@@ -658,7 +676,7 @@ async def generate_model(
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
         # The 3D model is reused; its listing must be in the language asked for now: read again only when it is not
         # (the reading is cached per language, and costs no generation try).
-        if details is None or not all(in_language(t, lang) for t in (details.name, details.description) if t):
+        if vision_reading and (details is None or not all(in_language(t, lang) for t in (details.name, details.description) if t)):
             details = await read_photo(request, settings, raw, mime, category, title, kind, lang) or details
         return GenerateReady(task_id=hit.get("model_id") or object_id, provider=provider, glb_url=hit["glb_url"], details=details, components=hit.get("components"), source_glb_url=hit.get("source_glb_url"), states=hit.get("states"))
 
@@ -666,7 +684,7 @@ async def generate_model(
     preread: ProductDetails | None = None
     prespec: furniture_spec.FurnitureSpec | None = None
     if category == "auto":
-        prespec = await read_spec(request, settings, raw, mime, "auto", title, kind, lang) if raw else None
+        prespec = await read_spec(request, settings, raw, mime, "auto", title, kind, lang) if raw and (vision_reading or open_raw) else None
         preread = prespec.details if prespec else None
         category = preread.category if preread and preread.category else "furniture"
         # What the user typed wins (it goes into the Meshy / Astra prompt); else what the reading saw.
@@ -736,27 +754,19 @@ async def generate_model(
     if not settings.meshy_configured:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "MESHY_API_KEY is not configured.")
     remaining = await take_try(request, user_id, "meshy", settings)
-    # The listing reading and the component analysis read the same photo independently: asked at the same time
-    # (each takes 30–60 s), not one after the other.
-    # One vision call (cached): the listing, the components and what is not part of the product.
-    spec = prespec or (await read_spec(request, settings, raw, mime, category, title, kind, lang) if raw else None)
+    # Meshy makes no vision-model call unless the admin turned on the optional analysis (meshy_vision_analysis): the
+    # vendor's category, type and title are the metadata; parts come from the GLB's own geometry.
+    spec = prespec or (await read_spec(request, settings, raw, mime, category, title, kind, lang) if raw and settings.meshy_vision_analysis else None)
     details = spec.details if spec else preread
     analysis = spec.analysis if spec else None
     spec_doc = spec.model_dump(mode="json") if spec else None
-    # Original photo → the configured vision model cleans it (loose objects and contents removed) → Image to 3D from
-    # that image → Auto Split → grouping, naming, checks. Image to 3D has no geometry prompt, so what is removed
-    # is removed in the image. A public URL is downloaded here: the vision model needs the bytes.
+    # Original photo → Meshy Image to Image (furniture cleaning prompt) → Image to 3D from that task → Auto Split →
+    # grouping, naming, checks. Image to 3D has no geometry prompt, so what is removed is removed in the image.
     kind_type = furniture_type(category, kind or None, details)
-    # Cleaning is another image-model call that redraws the photo: only when the reading found loose objects on or in
-    # the product. A clean product photo goes to Image to 3D as it is (the most faithful input).
-    clean_prompt = meshy_prompt(category, kind or None, details) if settings.meshy_clean_image and spec and spec.needs_cleaning else None
-    if clean_prompt:
-        clean_prompt += f" In this photo, remove: {', '.join(spec.loose_objects[:12])}."
-    clean_model = None
-    # Vision mesh analysis first: the photo's components shape the prompt. Meshy takes it where it can act on it
-    # (texture_prompt, Auto Split's part list); `conditioning` records where each part went, nothing is dropped.
+    clean_prompt = meshy_clean_prompt(category, kind or None, settings.meshy_clean_prompt, settings.meshy_clean_hints,
+                                      spec.loose_objects if spec and spec.needs_cleaning else None) if settings.meshy_clean_image else None
     base_texture = meshy_texture_prompt(category, title, details, kind or None)
-    split = split_prompt(category, kind or None)
+    split = split_prompt(category, kind or None)  # the vendor's furniture type's parts: no photo reading needed
     conditioning = None
     if analysis:
         base_texture = mesh_analysis.texture_prompt(analysis, base_texture)
@@ -767,30 +777,41 @@ async def generate_model(
         "texture_prompt": base_texture,
         "target_polycount": target_polycount(category, kind or None),
     }
-    stage = "mesh"
+    pending: dict = {
+        "stage": "mesh", "mesh_task_id": None, "image_task_id": None, "clean_prompt": clean_prompt,
+        "mesh": mesh, "mime": mime, "image_url": public_url,
+        "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
+        "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
+        "category": category, "kind": kind,
+        "split": split if settings.meshy_auto_split else None,  # Auto Split parts
+        "analysis": analysis.model_dump(mode="json") if analysis else None,
+        "meshy_conditioning": conditioning,
+        "spec": spec_doc,
+        "vision_off": not settings.meshy_vision_analysis,
+        "textured": textured,
+        "photo": raw or None,  # the reference for the checks when the model arrives (dropped with the task)
+        "warnings": [],
+    }
     task_id = None
-    clean_job = None
     if clean_prompt:
-        clean_model = await vision.current_model(settings, request.app.state.auth_http)
-        photo = raw
         try:
-            if not photo and public_url:
-                photo = await vision.fetch_image(public_url)
-            if not photo or not vision.configured(settings, clean_model):
-                raise vision.VisionImageError("The vision model is not configured." if not vision.configured(settings, clean_model) else "Provide a photo to clean.")
-        except vision.VisionImageError as exc:
-            logger.warning("Image cleaning did not start (%s): 3D generation was not started", exc.message)
-            await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, IMAGE_FAILED) from exc
-        task_id = uuid4().hex
-        clean_job = asyncio.create_task(vision.clean_image(
-            clean_prompt, photo, mime, settings, vision.client_for(request.app.state, clean_model), clean_model,
-        ))
-        clean_job.add_done_callback(_log_clean_failure)
-        stage = "image"
-    direct_input = meshy_input(raw or None, mime, "original", mesh, None if raw else public_url) if task_id is None else None
-    try:
-        if task_id is None:
+            pending["image_task_id"] = await meshy.create_image_to_image_task(
+                clean_prompt, image=raw or None, mime_type=mime, image_url=None if raw else public_url, aspect_ratio=nearest_aspect_ratio(raw, settings.meshy_image_model),
+            )
+        except MeshyError as exc:
+            if not settings.meshy_use_original_on_bad_cleaning:
+                await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # refunds the try
+                raise HTTPException(exc.status_code, f"{IMAGE_FAILED} {exc.message}") from exc
+            pending["warnings"].append(cleaning_warning("failed", exc.message))
+            pending["cleaning_fallback"] = {"what": "failed", "reason": exc.message}
+            pending["image_step_status"] = "SKIPPED"
+        else:
+            task_id = uuid4().hex  # ours: the Meshy ids are kept in the pending entry
+            pending.update(stage="image", clean_started=time.monotonic())
+    if task_id is None:
+        pending["meshy_input"] = meshy_input(raw or None, mime, "original", mesh, None if raw else public_url)
+        pending["meshy_input_bytes"] = raw or None
+        try:
             task_id = await meshy.create_image_to_3d_task(
                 GenerationOptions(should_texture=textured, enable_pbr=textured),
                 image=raw or None,
@@ -799,42 +820,32 @@ async def generate_model(
                 texture_prompt=mesh["texture_prompt"] if textured else None,
                 target_polycount=mesh["target_polycount"],
             )
-    except MeshyError as exc:
-        await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
-        raise HTTPException(exc.status_code, exc.message) from exc
-    logger.info("%s %s: furniture_type=%r category=%r analysed=%s split=%r vision_model=%s loose=%s", "Vision image cleaning" if stage == "image" else "Meshy image-to-3d", task_id, kind_type, category, bool(analysis), split, clean_model, spec.loose_objects if spec else None)
-    # The structural model needs only the spec: built now, while the provider works on the visual one.
-    built = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb")
-    request.app.state.pending_cdn[task_id] = {
-        "stage": stage,
-        "mesh_task_id": task_id if stage == "mesh" else None,
-        "clean_prompt": clean_prompt,
-        "clean_job": clean_job,
-        "clean_started": time.monotonic() if clean_job else None,
-        "mesh": mesh,
-        "mime": mime,
-        "image_url": public_url,
-        "user_id": user_id, "model_id": object_id, "cache_key": cache_key,
-        "details": details.model_dump(mode="json") if details else None,  # cached with the GLB when Meshy finishes
-        "category": category,
-        "kind": kind,
-        "split": split if settings.meshy_auto_split else None,  # Auto Split parts
-        "analysis": analysis.model_dump(mode="json") if analysis else None,
-        "meshy_conditioning": conditioning,
-        "spec": spec_doc,
-        "structural": built,
-        "meshy_input": direct_input,  # the cleaning step records it when the photo is cleaned first
-        "meshy_input_bytes": (raw or None) if direct_input else None,
-        "textured": textured,
-        "photo": raw or None,  # the reference for the appearance check when the model arrives (dropped with the task)
-    }
-    if clean_job:
-        await asyncio.sleep(0)  # the cleaning request starts before this response is sent
+        except MeshyError as exc:
+            await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
+            raise HTTPException(exc.status_code, exc.message) from exc
+        pending["mesh_task_id"] = task_id
+    logger.info("Meshy %s %s: furniture_type=%r category=%r analysed=%s split=%r", "image-to-image" if pending["stage"] == "image" else "image-to-3d",
+                task_id, kind_type, category, bool(analysis), split)
+    # The structural model needs a validated spec (vision analysis); without one it is reported unavailable, not guessed.
+    pending["structural"] = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb") if spec_doc else STRUCTURAL_OFF
+    request.app.state.pending_cdn[task_id] = pending
     return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining, details=details)
 
 
 IMAGE_STAGE = 20  # % of the progress bar the Image to Image step takes
 IMAGE_FAILED = "Image to image failed, so the 3D model was not generated."
+TRANSIENT = {429, 502, 503, 504}  # a poll that hit these is retried later, never counted as the task failing
+FINISHED_TTL = 3600.0  # finished task answers kept this long, so repeated or concurrent polls never redo the work
+STRUCTURAL_OFF = {"source": "none", "built": False, "uncertain": [
+    "No structural specification: Meshy generation makes no vision analysis (MESHY_VISION_ANALYSIS is off), so no "
+    "carpenter-ready model was built. The visual model's parts are not a structural plan."]}
+
+
+def cleaning_warning(what: str, reason: str) -> str:
+    """Said whenever the original photo was meshed instead of a cleaned one: never presented as cleaned."""
+    reason = reason.strip().rstrip(".")
+    return (f"Image cleaning {what}{f' ({reason})' if reason else ''}. The original photo was used for 3D, so pillows, bedding "
+            "or other accessories in it may be part of the model.")
 
 
 def _steps(image: tuple[str, int] | None, mesh: tuple[str, int] | None) -> list[GenerationStep] | None:
@@ -847,95 +858,153 @@ def _steps(image: tuple[str, int] | None, mesh: tuple[str, int] | None) -> list[
 
 
 def _mesh_steps(pending: dict, status: str, progress: int) -> list[GenerationStep] | None:
-    """Image to 3D, with the cleaning step marked done when this task went through it."""
-    image = ("SUCCEEDED", 100) if pending.get("image_step") or pending.get("clean_prompt") else None
-    return _steps(image, (status, progress))
+    """Image to 3D, with the cleaning step's outcome when this task had one (SUCCEEDED, or SKIPPED: original used)."""
+    done = pending.get("image_step_status")
+    return _steps((done, 100 if done == "SUCCEEDED" else 0) if done else None, (status, progress))
+
+
+def _status(task_id: str, pending: dict, phase: str, **kw) -> TaskStatusResponse:
+    """A task answer with its phase, the warnings so far and the cleaned image (when one is used)."""
+    return TaskStatusResponse(task_id=task_id, phase=phase, warnings=list(pending.get("warnings") or []) or None,
+                              clean_image_url=pending.get("clean_image_url"), **kw)
+
+
+def _finish(request: Request, task_id: str, pending: dict, response: TaskStatusResponse) -> TaskStatusResponse:
+    """The task's final answer, kept (bytes dropped) so a later or concurrent poll returns it instead of polling Meshy
+    and processing again. ponytail: in-process dict with a TTL; a shared store if the API runs on several hosts."""
+    lock = pending.get("_lock")
+    keep = {"user_id": pending.get("user_id"), "result": response, "finished": time.monotonic(), "_lock": lock}
+    pending.clear()
+    pending.update(keep)
+    tasks = request.app.state.pending_cdn
+    tasks[task_id] = pending
+    now = time.monotonic()
+    for key in [k for k, v in tasks.items() if now - v.get("finished", now) > FINISHED_TTL]:
+        tasks.pop(key, None)
+    return response
+
+
+async def _refund(request: Request, pending: dict) -> None:
+    """The try back, once per task, when no model comes of it."""
+    owner = pending.get("user_id")
+    if owner and not pending.get("refunded"):
+        pending["refunded"] = True
+        await bus.publish(GenerationFailed(owner, "meshy"), request.app.state)
 
 
 async def _clean_failed(request: Request, task_id: str, pending: dict, reason: str, progress: int) -> TaskStatusResponse:
     logger.warning("Image cleaning %s failed (%s): 3D generation was not started", task_id, reason)
-    owner = pending.get("user_id") or ""
-    request.app.state.pending_cdn.pop(task_id, None)
-    if owner:
-        await bus.publish(GenerationFailed(owner, "meshy"), request.app.state)
-    return TaskStatusResponse(
-        task_id=task_id, status="FAILED", progress=progress,
+    await _refund(request, pending)
+    return _finish(request, task_id, pending, _status(
+        task_id, pending, "failed", status="FAILED", progress=progress,
         error=f"{IMAGE_FAILED} {reason}".strip() if reason else IMAGE_FAILED,
         steps=_steps(("FAILED", progress), ("PENDING", 0)),
-    )
+    ))
 
 
-async def conditioned_image(request: Request, meshy: MeshyService, task_id: str, pending: dict) -> TaskStatusResponse | None:
-    """The vision model's cleaning step. While it runs, report progress. When it returns an image, it is compared with
-    the original first (fidelity.compare_images): if it changed the furniture's proportions, layout or colours it is
-    rejected, and the original photo is meshed when the reading is confident (else the conversion stops). A failed
-    cleaning step stops the conversion."""
-    lock = pending.setdefault("_clean_lock", asyncio.Lock())
-    async with lock:
-        if pending.get("stage") != "image":
-            return None
-        job = pending.get("clean_job")
-        if not isinstance(job, asyncio.Task):
-            return await _clean_failed(request, task_id, pending, "Image cleaning did not start.", 0)
-        if not job.done():
-            elapsed = time.monotonic() - float(pending.get("clean_started") or time.monotonic())
-            image_progress = min(95, int(elapsed / 30 * 100))
-            return TaskStatusResponse(
-                task_id=task_id, status="IN_PROGRESS", progress=image_progress * IMAGE_STAGE // 100, retry_after_seconds=4,
-                steps=_steps(("IN_PROGRESS", image_progress), ("PENDING", 0)),
-            )
-        exc = job.exception()
-        cleaned = None if exc else job.result()
-        if exc or not isinstance(cleaned, (bytes, bytearray)) or not cleaned:
-            reason = getattr(exc, "message", None) or (str(exc) if exc else "The vision model returned no image.")
-            return await _clean_failed(request, task_id, pending, reason, 0)
-        cleaned = bytes(cleaned)
-        photo = pending.get("photo")
-        details = pending.get("details") or {}
-        # Checked against the original BEFORE Meshy sees it: a cleaned image that changed the furniture is not meshed.
-        check = await run_in_threadpool(fidelity.compare_images, photo, cleaned, details.get("bbox")) if photo else \
-            {"stage": "cleaning", "ok": None, "issues": [], "notes": ["No original photo to compare with."]}
-        pending["cleaning_check"] = check
-        if check.get("ok") is False:
-            check["rejected"] = True
-            pending["rejected_clean"] = cleaned
-            confident = details.get("matches_category", True) and float(details.get("confidence") or 0) >= 0.5
-            if not (get_settings().meshy_use_original_on_bad_cleaning and photo and confident):
-                return await _clean_failed(request, task_id, pending, "The cleaned image changed the furniture: " + "; ".join(check["issues"][:2]), 0)
-            pending["conditioning"] = ("The cleaned photo was rejected (" + "; ".join(check["issues"][:2]) + "). The original photo was "
-                                       "meshed instead: objects on or in the furniture may be part of the model.")
-            meshed, meshed_mime, source = photo, pending.get("mime") or "image/png", "original"
-        else:
-            pending["clean_image_url"] = "vision"
-            # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
-            pending["reference"] = cleaned
-            meshed, meshed_mime, source = cleaned, sniff_image_mime(cleaned) or "image/png", "cleaned"
-        mesh = pending["mesh"]
-        pending["meshy_input"] = meshy_input(meshed, meshed_mime, source, mesh)
-        pending["meshy_input_bytes"] = meshed
-        try:
-            pending["mesh_task_id"] = await meshy.create_image_to_3d_task(
-                # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal (glb_size keeps the
-                # file within its limit). Exactly the image recorded in meshy_input.
-                GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
-                image=meshed,
-                mime_type=meshed_mime,
-                texture_prompt=mesh["texture_prompt"],
-                target_polycount=mesh["target_polycount"],
-            )
-        except MeshyError as exc:
-            if request.app.state.pending_cdn.pop(task_id, None) is not None:  # nothing more will come of it: the try is given back
-                await bus.publish(GenerationFailed(pending.get("user_id") or "", "meshy"), request.app.state)
-            return TaskStatusResponse(
-                task_id=task_id, status="FAILED", progress=IMAGE_STAGE, error=exc.message,
-                steps=_steps(("SUCCEEDED", 100), ("FAILED", 0)),
-            )
-        pending["stage"] = "mesh"
-        pending["image_step"] = True  # this task spent the first part of the bar on image cleaning
-        return TaskStatusResponse(
-            task_id=task_id, status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5,
-            steps=_steps(("SUCCEEDED", 100), ("IN_PROGRESS", 0)),
+async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pending: dict, source: str, image: bytes | None = None,
+                      url: str | None = None, input_task_id: str | None = None) -> TaskStatusResponse:
+    """Image to 3D from the cleaned image (its Image to Image task, no re-upload) or the original photo."""
+    mesh, mime = pending["mesh"], (sniff_image_mime(image) if image else None) or pending.get("mime") or "image/png"
+    if source == "cleaned" and (not input_task_id or input_task_id != pending.get("image_task_id")):
+        # never mesh "the cleaned image" from anything but the Image to Image task that produced it
+        raise RuntimeError(f"cleaned handoff without its Image to Image task ({input_task_id!r} != {pending.get('image_task_id')!r})")
+    record = meshy_input(image, mime, source, mesh, url, input_task_id)
+    logger.info("Meshy image-to-3d for %s: image_source=%s image_to_image_task=%s input_task_id=%s", task_id,
+                "input_task_id" if input_task_id else ("image_url (original, URL)" if url else "image_url (original, data URI)"),
+                pending.get("image_task_id"), input_task_id)  # ids only: no signed URL, no image data
+    try:
+        mesh_id = await meshy.create_image_to_3d_task(
+            # PBR: metallic, roughness and normal maps besides the colour, so gold handles stay metal.
+            GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
+            image=None if input_task_id else image, mime_type=mime, image_url=None if input_task_id else url, input_task_id=input_task_id,
+            texture_prompt=mesh["texture_prompt"] if mesh["textured"] else None, target_polycount=mesh["target_polycount"],
         )
+    except MeshyError as exc:
+        await _refund(request, pending)  # nothing more will come of it
+        return _finish(request, task_id, pending, _status(task_id, pending, "failed", status="FAILED", progress=IMAGE_STAGE, error=exc.message,
+                                                          steps=_steps((pending.get("image_step_status") or "SUCCEEDED", 100), ("FAILED", 0))))
+    logger.info("Meshy image-to-3d task %s created for %s from %s", mesh_id, task_id, input_task_id or "the original photo")
+    pending.update(stage="mesh", mesh_task_id=mesh_id, image_step=True, meshy_input=record, meshy_input_bytes=image)
+    return _status(task_id, pending, "mesh_generation", status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5,
+                   steps=_mesh_steps(pending, "IN_PROGRESS", 0))
+
+
+async def _use_original(request: Request, meshy: MeshyService, task_id: str, pending: dict, what: str, reason: str) -> TaskStatusResponse:
+    """The configured fallback when cleaning failed or its image was rejected: the original photo is meshed and the
+    model says so (meshy_use_original_on_bad_cleaning), or the conversion stops and the try is refunded."""
+    photo, url = pending.get("photo"), pending.get("image_url")
+    if not (get_settings().meshy_use_original_on_bad_cleaning and (photo or url)):
+        return await _clean_failed(request, task_id, pending, reason, 0)
+    logger.warning("Meshy image cleaning %s %s (%s): meshing the original photo", task_id, what, reason[:200])
+    pending["warnings"].append(cleaning_warning(what, reason))
+    pending["cleaning_fallback"] = {"what": what, "reason": reason}
+    pending["image_step_status"] = "SKIPPED"
+    pending.pop("clean_image_url", None)
+    pending.pop("reference", None)
+    return await _start_mesh(request, meshy, task_id, pending, "original", image=photo, url=None if photo else url)
+
+
+def _task_error(task: dict) -> str:
+    err = task.get("task_error") or task.get("error")
+    return str((err.get("message") if isinstance(err, dict) else err) or "")
+
+
+async def conditioned_image(request: Request, meshy: MeshyService, cdn: Cdn | None, task_id: str, pending: dict) -> TaskStatusResponse:
+    """The Meshy Image to Image step, one poll at a time (the caller holds the task's lock):
+    image_preprocessing — the Image to Image task runs; image_validation — its one image is downloaded, checked as an
+    image and against the original (fidelity.compare_images, removal mode), then Image to 3D starts from that task."""
+    if pending["stage"] == "image":
+        try:
+            task = await meshy.get_image_to_image_task(pending["image_task_id"])
+        except MeshyError as exc:
+            if exc.status_code in TRANSIENT:  # rate limited / Meshy busy: ask again later, nothing is lost
+                return _status(task_id, pending, "image_preprocessing", status="IN_PROGRESS", progress=0, retry_after_seconds=exc.retry_after or 10,
+                               steps=_steps(("IN_PROGRESS", 0), ("PENDING", 0)))
+            return await _use_original(request, meshy, task_id, pending, "failed", exc.message)
+        state = str(task.get("status") or "")
+        if state in ("PENDING", "IN_PROGRESS", ""):
+            if time.monotonic() - float(pending.get("clean_started") or time.monotonic()) > get_settings().meshy_clean_timeout_seconds:
+                return await _use_original(request, meshy, task_id, pending, "timed out", "Meshy Image to Image took too long")
+            progress = max(0, min(99, int(task.get("progress") or 0)))
+            return _status(task_id, pending, "image_preprocessing", status="IN_PROGRESS", progress=progress * IMAGE_STAGE // 100, retry_after_seconds=4,
+                           steps=_steps(("IN_PROGRESS", progress), ("PENDING", 0)))
+        if state != "SUCCEEDED":  # FAILED, CANCELED, or anything undocumented
+            return await _use_original(request, meshy, task_id, pending, "failed", _task_error(task) or f"Meshy Image to Image ended {state}")
+        urls = [u for u in task.get("image_urls") or [] if isinstance(u, str) and u]
+        if len(urls) != 1:  # Image to 3D's input_task_id takes a task with exactly one image
+            return await _use_original(request, meshy, task_id, pending, "failed", f"Meshy Image to Image returned {len(urls)} images, not one")
+        pending.update(stage="validation", clean_url=urls[0])
+        return _status(task_id, pending, "image_validation", status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=1,
+                       steps=_steps(("SUCCEEDED", 100), ("PENDING", 0)))
+
+    cleaned = await meshy.download_bytes(pending.pop("clean_url", "") or "")
+    if not cleaned:
+        return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image could not be downloaded")
+    if sniff_image_mime(cleaned) not in ALLOWED_IMAGE_TYPES:
+        return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image is not a PNG, JPG or WEBP")
+    photo = pending.get("photo")
+    check = await run_in_threadpool(fidelity.compare_images, photo, cleaned, (pending.get("details") or {}).get("bbox"), True) if photo else \
+        {"stage": "cleaning", "mode": "removal", "ok": None, "issues": [], "notes": ["Only an image URL was given: the cleaned image was not compared with the original."]}
+    pending["cleaning_check"] = check
+    if check.get("ok") is False:
+        check["rejected"] = True
+        pending["rejected_clean"] = cleaned
+        return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image changed the furniture: " + "; ".join(check["issues"][:2]))
+    # No photo reading (the default Meshy path) means no box to compare layout in: that is recorded in the check's notes,
+    # not raised as a warning on every model. Any other unjudged check is.
+    if check.get("ok") is None and (not photo or (pending.get("details") or {}).get("bbox")):
+        pending["warnings"].append("The cleaned image was used but could not be fully checked against the original photo: " + "; ".join(check.get("notes", [])[:1]))
+    # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
+    pending["reference"] = cleaned
+    pending["image_step_status"] = "SUCCEEDED"
+    if cdn is not None:
+        try:
+            pending["clean_image_url"] = await run_in_threadpool(cdn.upload, f"{pending.get('user_id')}/{pending.get('model_id') or task_id}.clean.png", cleaned,
+                                                                 sniff_image_mime(cleaned) or "image/png")
+        except CdnError as exc:
+            logger.warning("Cleaned image not uploaded: %s", exc.message)
+    return await _start_mesh(request, meshy, task_id, pending, "cleaned", image=cleaned, input_task_id=pending["image_task_id"])
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -947,46 +1016,50 @@ async def get_task(
     user_id: Annotated[str, Depends(current_user)],
     background: BackgroundTasks,
 ) -> TaskStatusResponse:
+    """image_preprocessing → image_validation → mesh_generation → auto_split → postprocessing → completed (or failed).
+    One poll at a time per task (its lock): concurrent polls wait, then get the same answer, so no Meshy task is
+    created twice and the model is processed once."""
+    registered = task_id in request.app.state.pending_cdn
     pending = request.app.state.pending_cdn.get(task_id) or {}
     if pending.get("user_id") and pending["user_id"] != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
-    if pending.get("stage") == "image":
-        waiting = await conditioned_image(request, meshy, task_id, pending)
-        if waiting:
-            return waiting
+    async with pending.setdefault("_lock", asyncio.Lock()):
+        if "result" in pending:
+            return pending["result"]
+        if pending.get("stage") in ("image", "validation"):
+            return await conditioned_image(request, meshy, cdn, task_id, pending)
+        return await _mesh_task(task_id, request, meshy, cdn, user_id, background, pending, registered)
+
+
+async def _mesh_task(task_id: str, request: Request, meshy: MeshyService, cdn: Cdn, user_id: str, background: BackgroundTasks,
+                     pending: dict, registered: bool) -> TaskStatusResponse:
+    settings = get_settings()
     mesh_id = pending.get("mesh_task_id") or task_id  # without a pending entry: an Image to 3D id from before the chain
     try:
         task, retry_after = await meshy.get_image_to_3d_task(mesh_id)
     except MeshyError as exc:
+        if registered and exc.status_code in TRANSIENT:
+            return _status(task_id, pending, "mesh_generation", status="IN_PROGRESS", progress=IMAGE_STAGE if pending.get("image_step") else 0,
+                           retry_after_seconds=exc.retry_after or 10, steps=_mesh_steps(pending, "IN_PROGRESS", 0))
         raise HTTPException(exc.status_code, exc.message) from exc
 
     status_value = str(task.get("status") or "IN_PROGRESS")
     progress = int(task.get("progress") or 0)
     if status_value in {"FAILED", "CANCELED", "EXPIRED"}:
-        err = task.get("task_error") or task.get("error") or "Generation failed."
-        if isinstance(err, dict):
-            err = err.get("message") or str(err)
-        return TaskStatusResponse(
-            task_id=task_id,
-            status="FAILED" if status_value == "EXPIRED" else status_value,
-            progress=progress,
-            error=str(err),
-            steps=_mesh_steps(pending, "FAILED", progress),
-        )
+        if registered:
+            await _refund(request, pending)  # no model: the try is given back (once)
+        failed = _status(task_id, pending, "failed", status="FAILED" if status_value == "EXPIRED" else status_value, progress=progress,
+                         error=_task_error(task) or "Generation failed.", steps=_mesh_steps(pending, "FAILED", progress))
+        return _finish(request, task_id, pending, failed) if registered else failed
     splitting = bool(pending.get("split"))
     if status_value != "SUCCEEDED":
-        # A task that started on the old image step already used the first 20%. A direct Image to 3D task has not.
+        # A task that went through the image step already used the first 20%. A direct Image to 3D task has not.
         base = IMAGE_STAGE if pending.get("image_step") else 0
-        return TaskStatusResponse(
-            task_id=task_id,
-            status=status_value,
-            progress=base + progress * ((90 if splitting else 100) - base) // 100,
-            retry_after_seconds=retry_after or 5,
-            steps=_mesh_steps(pending, "IN_PROGRESS", progress),
-        )
+        return _status(task_id, pending, "mesh_generation", status=status_value, progress=base + progress * ((90 if splitting else 95) - base) // 100,
+                       retry_after_seconds=retry_after or 5, steps=_mesh_steps(pending, "IN_PROGRESS", progress))
 
-    # Auto Split (by_parts, the photo reading's components): its result is checked against the raw model below and
-    # used only when it really is that model in several meshes. Its actual status, error and prompt_ignored are kept.
+    # Auto Split (by_parts, the furniture type's parts): its result is checked against the raw model below and used
+    # only when it really is that model in several meshes. Its actual status, error and prompt_ignored are kept.
     split_glb_url = None
     split_task: dict | None = None
     if splitting:
@@ -996,31 +1069,48 @@ async def get_task(
                 pending["split_task_id"] = await meshy.create_split_task(mesh_id, pending["split"], bool(pending.get("textured")))
             split = await meshy.get_split_task(pending["split_task_id"])
         except MeshyError as exc:
+            if exc.status_code in TRANSIENT and pending.get("split_task_id") and registered:
+                return _status(task_id, pending, "auto_split", status="IN_PROGRESS", progress=90, retry_after_seconds=exc.retry_after or 10,
+                               steps=_mesh_steps(pending, "SUCCEEDED", 100))
             logger.warning("Meshy Auto Split for %s failed: %s", task_id, exc.message)
             split_task.update(status="REQUEST_FAILED", error=exc.message, taskId=pending.get("split_task_id"))
             pending["split"] = None
+            pending["split_failed"] = split_task
         else:
             split_status = str(split.get("status"))
             if split_status in {"PENDING", "IN_PROGRESS"}:
-                return TaskStatusResponse(task_id=task_id, status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 10, retry_after_seconds=5, steps=_mesh_steps(pending, "IN_PROGRESS", 100))
+                return _status(task_id, pending, "auto_split", status="IN_PROGRESS", progress=90 + int(split.get("progress") or 0) // 20, retry_after_seconds=5,
+                               steps=_mesh_steps(pending, "SUCCEEDED", 100))
             split_glb_url = (split.get("model_urls") or {}).get("glb") if split_status == "SUCCEEDED" else None
             err = split.get("task_error")
             split_task.update(status=split_status, taskId=pending["split_task_id"], partCount=split.get("part_count"), promptIgnored=split.get("prompt_ignored"),
                               error=(err.get("message") if isinstance(err, dict) else err) or None)
             logger.info("Meshy Auto Split %s: status=%s part_count=%s prompt_ignored=%s error=%s", pending["split_task_id"], split_status, split.get("part_count"), split.get("prompt_ignored"), err)
+    elif pending.get("split_failed"):
+        split_task = pending["split_failed"]
+    # Everything Meshy makes is ready: say so (one short poll) before the processing request, which takes a while.
+    if registered and not pending.get("finalizing"):
+        pending["finalizing"] = True
+        return _status(task_id, pending, "postprocessing", status="IN_PROGRESS", progress=96, retry_after_seconds=1,
+                       steps=_mesh_steps(pending, "SUCCEEDED", 100))
     owner = pending.get("user_id") or user_id
     object_id = pending.get("model_id") or task_id
     model_urls = task.get("model_urls") or {}
     glb_url = model_urls.get("glb")
     if not glb_url:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Meshy finished but did not return a GLB.")
+        if registered:
+            await _refund(request, pending)
+        failed = _status(task_id, pending, "failed", status="FAILED", progress=100, error="Meshy finished but did not return a GLB.",
+                         steps=_mesh_steps(pending, "FAILED", 100))
+        return _finish(request, task_id, pending, failed) if registered else failed
+    allow_vision = settings.meshy_vision_analysis  # downstream vision calls only with the optional analysis
     dest = request.app.state.storage.models_dir / f"{task_id}.glb"
     try:
         split_dest = dest.with_suffix(".split.glb")
         # The model and its split at the same time (tens of MB each).
         await asyncio.gather(meshy.download_file(glb_url, dest), *([meshy.download_file(split_glb_url, split_dest)] if split_glb_url else []))
         data = dest.read_bytes()
-        raw_glb = data  # the provider's file before any change, kept and compared with
+        raw_glb = data  # the provider's file before any change, kept full quality (raw.glb) and compared with
         background.add_task(upload_raw, raw_glb, cdn, f"{owner}/{object_id}.raw.glb")
         components = None
         split_report = None
@@ -1041,17 +1131,22 @@ async def get_task(
             components = {**components, "surfaces": surfaces}
         components = analysis_checked(components, pending)
         reference = pending.get("reference") or pending.get("photo")
-        data, source_glb, components = await grouped(request, data, source_glb, components, reference, pending.get("details"))
-        data, components = await named(request, data, components, pending.get("category"), pending.get("kind"))
+        data, source_glb, components = await grouped(request, data, source_glb, components, reference, pending.get("details"), allow_vision)
+        data, components = await named(request, data, components, pending.get("category"), pending.get("kind"), allow_vision)
         data, components, ar_job = await quality_checked(data, components, pending.get("details"))
         components = schedule_ar(background, ar_job, cdn, owner, object_id, components)
         data, components = await run_in_threadpool(animation.configure, data, components)  # movable parts, estimated interior
-        if pending.get("conditioning"):  # said, not hidden: the type did not shape this model's image
-            components = {**components, "limits": " ".join(x for x in (components.get("limits"), pending["conditioning"]) if x)}
+        warnings = list(pending.get("warnings") or [])
+        if pending.get("conditioning"):
+            warnings.append(pending["conditioning"])
+        if warnings:  # said, not hidden: what did not go as asked
+            components = {**components, "limits": " ".join(x for x in (components.get("limits"), *warnings) if x)}
         data, source_glb, components = await sized(data, source_glb, components)
         # The photo reading's box is in the original photo: the cleaned image is framed differently, so no box for it.
         bbox = None if pending.get("reference") else (pending.get("details") or {}).get("bbox")
         components = await run_in_threadpool(validated, data, components, pending.get("category"), pending.get("kind"), reference, bbox)
+        if warnings:
+            components["validation"] = {**components["validation"], "warnings": [*warnings, *components["validation"].get("warnings", [])]}
         components = {**components, "cleaning": await run_in_threadpool(cleaning_record, pending, cdn, f"{owner}/{object_id}.clean.png")}
         # Built from the spec when the task was submitted (older tasks without one: built now, from the same spec).
         built = pending.get("structural") if "structural" in pending else await run_in_threadpool(structural_model, pending.get("spec"), pending.get("category"), pending.get("kind"), cdn, f"{owner}/{object_id}.carpenter.glb")
@@ -1064,12 +1159,14 @@ async def get_task(
         url = await run_in_threadpool(cdn.upload, f"{owner}/{object_id}.glb", data, "model/gltf-binary")
         source_url = schedule_source(background, source_glb, cdn, f"{owner}/{object_id}.source.glb")
     except (MeshyError, CdnError) as exc:
+        pending.pop("finalizing", None)
         raise HTTPException(getattr(exc, "status_code", 502), str(getattr(exc, "message", exc))) from exc
     if pending.get("cache_key"):
         result = {"glb_url": url, "model_id": object_id, "details": pending.get("details"), "components": components, "source_glb_url": source_url}
-        await vision.cache_put(get_settings(), request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
-    request.app.state.pending_cdn.pop(task_id, None)
-    return TaskStatusResponse(task_id=task_id, status="SUCCEEDED", progress=100, glb_url=url, components=components, source_glb_url=source_url)
+        await vision.cache_put(settings, request.app.state.auth_http, pending["cache_key"], "vendor_glb", "meshy", result, table="model_cache")
+    done = _status(task_id, pending, "completed", status="SUCCEEDED", progress=100, glb_url=url, components=components, source_glb_url=source_url,
+                   steps=_mesh_steps(pending, "SUCCEEDED", 100))
+    return _finish(request, task_id, pending, done) if registered else done
 
 
 class StructuralBody(BaseModel):
@@ -1131,7 +1228,7 @@ def crop_states(photo: bytes, boxes: StateBoxes) -> dict[str, str]:
 @router.post("/split-states")
 async def split_states(
     request: Request,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: SettingsDep,
     _user: Annotated[str, Depends(current_user)],
     image: Annotated[UploadFile, File()],
 ) -> dict[str, str]:

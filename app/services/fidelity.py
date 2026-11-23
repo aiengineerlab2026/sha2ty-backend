@@ -120,9 +120,15 @@ def structure_correlation(a: np.ndarray, b: np.ndarray) -> float | None:
     return float(np.corrcoef(ea, eb)[0, 1])
 
 
-def compare_images(original: bytes, cleaned: bytes, bbox: list[float] | None) -> dict[str, Any]:
+def compare_images(original: bytes, cleaned: bytes, bbox: list[float] | None, removal: bool = False) -> dict[str, Any]:
     """Stage 1: did cleaning keep the product's colours, proportions and visible components? A failed stage means the
-    cleaned image must not be meshed (vendor.conditioned_image rejects it before Meshy sees it)."""
+    cleaned image must not be meshed (vendor.conditioned_image rejects it before Meshy sees it).
+
+    removal=True (Meshy Image to Image, no vision reading): cleaning is EXPECTED to take whole colour regions away
+    (bedding, pillows, clutter), so a missing colour is a note, not a failure, and the layout / edge thresholds are
+    looser. What still fails: an unreadable or tiny image, no furniture left, re-framing, and redrawn structure."""
+    if removal:
+        return _compare_removal(original, cleaned, bbox)
     from PIL import Image
 
     try:
@@ -152,6 +158,87 @@ def compare_images(original: bytes, cleaned: bytes, bbox: list[float] | None) ->
         issues.append(f"Cleaning redrew the furniture's edges and components (edge match {structure:.2f}).")
     return {"stage": "cleaning", "ok": not issues, "issues": issues, "metrics": metrics,
             "reference": [h for h, _, _ in ref], "cleaned": [h for h, _, _ in out]}
+
+
+# Removal-mode thresholds (Meshy cleaning): legitimate removal of bedding / clutter changes many cells' colour, so only
+# far larger changes count as the furniture being redrawn. ponytail: global constants, per-family tuning if needed.
+REMOVAL_LAYOUT_SHARE = 0.65
+REMOVAL_STRUCTURE_MIN = 0.2
+REMOVAL_FRAME_TOLERANCE = 0.15  # canvas width:height change allowed (Meshy outputs fixed aspect ratios)
+REMOVAL_MIN_SIDE = 256  # px: smaller is not a usable reconstruction input
+REMOVAL_MIN_PRODUCT = 0.04  # the furniture's share of the canvas: less means it was removed or shrunk away
+REMOVAL_ASPECT_TOLERANCE = 0.2  # looser than ASPECT_TOLERANCE: removed pillows above a headboard change the box a little
+REMOVAL_SEE_THROUGH = 0.25  # share of the product left semi-transparent: Meshy meshes and textures it black
+
+
+def _see_through(cleaned: bytes) -> float:
+    """Share of the cleaned product (visible, not plain white) whose alpha is below 200: background removal that ate
+    into the furniture (light doors against a light wall)."""
+    from PIL import Image
+
+    a = np.asarray(Image.open(io.BytesIO(cleaned)).convert("RGBA"), dtype=float)
+    product = (a[..., 3] > 16) & ~((a[..., :3] > 242).all(axis=-1))
+    return float((a[..., 3][product] < 200).mean()) if product.any() else 0.0
+
+
+def _compare_removal(original: bytes, cleaned: bytes, bbox: list[float] | None) -> dict[str, Any]:
+    from PIL import Image
+
+    def out(issues: list[str], notes: list[str], metrics: dict[str, Any] | None = None, judged: bool = True) -> dict[str, Any]:
+        # judged=False: not compared (ok None), which the caller must never report as a passed check
+        return {"stage": "cleaning", "mode": "removal", "ok": (not issues) if judged else None, "issues": issues, "notes": notes, "metrics": metrics or {}}
+
+    try:
+        img = Image.open(io.BytesIO(cleaned))
+        img.load()
+        cw, ch = img.size
+    except Exception:  # noqa: BLE001 - an image that cannot be decoded is not meshed
+        return out(["The cleaned image is not a readable image."], [])
+    if min(cw, ch) < REMOVAL_MIN_SIDE:
+        return out([f"The cleaned image is too small ({cw}×{ch} px)."], [])
+    fg, _ = _foreground_box(cleaned)
+    if fg is None or (fg[2] - fg[0]) * (fg[3] - fg[1]) < REMOVAL_MIN_PRODUCT:
+        return out(["The cleaned image has no furniture left in it (or almost none)."], [])
+    see_through = _see_through(cleaned)
+    if see_through > REMOVAL_SEE_THROUGH:
+        return out([f"Background removal made {see_through:.0%} of the furniture see-through: Meshy would mesh and texture it black."],
+                   [], {"seeThrough": round(see_through, 3)})
+    try:
+        w, h = Image.open(io.BytesIO(original)).size
+    except Exception:  # noqa: BLE001
+        return out([], ["The original photo could not be read: the cleaned image was not compared with it."], judged=False)
+    frame = abs((cw / ch) - (w / h)) / (w / h)
+    metrics: dict[str, Any] = {"size": [cw, ch], "frame": round(frame, 3), "productBox": [round(v, 3) for v in fg]}
+    if frame > REMOVAL_FRAME_TOLERANCE:
+        # Different canvas proportions: positions cannot be compared cell by cell. Not judged rather than guessed.
+        return out([], [f"The cleaned image is framed differently ({w}×{h} → {cw}×{ch}): layout not compared."], metrics, judged=False)
+    # Without a photo reading's box the furniture's place in the original is unknown: Meshy re-frames the product
+    # (centred, rescaled), so the cleaned image's own box is a different region there and comparing it rejected good
+    # cleanings (edge match ~0). Not judged, never guessed; the checks above still ran.
+    # ponytail: the default Meshy path has no box; MESHY_VISION_ANALYSIS=true gives one and turns this comparison on.
+    if not (bbox and len(bbox) == 4):
+        return out([], ["No photo reading locates the furniture in the original: layout and edges not compared."], metrics, judged=False)
+    region = bbox
+    before, after = _crop(original, region), _crop(cleaned, fg)
+    layout = layout_difference((before[0], np.ones_like(before[1])), after)
+    structure = structure_correlation(before[0], after[0])
+    metrics.update(layout=layout, structure=structure)
+    issues, notes = [], []
+    # the reading's box of the product in the original: its proportions must survive
+    before_aspect = (bbox[2] - bbox[0]) * w / max((bbox[3] - bbox[1]) * h, 1e-6)
+    after_aspect = (fg[2] - fg[0]) * cw / max((fg[3] - fg[1]) * ch, 1e-6)
+    change = abs(after_aspect - before_aspect) / before_aspect
+    metrics["aspect"] = [round(before_aspect, 3), round(after_aspect, 3)]
+    if change > REMOVAL_ASPECT_TOLERANCE:
+        issues.append(f"Cleaning changed the furniture's proportions (width : height {before_aspect:.2f} → {after_aspect:.2f}, {change:.0%}).")
+    if layout is not None and layout > REMOVAL_LAYOUT_SHARE:
+        issues.append(f"Cleaning changed {layout:.0%} of the furniture's visible layout: more than removing accessories explains.")
+    if structure is not None and structure < REMOVAL_STRUCTURE_MIN:
+        issues.append(f"Cleaning redrew the furniture's edges and components (edge match {structure:.2f}).")
+    ref = model_check._palette(*model_check._photo_colours(original, region))
+    got = model_check._palette(*model_check._photo_colours(cleaned, fg))
+    notes += [f"{m} (expected when accessories or bedding were removed)" for m in _missing_colours(ref, got, "The photo", "the cleaned image")]
+    return out(issues, notes, metrics)
 
 
 RENDER_COLS = 96

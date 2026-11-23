@@ -1020,7 +1020,7 @@ def _category(row: dict[str, Any], model_wood: dict[str, Any] | None = None) -> 
 
 _GLASS_WORD = re.compile(r"(?:^|[\s_])(?:mirrors?|mirrored|glass)(?:$|[\s_])|مرآة|مرايا|مراية|زجاج", re.I)
 _SUPPORT_WORD = re.compile(
-    r"(?:^|[\s_])(?:frames?|backing|backs?|doors?|panels?|sides?|shel(?:f|ves)|surrounds?|carcass)(?:$|[\s_])|(?:إطار|خلفي|باب|أبواب|لوح|ألواح|جانب|جوانب|رفوف|أرفف|هيكل)|(?:^|[\s_])رف(?:$|[\s_])",
+    r"(?:^|[\s_])(?:frames?|backing|backs?|doors?|panels?|sides?|shel(?:f|ves)|surrounds?|carcass|box(?:es)?|interior)(?:$|[\s_])|(?:إطار|خلفي|باب|أبواب|لوح|ألواح|جانب|جوانب|رفوف|أرفف|هيكل)|(?:^|[\s_])رف(?:$|[\s_])",
     re.I,
 )
 

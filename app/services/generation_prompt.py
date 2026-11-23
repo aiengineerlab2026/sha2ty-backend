@@ -328,3 +328,50 @@ def astra_prompt(category: str | None, title: str | None = None, details=None, k
         "the GLB bytes yourself. The file must be a real .glb, not a description. "
         "After writing it, print the absolute path."
     )
+
+
+# Meshy Image to Image (vendor.generate_model, Meshy only): the furniture cleaning prompt. Fixed text, no LLM writes it;
+# MESHY_CLEAN_PROMPT in the environment replaces it, MESHY_CLEAN_HINTS adds a per-family line.
+MESHY_CLEAN_PROMPT = """Prepare this furniture image for accurate, realistic 3D reconstruction.
+
+Identify the main furniture item and preserve its original design, dimensions, proportions, structure, shape, colors, and visible materials.
+
+Remove all nonstructural accessories, temporary objects, decorative items, and background clutter that are not physically part of the furniture.
+
+For beds, remove pillows, blankets, bed sheets, covers, and decorative bedding. Preserve the headboard, frame, sides, legs, base, and other structural parts.
+
+For wardrobes and cabinets, remove loose objects and contents that are not permanently attached. Preserve doors, shelves, drawers, mirrors, hinges, handles, frames, and structural panels.
+
+For chairs and sofas, remove loose cushions and accessories only when they are clearly removable and not integral to the furniture design.
+
+For tables, remove objects placed on top while preserving the tabletop, legs, supports, and built-in storage.
+
+Apply the same principle to every other furniture category.
+
+Do not remove integral upholstery, permanent cushions, structural details, handles, glass, mirrors, or built-in furniture components.
+
+Do not redesign, distort, merge, or simplify the furniture.
+
+Reconstruct only surfaces obscured by removed accessories, keeping them consistent with the visible furniture.
+
+Present one complete furniture item with a clean background, realistic materials, clear boundaries, and a consistent perspective.
+
+The result must be suitable for high-quality image-to-3D reconstruction."""
+
+
+def meshy_clean_prompt(category: str | None, kind: str | None = None, override: str = "", hints: dict[str, str] | None = None,
+                       loose: list[str] | None = None) -> str:
+    """The Image to Image prompt: the fixed cleaning text, then what the VENDOR said the item is (category / typed type,
+    never a guess about unseen parts), then the configured hint for that family. `loose`: objects an optional vision
+    analysis saw (meshy_vision_analysis only)."""
+    family = furniture_family(category, kind)
+    lines = [override.strip() or MESHY_CLEAN_PROMPT]
+    what = furniture_type(category, kind)
+    if what != TYPE_NAMES["furniture"]:
+        lines.append(f"The main furniture item is a {what}.")
+    hint = (hints or {}).get(family, "").strip()
+    if hint:
+        lines.append(hint)
+    if loose:
+        lines.append(f"In this photo, remove: {', '.join(loose[:12])}.")
+    return "\n\n".join(lines)
