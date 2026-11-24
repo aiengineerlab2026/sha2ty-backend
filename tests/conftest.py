@@ -52,3 +52,26 @@ def spec_of(fake_details):
         return FurnitureSpec(details=details) if details else None
 
     return read
+
+
+# Tests that run the real texture reader (services/texture_prompt.py) against a mocked vision model.
+REAL_TEXTURE_READER = ("test_meshy_pipeline", "test_meshy_modularity", "test_texture_prompt")
+
+
+@pytest.fixture(autouse=True)
+def texture_prompt_without_a_vision_call(monkeypatch, request):
+    """Endpoint tests never call a real vision model for the Meshy texture description: a fixed, photo-specific text
+    stands in for it."""
+    if request.node.module.__name__.endswith(REAL_TEXTURE_READER):
+        return
+    import hashlib
+
+    from app.api import vendor
+
+    from app.services.generation_prompt import furniture_type
+
+    async def read(photo, _mime, category, kind, _settings=None, _state=None, details=None):
+        what = furniture_type(category, kind, details) if not kind else kind
+        return f"{what} as photographed: oak #A07850 with vertical grain, matte; photo {hashlib.sha256(photo).hexdigest()[:8]}."
+
+    monkeypatch.setattr(vendor, "read_texture_prompt", read)

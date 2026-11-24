@@ -219,7 +219,9 @@ def test_generate_sends_the_analysis_to_meshy_and_stores_it_with_the_model(tmp_p
             done = poll(client, first["task_id"])
     finally:
         app.dependency_overrides.clear()
-    assert "left door: #FFFFFF painted wood" in calls["texture_prompt"] and calls["split"] == "wardrobe body, left door, right door"
+    # The texture comes from the description written for this photo (one source for every Meshy model); the analysis
+    # still names the split parts.
+    assert calls["texture_prompt"].startswith("sofa as photographed") and calls["split"] == "wardrobe body, left door, right door"
     doc = done["components"]
     assert done["status"] == "SUCCEEDED" and doc["method"] == "meshy_auto_split" and doc["modularity"]["level"] == "full"
     assert [c["nameAr"] for c in doc["components"]] == ["هيكل الدولاب", "الباب الأيسر", "الباب الأيمن"]

@@ -26,9 +26,10 @@ class Settings(BaseSettings):
     # physical components. Its result is used only when the file really has several meshes with the raw model's
     # size, geometry and textures; otherwise the unsplit model is kept and the report says why. Off: no split call.
     meshy_auto_split: bool = True
-    # What Meshy textures from (meshy_service.image_to_3d_payload): "image" the meshed photo as texture_image_url,
-    # "input" Meshy's default from the input image, "prompt" texture_prompt text only.
-    meshy_texture_source: Literal["image", "input", "prompt"] = "image"
+    # What Meshy textures from (meshy_service.image_to_3d_payload): "prompt" (default) a texture_prompt the vision model
+    # writes from each photo (services/texture_prompt.py; one vision call per generation); "image" the meshed photo as
+    # texture_image_url; "input" Meshy's default from the input image. The geometry input is unchanged by this.
+    meshy_texture_source: Literal["image", "input", "prompt"] = "prompt"
     # Fallback policy for the Meshy cleaning step. True: when Image to Image fails, times out, returns nothing usable or
     # its image fails validation (furniture changed), the ORIGINAL photo is meshed and the model's notes say so.
     # False: the conversion stops and the try is refunded.

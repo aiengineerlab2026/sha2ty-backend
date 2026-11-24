@@ -56,7 +56,8 @@ def test_meshy_gets_exactly_one_texture_guide(source, fields, used):
 
 
 def test_the_default_textures_from_the_photo():
-    assert Settings().meshy_texture_source == "image" and Settings().meshy_auto_split is True
+    # Textured from a description the vision model writes for each photo (services/texture_prompt.py).
+    assert Settings().meshy_texture_source == "prompt" and Settings().meshy_auto_split is True
 
 
 # ---- 2. a cleaned photo is checked before Meshy sees it ----
@@ -149,7 +150,7 @@ def test_a_faithful_cleaned_photo_is_meshed_from_its_task_and_recorded(monkeypat
     assert out.status == "IN_PROGRESS" and out.phase == "mesh_generation" and pending["cleaning_check"]["ok"]
     # The cleaned image goes by its Image to Image task (no re-upload); Meshy textures from that input image.
     assert meshy.calls[0]["input_task_id"] == "img-1" and meshy.calls[0]["image"] is None and meshy.calls[0]["image_url"] is None
-    assert pending["meshy_input"]["source"] == "cleaned" and pending["meshy_input"]["texture"] == "input_image"
+    assert pending["meshy_input"]["source"] == "cleaned" and pending["meshy_input"]["texture"] == "texture_prompt"
     assert pending["meshy_input"]["sha256"] and pending["reference"] and not out.warnings
 
 
@@ -326,7 +327,7 @@ def test_a_refused_split_keeps_the_raw_model_and_says_it_is_one_mesh(tmp_path, m
     assert doc["method"] == "none" and not doc["separated"] and "not modular" in doc["limits"] and "Auto Split was not used" in doc["limits"]
     assert doc["split"]["accepted"] is False and doc["split"]["meshesAfter"] == 1 and doc["split"]["status"] == "SUCCEEDED"
     assert done["source_glb_url"] is None  # no "original" beside an unsplit model: it is the original
-    assert doc["meshyInput"]["source"] == "original" and doc["meshyInput"]["texture"] == "texture_image_url"
+    assert doc["meshyInput"]["source"] == "original" and doc["meshyInput"]["texture"] == "texture_prompt"
     assert cdn.uploads[doc["meshyInput"]["url"].removeprefix("https://cdn.test/")] == product_photo()  # the exact image
     assert doc["carpenter"]["url"] and doc["structural"]["built"]  # components are edited in the structural model
     assert "split" in {s["stage"] for s in doc["fidelity"]["stages"]}
