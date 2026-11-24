@@ -54,14 +54,28 @@ def _missing_colours(ref: list, other: list, what: str, against: str) -> list[st
     return issues
 
 
-def _foreground_box(image: bytes) -> tuple[list[float] | None, float | None]:
-    """The product's box in a cleaned photo (not transparent, not the plain white background), normalised, and its
-    aspect ratio in pixels."""
+def _product_mask(a: np.ndarray) -> np.ndarray:
+    """The furniture's pixels in a cleaned image (RGBA float array): not transparent, and not the backdrop. The backdrop
+    is the image border's colour when that border is one flat colour (Meshy's neutral-gray background with
+    remove_background off), else plain white."""
+    rgb, opaque = a[..., :3], a[..., 3] > 16
+    border = np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]])
+    solid = border[border[:, 3] > 16]
+    if len(solid) > 0.5 * len(border) and solid[:, :3].std(axis=0).max() < 12:
+        backdrop = np.median(solid[:, :3], axis=0)
+        return opaque & (np.linalg.norm(rgb - backdrop, axis=-1) > 28)
+    return opaque & ~((rgb > 242).all(axis=-1))
+
+
+def _rgba(image: bytes) -> np.ndarray:
     from PIL import Image
 
-    img = Image.open(io.BytesIO(image)).convert("RGBA")
-    a = np.asarray(img, dtype=float)
-    mask = (a[..., 3] > 16) & ~((a[..., :3] > 242).all(axis=-1))
+    return np.asarray(Image.open(io.BytesIO(image)).convert("RGBA"), dtype=float)
+
+
+def _foreground_box(image: bytes) -> tuple[list[float] | None, float | None]:
+    """The product's box in a cleaned photo (_product_mask), normalised, and its aspect ratio in pixels."""
+    mask = _product_mask(_rgba(image))
     if mask.sum() < 50:
         return None, None
     ys, xs = np.nonzero(mask)
@@ -71,15 +85,18 @@ def _foreground_box(image: bytes) -> tuple[list[float] | None, float | None]:
 
 
 def _crop(image: bytes, box: list[float] | None) -> tuple[np.ndarray, np.ndarray]:
-    """The product's box of an image as RGB (0..255) and its mask (not transparent, not plain white background)."""
+    """The product's box of an image as RGB (0..255) and its mask (_product_mask)."""
     from PIL import Image
 
     img = Image.open(io.BytesIO(image)).convert("RGBA")
+    full = np.asarray(img, dtype=float)
+    mask = Image.fromarray(_product_mask(full).astype(np.uint8) * 255)
     if box and len(box) == 4 and box[2] > box[0] and box[3] > box[1]:
         w, h = img.size
-        img = img.crop((int(box[0] * w), int(box[1] * h), max(int(box[2] * w), int(box[0] * w) + 1), max(int(box[3] * h), int(box[1] * h) + 1)))
+        rect = (int(box[0] * w), int(box[1] * h), max(int(box[2] * w), int(box[0] * w) + 1), max(int(box[3] * h), int(box[1] * h) + 1))
+        img, mask = img.crop(rect), mask.crop(rect)
     a = np.asarray(img.resize((64, 64)), dtype=float)
-    return a[..., :3], a[..., 3] > 16
+    return a[..., :3], np.asarray(mask.resize((64, 64))) > 127
 
 
 def _cells(rgb: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -169,73 +186,134 @@ REMOVAL_MIN_SIDE = 256  # px: smaller is not a usable reconstruction input
 REMOVAL_MIN_PRODUCT = 0.04  # the furniture's share of the canvas: less means it was removed or shrunk away
 REMOVAL_ASPECT_TOLERANCE = 0.2  # looser than ASPECT_TOLERANCE: removed pillows above a headboard change the box a little
 REMOVAL_SEE_THROUGH = 0.25  # share of the product left semi-transparent: Meshy meshes and textures it black
+REMOVAL_HOLES = 0.2  # share of the product's box that is transparent but enclosed by furniture on all four sides
+REMOVAL_NEW_COLOUR_SHARE = 0.08  # a cleaned colour covering this share of the product must exist in the photo
+REMOVAL_NEW_COLOUR_DE = 15  # ΔE (CIE76) within which a photo pixel counts as that colour
+REMOVAL_NEW_COLOUR_SUPPORT = 0.01  # ... and at least this share of the photo's pixels must be that colour
+REMOVAL_DARK_L = 30  # Lab L* below this is "dark"
+REMOVAL_DARK_GAIN = 0.12  # near-black colours the photo lacks may cover at most this share of the product
 
 
-def _see_through(cleaned: bytes) -> float:
-    """Share of the cleaned product (visible, not plain white) whose alpha is below 200: background removal that ate
-    into the furniture (light doors against a light wall)."""
+def _alpha_damage(a: np.ndarray, product: np.ndarray) -> tuple[float, float]:
+    """(see-through, holes): the product's share left semi-transparent, and the share of its box that is transparent
+    yet enclosed by furniture left, right, above AND below (a door deleted from inside a wardrobe's frame). Gaps under
+    a table or between chair legs are open on one side, so they are not holes."""
+    alpha = a[..., 3]
+    see_through = float((alpha[product] < 200).mean()) if product.any() else 0.0
+    ys, xs = np.nonzero(product)
+    if not len(ys):
+        return see_through, 0.0
+    box = product[ys.min(): ys.max() + 1, xs.min(): xs.max() + 1]
+    clear = alpha[ys.min(): ys.max() + 1, xs.min(): xs.max() + 1] <= 16
+    left, right = np.maximum.accumulate(box, axis=1), np.maximum.accumulate(box[:, ::-1], axis=1)[:, ::-1]
+    up, down = np.maximum.accumulate(box, axis=0), np.maximum.accumulate(box[::-1], axis=0)[::-1]
+    return see_through, float((clear & left & right & up & down).mean())
+
+
+def _colour_changes(original: bytes, a: np.ndarray, product: np.ndarray) -> tuple[list[str], dict[str, Any]]:
+    """Colours the cleaned furniture has that the photo does not, and darkening. Needs no alignment: Meshy re-frames
+    the product, but a recoloured door (pink → black, white → gray) is a colour that is nowhere in the photo, or far more
+    dark pixels than the whole photo has. ponytail: a recolour INTO a colour the room already has (a gray wall) passes
+    here; with a photo reading's box the aligned layout check below catches it."""
     from PIL import Image
 
-    a = np.asarray(Image.open(io.BytesIO(cleaned)).convert("RGBA"), dtype=float)
-    product = (a[..., 3] > 16) & ~((a[..., :3] > 242).all(axis=-1))
-    return float((a[..., 3][product] < 200).mean()) if product.any() else 0.0
+    photo = Image.open(io.BytesIO(original)).convert("RGB")
+    photo.thumbnail((160, 160))
+    photo_lab = model_check._lab(np.asarray(photo, dtype=float).reshape(-1, 3))
+    px = a[..., :3][product]
+    step = max(1, len(px) // 20000)
+    px = px[::step]
+    lab = model_check._lab(px)
+    issues: list[str] = []
+    dark_product, dark_photo = float((lab[:, 0] < REMOVAL_DARK_L).mean()), float((photo_lab[:, 0] < REMOVAL_DARK_L).mean())
+    metrics: dict[str, Any] = {"dark": [round(dark_photo, 3), round(dark_product, 3)], "newColours": []}
+    new_dark = 0.0
+    for hex_, share, centre in model_check._palette(px, np.ones(len(px))):
+        support = float((np.linalg.norm(photo_lab - np.asarray(centre), axis=1) <= REMOVAL_NEW_COLOUR_DE).mean())
+        if support >= REMOVAL_NEW_COLOUR_SUPPORT:
+            continue  # a colour of the photo (removed bedding can reveal a dark frame that was already visible)
+        if centre[0] < REMOVAL_DARK_L:
+            new_dark += share
+        if share >= REMOVAL_NEW_COLOUR_SHARE:
+            metrics["newColours"].append({"colour": hex_, "share": round(share, 3), "inPhoto": round(support, 4)})
+            issues.append(f"Cleaning recoloured the furniture: {hex_} covers {share:.0%} of it but is not a colour of the photo.")
+    metrics["newDark"] = round(new_dark, 3)
+    if new_dark > REMOVAL_DARK_GAIN and dark_product - dark_photo > REMOVAL_DARK_GAIN:
+        issues.insert(0, f"Cleaning made the furniture darker: {dark_product:.0%} of it is near-black in colours the photo does not have "
+                         f"({dark_photo:.0%} of the photo is near-black).")
+    return issues, metrics
 
 
 def _compare_removal(original: bytes, cleaned: bytes, bbox: list[float] | None) -> dict[str, Any]:
+    """Removal mode. `status`: "failed" (any issue: the cleaned image must not be meshed), "passed" (every check that
+    applies ran and passed), "inconclusive" (the cleaned image could not be compared with the photo; never a pass)."""
     from PIL import Image
 
+    checked: list[str] = []
+
     def out(issues: list[str], notes: list[str], metrics: dict[str, Any] | None = None, judged: bool = True) -> dict[str, Any]:
-        # judged=False: not compared (ok None), which the caller must never report as a passed check
-        return {"stage": "cleaning", "mode": "removal", "ok": (not issues) if judged else None, "issues": issues, "notes": notes, "metrics": metrics or {}}
+        status = "failed" if issues else "passed" if judged else "inconclusive"
+        return {"stage": "cleaning", "mode": "removal", "status": status, "ok": {"failed": False, "passed": True}.get(status),
+                "issues": issues, "notes": notes, "checked": checked, "metrics": metrics or {}}
 
     try:
         img = Image.open(io.BytesIO(cleaned))
         img.load()
         cw, ch = img.size
+        a = _rgba(cleaned)
     except Exception:  # noqa: BLE001 - an image that cannot be decoded is not meshed
         return out(["The cleaned image is not a readable image."], [])
     if min(cw, ch) < REMOVAL_MIN_SIDE:
         return out([f"The cleaned image is too small ({cw}×{ch} px)."], [])
+    product = _product_mask(a)
     fg, _ = _foreground_box(cleaned)
     if fg is None or (fg[2] - fg[0]) * (fg[3] - fg[1]) < REMOVAL_MIN_PRODUCT:
         return out(["The cleaned image has no furniture left in it (or almost none)."], [])
-    see_through = _see_through(cleaned)
+    metrics: dict[str, Any] = {"size": [cw, ch], "productBox": [round(v, 3) for v in fg]}
+    see_through, holes = _alpha_damage(a, product)
+    metrics.update(seeThrough=round(see_through, 3), holes=round(holes, 3))
+    checked.append("alpha")
+    issues: list[str] = []
     if see_through > REMOVAL_SEE_THROUGH:
-        return out([f"Background removal made {see_through:.0%} of the furniture see-through: Meshy would mesh and texture it black."],
-                   [], {"seeThrough": round(see_through, 3)})
+        issues.append(f"Background removal made {see_through:.0%} of the furniture see-through: Meshy would mesh and texture it black.")
+    if holes > REMOVAL_HOLES:
+        issues.append(f"Background removal cut transparent holes into the furniture ({holes:.0%} of it, e.g. whole doors): "
+                      "Meshy would mesh and texture them black.")
     try:
         w, h = Image.open(io.BytesIO(original)).size
     except Exception:  # noqa: BLE001
-        return out([], ["The original photo could not be read: the cleaned image was not compared with it."], judged=False)
+        return out(issues, ["The original photo could not be read: the cleaned image was not compared with it."], metrics, judged=False)
+    colour_issues, colour_metrics = _colour_changes(original, a, product)
+    issues += colour_issues
+    metrics["colour"] = colour_metrics
+    checked.append("colours")
+    notes: list[str] = []
     frame = abs((cw / ch) - (w / h)) / (w / h)
-    metrics: dict[str, Any] = {"size": [cw, ch], "frame": round(frame, 3), "productBox": [round(v, 3) for v in fg]}
-    if frame > REMOVAL_FRAME_TOLERANCE:
-        # Different canvas proportions: positions cannot be compared cell by cell. Not judged rather than guessed.
-        return out([], [f"The cleaned image is framed differently ({w}×{h} → {cw}×{ch}): layout not compared."], metrics, judged=False)
-    # Without a photo reading's box the furniture's place in the original is unknown: Meshy re-frames the product
-    # (centred, rescaled), so the cleaned image's own box is a different region there and comparing it rejected good
-    # cleanings (edge match ~0). Not judged, never guessed; the checks above still ran.
-    # ponytail: the default Meshy path has no box; MESHY_VISION_ANALYSIS=true gives one and turns this comparison on.
+    metrics["frame"] = round(frame, 3)
+    # Layout and edges need the furniture's place in the original: a photo reading's box. Without one (the default
+    # Meshy path) Meshy's re-framing makes the cleaned image's own box a different region of the photo; comparing it
+    # rejected good cleanings (edge match ~0), so it is not compared, and said so.
     if not (bbox and len(bbox) == 4):
-        return out([], ["No photo reading locates the furniture in the original: layout and edges not compared."], metrics, judged=False)
-    region = bbox
-    before, after = _crop(original, region), _crop(cleaned, fg)
+        notes.append("No photo reading locates the furniture in the original: layout and edges not compared (colours and transparency were).")
+        return out(issues, notes, metrics)
+    if frame > REMOVAL_FRAME_TOLERANCE:
+        notes.append(f"The cleaned image is framed differently ({w}×{h} → {cw}×{ch}): layout not compared.")
+        return out(issues, notes, metrics)
+    before, after = _crop(original, bbox), _crop(cleaned, fg)
     layout = layout_difference((before[0], np.ones_like(before[1])), after)
     structure = structure_correlation(before[0], after[0])
-    metrics.update(layout=layout, structure=structure)
-    issues, notes = [], []
-    # the reading's box of the product in the original: its proportions must survive
     before_aspect = (bbox[2] - bbox[0]) * w / max((bbox[3] - bbox[1]) * h, 1e-6)
     after_aspect = (fg[2] - fg[0]) * cw / max((fg[3] - fg[1]) * ch, 1e-6)
     change = abs(after_aspect - before_aspect) / before_aspect
-    metrics["aspect"] = [round(before_aspect, 3), round(after_aspect, 3)]
+    metrics.update(layout=layout, structure=structure, aspect=[round(before_aspect, 3), round(after_aspect, 3)])
+    checked.append("layout")
     if change > REMOVAL_ASPECT_TOLERANCE:
         issues.append(f"Cleaning changed the furniture's proportions (width : height {before_aspect:.2f} → {after_aspect:.2f}, {change:.0%}).")
     if layout is not None and layout > REMOVAL_LAYOUT_SHARE:
         issues.append(f"Cleaning changed {layout:.0%} of the furniture's visible layout: more than removing accessories explains.")
     if structure is not None and structure < REMOVAL_STRUCTURE_MIN:
         issues.append(f"Cleaning redrew the furniture's edges and components (edge match {structure:.2f}).")
-    ref = model_check._palette(*model_check._photo_colours(original, region))
+    ref = model_check._palette(*model_check._photo_colours(original, bbox))
     got = model_check._palette(*model_check._photo_colours(cleaned, fg))
     notes += [f"{m} (expected when accessories or bedding were removed)" for m in _missing_colours(ref, got, "The photo", "the cleaned image")]
     return out(issues, notes, metrics)
@@ -367,8 +445,9 @@ def mesh_count(glb: bytes) -> int:
 
 def split_check(raw: bytes, split: bytes | None, task: dict[str, Any]) -> dict[str, Any]:
     """Meshy Auto Split's result, accepted only when it really is the same model in several meshes: SUCCEEDED, the
-    part names read (not prompt_ignored), more than one mesh in the file, the raw model's size and triangles, and
-    its texture maps (keep_texture). Otherwise the unsplit model stays the visual one and `reasons` say why."""
+    part names read (not prompt_ignored), more than one mesh in the file, the raw model's size, colours, texture maps
+    (keep_texture) and front-view surface (split_shape). Triangle counts are NOT compared: a cut re-triangulates.
+    Otherwise the unsplit model stays the visual one and `issues` say why."""
     report: dict[str, Any] = {"stage": "split", **{k: task.get(k) for k in ("status", "taskId", "partCount", "promptIgnored", "error", "prompt")}}
     reasons: list[str] = []
     try:
@@ -389,14 +468,45 @@ def split_check(raw: bytes, split: bytes | None, task: dict[str, Any]) -> dict[s
             return report
         if report["meshesAfter"] < 2:
             reasons.append("Auto Split returned one fused mesh.")
+        # Cutting into parts re-triangulates along every cut: Meshy's 22-part wardrobe had 178546 → 312108 triangles at the
+        # same size to the millimetre. A triangle-count rule rejected every real split (the model stayed one fused mesh),
+        # so the split is judged by what it must keep: size (extents), colours, texture maps, and the same surface seen
+        # from the front (silhouette and colour of the two renders).
         for stage in compare_glbs(raw, split):
-            reasons += [f"After splitting: {issue}" for issue in stage["issues"] if "triangles" not in issue or stage["stage"] != "processing"]
+            reasons += [f"After splitting: {issue}" for issue in stage["issues"] if "triangles" not in issue]
             if stage["stage"] == "processing":
-                tris = stage.get("metrics", {}).get("triangles") or [0, 0]
-                if tris[0] and abs(tris[1] - tris[0]) / tris[0] > 0.1:
-                    reasons.append(f"After splitting: the triangle count changed {tris[0]} → {tris[1]}: the surface was rebuilt.")
+                report["triangles"] = (stage.get("metrics") or {}).get("triangles")
+        shape = split_shape(raw, split)
+        report["shape"] = shape
+        reasons += [f"After splitting: {issue}" for issue in shape["issues"]]
     report.update(ok=not reasons, accepted=not reasons, issues=reasons)
     return report
+
+
+SPLIT_SILHOUETTE_MIN = 0.9  # front-render silhouette IoU (raw vs split): parts moved, lost or added below this
+SPLIT_COLOUR_DE = 12  # mean ΔE between the two front renders where both have surface: textures / UVs broke above this
+
+
+def split_shape(raw: bytes, split: bytes) -> dict[str, Any]:
+    """The split model seen from the same front camera as the raw one: the same silhouette (no part moved, dropped or
+    invented) and the same colours where both have surface (textures and UVs survived the cut)."""
+    try:
+        a_rgb, a_mask, _ = front_render(raw)
+        b_rgb, b_mask, _ = front_render(split)
+    except Exception as exc:  # noqa: BLE001 - not rendered is not judged, never a pass by default
+        return {"ok": None, "issues": [], "notes": [f"Not rendered ({str(exc)[:80]})."]}
+    if a_mask.shape != b_mask.shape:
+        return {"ok": None, "issues": [], "notes": ["The two renders differ in size: not compared."]}
+    a, b = a_mask > 0, b_mask > 0
+    iou = float((a & b).sum() / max((a | b).sum(), 1))
+    both = a & b
+    de = float(np.linalg.norm(model_check._lab(a_rgb[both].reshape(-1, 3)) - model_check._lab(b_rgb[both].reshape(-1, 3)), axis=1).mean()) if both.any() else None
+    issues = []
+    if iou < SPLIT_SILHOUETTE_MIN:
+        issues.append(f"the front silhouette changed (overlap {iou:.0%}): parts moved, went missing or were added.")
+    if de is not None and de > SPLIT_COLOUR_DE:
+        issues.append(f"the surface colours changed (mean ΔE {de:.1f}): textures or UVs were lost in the cut.")
+    return {"ok": not issues, "issues": issues, "silhouette": round(iou, 3), "colourDE": round(de, 2) if de is not None else None}
 
 
 def _maps(doc: dict[str, Any]) -> tuple[set[str], set[str], int]:

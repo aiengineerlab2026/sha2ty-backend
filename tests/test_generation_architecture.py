@@ -226,9 +226,12 @@ def strip_textures(glb: bytes) -> bytes:
 
 
 def big_photo(colour) -> bytes:
-    """A usable cleaned image (Image to Image output is at least 256 px): the plain colour, same 1:1 framing."""
+    """A usable cleaned image (Image to Image output is at least 256 px): the product in its colour on Meshy's neutral
+    gray backdrop, same 1:1 framing."""
     buf = io.BytesIO()
-    Image.new("RGB", (400, 400), colour).save(buf, "PNG")
+    img = Image.new("RGB", (400, 400), (128, 128, 128))
+    img.paste(colour, (60, 40, 340, 380))
+    img.save(buf, "PNG")
     return buf.getvalue()
 
 

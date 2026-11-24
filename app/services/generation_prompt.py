@@ -37,14 +37,18 @@ _FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 # The parts each furniture type is cut into (Meshy Auto Split by_parts names 1–10 parts in at most 600 characters):
 # each one a separate, independently editable mesh.
+# Meshy Auto Split (by_parts) reads 1 to 10 PART NAMES from its prompt (docs.meshy.ai/en/api/auto-split): names, not
+# a description. Parts that are not in the model are simply not found; an unnamed remainder becomes one more part.
 _PARTS = {
-    "sofa": "wooden base frame, left armrest frame, right armrest frame, backrest frame, legs",
-    "bed": "headboard, left side panel, right side panel, footboard, base supports, legs",
-    "wardrobe": "left side panel, right side panel, top panel, bottom panel, back panel, doors, shelves, drawers",
-    "table": "tabletop, apron rails, legs",
-    "chair": "backrest frame, seat frame, front legs, rear legs, armrest frames",
+    "sofa": "frame, seat, backrest, left armrest, right armrest, legs",
+    "bed": "headboard, side rails, footboard, base, legs",
+    "wardrobe": "each door, handles, cabinet body, side panels, top panel, bottom panel, shelves, drawers, attached shelving unit",
+    "table": "tabletop, legs, supports, drawers",
+    "chair": "seat, backrest, legs, armrests",
     "door": "door leaf, door frame, handle",
 }
+# Any other category (TV unit, lamp, plain "furniture"): the components a carpenter would name on most pieces.
+DEFAULT_PARTS = "body, each door, each drawer, shelves, handles, legs, frame, panels"
 
 
 def object_description(category: str | None, title: str | None = None, kind: str | None = None) -> str:
@@ -162,8 +166,9 @@ def size_rule(category: str | None, kind: str | None = None) -> str:
 
 
 def split_prompt(category: str | None, kind: str | None = None) -> str | None:
-    """Meshy Auto Split `prompt` (mode by_parts): the parts to cut the model into, at most 10, 600 characters."""
-    return _PARTS.get(furniture_family(category, kind))
+    """Meshy Auto Split `prompt` (mode by_parts): the parts to cut the model into, at most 10, 600 characters. Every
+    category gets one (it used to be None outside six families, so those models were never split)."""
+    return _PARTS.get(furniture_family(category, kind), DEFAULT_PARTS)
 
 
 # What the product is called in Meshy's prompts when no furniture type was typed (by catalogue category).
@@ -332,40 +337,47 @@ def astra_prompt(category: str | None, title: str | None = None, details=None, k
 
 # Meshy Image to Image (vendor.generate_model, Meshy only): the furniture cleaning prompt. Fixed text, no LLM writes it;
 # MESHY_CLEAN_PROMPT in the environment replaces it, MESHY_CLEAN_HINTS adds a per-family line.
-MESHY_CLEAN_PROMPT = """Prepare this furniture image for accurate, realistic 3D reconstruction.
+MESHY_CLEAN_PROMPT = """Isolate the main furniture item from this photograph for accurate 3D reconstruction.
 
-Identify the main furniture item and preserve its original design, dimensions, proportions, structure, shape, colors, and visible materials.
+IMPORTANT: Preserve the furniture exactly as photographed.
 
-Remove all nonstructural accessories, temporary objects, decorative items, and background clutter that are not physically part of the furniture.
+Do not redesign, repaint, recolor, restyle, relight, or reinterpret the furniture.
 
-For beds, remove pillows, blankets, bed sheets, covers, and decorative bedding. Preserve the headboard, frame, sides, legs, base, and other structural parts.
+Preserve all original colors, material finishes, surface textures, patterns, wood grain, upholstery, metallic finishes, glass, mirrors, and structural details.
 
-For wardrobes and cabinets, remove loose objects and contents that are not permanently attached. Preserve doors, shelves, drawers, mirrors, hinges, handles, frames, and structural panels.
+Preserve the original position and boundaries of every visible furniture component.
 
-For chairs and sofas, remove loose cushions and accessories only when they are clearly removable and not integral to the furniture design.
+Keep doors, drawers, shelves, handles, frames, legs, panels, and permanent structural components.
 
-For tables, remove objects placed on top while preserving the tabletop, legs, supports, and built-in storage.
+Remove only unrelated background scenery, surrounding objects, and clearly removable accessories.
 
-Apply the same principle to every other furniture category.
+Do not change white furniture to black, pink to gray, or light wood to dark wood.
 
-Do not remove integral upholstery, permanent cushions, structural details, handles, glass, mirrors, or built-in furniture components.
+Do not merge adjacent furniture components or erase their visible boundaries.
 
-Do not redesign, distort, merge, or simplify the furniture.
+Do not invent additional structural components.
 
-Reconstruct only surfaces obscured by removed accessories, keeping them consistent with the visible furniture.
+Preserve the original perspective, proportions, silhouette, and overall design.
 
-Present one complete furniture item with a clean background, realistic materials, clear boundaries, and a consistent perspective.
+Where possible, retain original furniture pixels rather than generating replacement textures.
 
-The result must be suitable for high-quality image-to-3D reconstruction."""
+The final image must represent the same furniture with the same colors and materials, isolated from unrelated surroundings."""
+
+# remove_background off (the default): the room is replaced by a flat neutral backdrop instead of transparency. Meshy's
+# background removal deleted light doors outright (RGBA 0,0,0,0) and Image to 3D textured those holes dark.
+MESHY_NEUTRAL_BACKGROUND = ("Place the furniture on a plain, flat, evenly lit neutral mid-gray background (#808080) with no shadows, "
+                            "floor, or walls. Keep every furniture surface fully opaque.")
 
 
 def meshy_clean_prompt(category: str | None, kind: str | None = None, override: str = "", hints: dict[str, str] | None = None,
-                       loose: list[str] | None = None) -> str:
+                       loose: list[str] | None = None, neutral_background: bool = True) -> str:
     """The Image to Image prompt: the fixed cleaning text, then what the VENDOR said the item is (category / typed type,
     never a guess about unseen parts), then the configured hint for that family. `loose`: objects an optional vision
     analysis saw (meshy_vision_analysis only)."""
     family = furniture_family(category, kind)
     lines = [override.strip() or MESHY_CLEAN_PROMPT]
+    if neutral_background:
+        lines.append(MESHY_NEUTRAL_BACKGROUND)
     what = furniture_type(category, kind)
     if what != TYPE_NAMES["furniture"]:
         lines.append(f"The main furniture item is a {what}.")

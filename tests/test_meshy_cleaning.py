@@ -56,7 +56,7 @@ def test_image_to_image_payload_is_one_cleaned_view():
     assert sent[0].url.path == "/openapi/v1/image-to-image"
     body = json.loads(sent[0].content)
     assert body["ai_model"] == "nano-banana-2" and body["prompt"] == "clean it"
-    assert body["generate_multi_view"] is False and body["remove_background"] is True
+    assert body["generate_multi_view"] is False and body["remove_background"] is False  # it deleted light doors; neutral backdrop instead
     assert len(body["reference_image_urls"]) == 1 and body["reference_image_urls"][0].startswith("data:image/png;base64,")
 
 

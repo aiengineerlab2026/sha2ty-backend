@@ -286,7 +286,9 @@ class MeshyService:
             "ai_model": model,
             "prompt": prompt,
             "reference_image_urls": [await self._image_source(image, mime_type, image_url)],
-            "remove_background": True,  # transparent PNG: nothing of the room reaches the mesh
+            # Off by default: Meshy's background removal deleted light furniture surfaces (doors came back RGBA 0,0,0,0 and
+            # Image to 3D textured the holes dark). The prompt asks for a neutral backdrop instead (generation_prompt).
+            "remove_background": self._settings.meshy_remove_background,
             "generate_multi_view": False,  # Image to 3D's input_task_id takes exactly one image
         }
         if aspect_ratio in (GPT_ASPECT_RATIOS if model.startswith("gpt-image") else ASPECT_RATIOS):  # one view: allowed
