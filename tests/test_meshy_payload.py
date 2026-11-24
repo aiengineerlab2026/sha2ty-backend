@@ -95,10 +95,10 @@ def test_the_photo_goes_straight_to_meshy_image_to_3d(caplog):
     assert sent[0].url.path == "/openapi/v1/image-to-3d"
     body = json.loads(sent[0].content)
     assert body["ai_model"] == "meshy-7.1" and body["image_enhancement"] is False
-    assert body["image_url"].startswith("data:image/png;base64,") and body["texture_image_url"] == body["image_url"]
+    assert body["image_url"].startswith("data:image/png;base64,") and "texture_image_url" not in body  # never both
     assert "input_task_id" not in body and "prompt" not in body
-    # Image-guided texture by default: a texture_prompt would override the photo (Meshy's precedence), so none is sent.
-    assert "texture_prompt" not in body and texture_conditioning(body) == "texture_image_url"
+    # Prompt-guided texture by default: the description written for this photo is what Meshy textures from.
+    assert body["texture_prompt"] == "A child wardrobe." and texture_conditioning(body) == "texture_prompt"
     assert "base64," not in caplog.text and "msy-secret" not in caplog.text
 
 

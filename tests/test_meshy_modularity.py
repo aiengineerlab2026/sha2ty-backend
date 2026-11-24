@@ -198,9 +198,10 @@ def test_no_geometry_or_modularity_prompt_is_invented_for_image_to_3d():
     import anyio
     from app.services.meshy_service import GenerationOptions
 
-    anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), input_task_id="img-1"))
+    anyio.run(lambda: _service(sent).create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), input_task_id="img-1",
+                                                             texture_prompt="Oak doors #B08A5C, vertical grain, matte."))
     body = json.loads(sent[0].content)
-    assert not {"prompt", "object_prompt", "parts", "modular"} & set(body) and "texture_prompt" not in body
+    assert not {"prompt", "object_prompt", "parts", "modular"} & set(body)  # texture_prompt guides the texture only
     sent.clear()
     anyio.run(lambda: _service(sent).create_split_task("mesh-1", split_prompt("wardrobe"), True))
     body = json.loads(sent[0].content)

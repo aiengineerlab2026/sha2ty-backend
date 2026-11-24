@@ -26,6 +26,10 @@ from app.services.meshy_service import MeshyError, MeshyService, check_image_to_
 from tests.test_generation_architecture import FakeCdn, textured_glb
 
 SIGNED = "https://assets.meshy.test/clean.png?Expires=1&Signature=secret-sig"
+# What the mocked vision model writes for the photo (services/texture_prompt.py): this photo's own texture description.
+BED_TEXTURE = ("Double bed. Headboard: warm medium-brown oak #966E46, vertical grain, satin finish, low reflectivity. Frame rails: "
+               "dark walnut-brown #5A3C28 wood, horizontal grain, matte. Legs: very dark brown #281E14 solid wood, matte.")
+TEXTURE_CALL = ["current_model", "ask_json:meshy_texture_prompt"]  # the one vision call on the Meshy path
 
 
 def bed(clutter=False, stretch=1.0, white=False, W=600, H=420) -> bytes:
@@ -130,7 +134,8 @@ class Recorder:
 
 
 def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furniture", kind="double bed", polls=12, astra=None, on_poll=None, **settings):
-    """POST /generate, then poll until the task ends. Every vision entry point records (and Meshy's must stay empty)."""
+    """POST /generate, then poll until the task ends. Every vision entry point records; on the Meshy path the only one is
+    the texture description (TEXTURE_CALL), answered with BED_TEXTURE."""
     rec = Recorder()
 
     def recording(name, value=None):
@@ -138,6 +143,10 @@ def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furnitu
             rec.vision.append(name)
             return value
         return call
+
+    async def ask_json(_content, _schema, purpose, *_a, **_k):
+        rec.vision.append(f"ask_json:{purpose}")
+        return json.dumps({"texture_prompt": BED_TEXTURE}) if purpose == "meshy_texture_prompt" else None
 
     async def take(*_a):
         rec.tries += 1
@@ -150,9 +159,9 @@ def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furnitu
     async def chosen(*_a, **_k):
         return provider
 
-    for name in ("ask_json", "clean_image"):
-        monkeypatch.setattr(vendor.vision, name, recording(name))
-    monkeypatch.setattr(vendor.vision, "current_model", recording("current_model", "gemini-3.1-pro-preview"))
+    monkeypatch.setattr(vendor.vision, "clean_image", recording("clean_image"))
+    monkeypatch.setattr(vendor.vision, "ask_json", ask_json)
+    monkeypatch.setattr(vendor.vision, "current_model", recording("current_model", "gpt-vision-test"))
     monkeypatch.setattr(vendor, "read_furniture_spec", recording("read_furniture_spec"))
     monkeypatch.setattr(vendor, "take_try", take)
     monkeypatch.setattr(vendor.bus, "publish", publish)
@@ -196,7 +205,7 @@ def phases(r) -> list[str]:
 def test_meshy_cleans_with_image_to_image_then_meshes_that_task_with_no_vision_call(tmp_path, monkeypatch):
     r = run(tmp_path, monkeypatch, Meshy())
     assert r.status == 200 and r.first["details"] is None  # no photo reading: the vendor's own fields stand
-    assert r.rec.vision == []  # 2. no Gemini / OpenAI call, no admin vision-model lookup, anywhere
+    assert r.rec.vision == TEXTURE_CALL  # 2. one vision call: this photo's texture description; no photo reading
     assert [k for k, _ in r.meshy.calls if k != "download-glb"] == ["image-to-image", "download", "image-to-3d", "split"]
     clean = r.meshy.made("image-to-image")[0]  # 1. Meshy Image to Image, with the furniture prompt
     assert clean["prompt"].startswith(MESHY_CLEAN_PROMPT) and "The main furniture item is a double bed." in clean["prompt"]
@@ -217,7 +226,8 @@ def test_meshy_cleans_with_image_to_image_then_meshes_that_task_with_no_vision_c
     # no photo reading: no box to compare layout in, so the absolute checks ran and the layout was not judged (not faked)
     assert doc["cleaning"]["used"] == "cleaned" and check["mode"] == "removal" and check["status"] == "passed"
     assert check["checked"] == ["alpha", "colours"] and "layout and edges not compared" in check["notes"][0]  # said, not hidden
-    assert doc["meshyInput"]["inputTaskId"] == "img-1" and doc["meshyInput"]["texture"] == "input_image"
+    assert doc["meshyInput"]["inputTaskId"] == "img-1" and doc["meshyInput"]["texture"] == "texture_prompt"
+    assert doc["meshyInput"]["texturePrompt"] == BED_TEXTURE and doc["meshyInput"]["textureSource"] == "prompt"
     # 10. no spec: no structural model, said plainly; parts named from geometry
     assert not doc["structural"]["built"] and "No structural specification" in doc["structural"]["uncertain"][0] and "carpenter" not in doc
     assert "named from the model's own geometry" in doc["limits"]
@@ -301,7 +311,8 @@ def test_after_a_successful_cleaning_the_outgoing_image_to_3d_body_references_th
     body = json.loads(request.content)
     image_task = r.meshy.made("image-to-image") and "img-1"  # the fake's Image to Image task id
     assert body["input_task_id"] == image_task == r.done["components"]["cleaning"]["imageTaskId"]
-    assert "image_url" not in body and "texture_image_url" not in body and "texture_prompt" not in body
+    assert "image_url" not in body and "texture_image_url" not in body  # geometry: the cleaned task; texture: the prompt only
+    assert body["texture_prompt"] == BED_TEXTURE  # this photo's own description, as Meshy receives it
     assert b"base64" not in request.content  # the original photo is not in the request in any form
     assert "image_source=input_task_id image_to_image_task=img-1 input_task_id=img-1" in caplog.text
     assert "base64," not in caplog.text and "Signature" not in caplog.text
@@ -326,7 +337,7 @@ def test_more_than_one_cleaned_image_is_not_used_as_the_input_task(tmp_path, mon
 def test_cleaning_off_goes_straight_to_image_to_3d(tmp_path, monkeypatch):
     r = run(tmp_path, monkeypatch, Meshy(), meshy_clean_image=False, meshy_auto_split=False)
     assert [k for k, _ in r.meshy.calls if k != "download-glb"] == ["image-to-3d"] and r.meshy.made("image-to-3d")[0]["image"] == PHOTO
-    assert r.rec.vision == [] and phases(r) == ["mesh_generation", "postprocessing", "completed"]
+    assert r.rec.vision == TEXTURE_CALL and phases(r) == ["mesh_generation", "postprocessing", "completed"]
     assert r.done["components"]["cleaning"]["used"] == "original" and not r.done["warnings"]
 
 
@@ -430,7 +441,7 @@ def test_invalid_image_to_3d_settings_are_refused_before_submission(settings):
     from app.schemas.vendor import GenerationOptions
 
     with pytest.raises(MeshyError) as err:
-        anyio.run(lambda: service.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), image=PHOTO))
+        anyio.run(lambda: service.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), image=PHOTO, texture_prompt=BED_TEXTURE))
     assert err.value.status_code == 400 and "Invalid Meshy Image to 3D settings" in err.value.message and sent == []
 
 
@@ -447,9 +458,9 @@ def test_quality_settings_reach_the_payload_valid():
     service = _service(sent, meshy_geometry_resolution="2k", meshy_texture_resolution="4k", meshy_texture_model="meshy-7")
     from app.schemas.vendor import GenerationOptions
 
-    anyio.run(lambda: service.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), input_task_id="img-1"))
+    anyio.run(lambda: service.create_image_to_3d_task(GenerationOptions(should_texture=True, enable_pbr=True), input_task_id="img-1", texture_prompt=BED_TEXTURE))
     body = json.loads(sent[0].content)
-    assert body["input_task_id"] == "img-1" and "image_url" not in body and "texture_image_url" not in body and "texture_prompt" not in body
+    assert body["input_task_id"] == "img-1" and "image_url" not in body and "texture_image_url" not in body and body["texture_prompt"] == BED_TEXTURE
     assert body["ai_model"] == "meshy-7.1" and body["geometry_resolution"] == "2k" and body["texture_resolution"] == "4k"
     assert body["texture_model"] == "meshy-7" and body["enable_pbr"] is True and body["should_remesh"] is False and body["image_enhancement"] is False
 

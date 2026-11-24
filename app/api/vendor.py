@@ -41,6 +41,7 @@ from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, nearest_aspect_ratio, quality_options, texture_conditioning
 from app.services import generator_setting
+from app.services.texture_prompt import TexturePromptError, read_texture_prompt
 from app.services.quota import generation_usage, use_generation
 
 router = APIRouter(prefix="/api/vendor", tags=["vendor"])
@@ -517,11 +518,13 @@ def meshy_input(image: bytes | None, mime: str, source: str, mesh: dict, url: st
     settings = get_settings()
     payload = image_to_3d_payload(GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
                                   {"input_task_id": "<task>"} if input_task_id else {"image_url": "<image>"},
-                                  mesh.get("texture_prompt"), mesh.get("target_polycount"), settings.meshy_texture_source, **quality_options(settings))
+                                  mesh.get("texture_prompt"), mesh.get("target_polycount"), mesh.get("texture_source") or settings.meshy_texture_source,
+                                  **quality_options(settings))
     return {
         "source": source, "mime": mime, "bytes": len(image) if image else None, "url": url, "inputTaskId": input_task_id,
         "sha256": hashlib.sha256(image).hexdigest() if image else None,
-        "texture": texture_conditioning(payload), "textureSource": settings.meshy_texture_source,
+        "texture": texture_conditioning(payload), "textureSource": mesh.get("texture_source") or settings.meshy_texture_source,
+        "texturePrompt": payload.get("texture_prompt"),
         "fields": sorted(payload),
     }
 
@@ -777,9 +780,13 @@ async def generate_model(
         base_texture = mesh_analysis.texture_prompt(analysis, base_texture)
         split = mesh_analysis.split_prompt(analysis) or split
         conditioning = mesh_analysis.conditioning(mesh_analysis.meshy_prompt(analysis), base_texture, split, settings.meshy_auto_split, clean_prompt)
+    # Prompt texturing (the default): the vision model writes this photo's own texture description (services/
+    # texture_prompt.py) while Meshy cleans the image; never a generic text. Other sources keep the built brief.
+    by_prompt = textured and settings.meshy_texture_source == "prompt"
     mesh = {
         "textured": textured,
-        "texture_prompt": base_texture,
+        "texture_prompt": None if by_prompt else base_texture,
+        "texture_source": settings.meshy_texture_source,
         "target_polycount": target_polycount(category, kind or None),
     }
     pending: dict = {
@@ -797,6 +804,10 @@ async def generate_model(
         "photo": raw or None,  # the reference for the checks when the model arrives (dropped with the task)
         "warnings": [],
     }
+    if by_prompt:  # written now, from the original photo, before any Meshy task exists
+        photo_for_texture = raw or (await meshy.download_bytes(public_url) if public_url else None) or b""
+        await _texture(pending, read_texture_prompt(photo_for_texture, sniff_image_mime(photo_for_texture) or mime, category, kind or None,
+                                                    settings, request.app.state, details))
     task_id = None
     if clean_prompt:
         try:
@@ -824,6 +835,7 @@ async def generate_model(
                 image_url=None if raw else public_url,
                 texture_prompt=mesh["texture_prompt"] if textured else None,
                 target_polycount=mesh["target_polycount"],
+                texture_source=mesh.get("texture_source"),
             )
         except MeshyError as exc:
             await bus.publish(GenerationFailed(user_id, "meshy"), request.app.state)  # Meshy refused: refunds the try
@@ -913,6 +925,24 @@ async def _clean_failed(request: Request, task_id: str, pending: dict, reason: s
     ))
 
 
+TEXTURE_PROMPT_TIMEOUT = 120.0  # seconds for the vision model to describe the photo
+
+
+async def _texture(pending: dict, reading) -> None:
+    """The vision model's texture description for this photo (`reading`) into pending["mesh"] (texture_source
+    "prompt"). When it could not be written, Meshy textures from its input image instead ("input": the cleaned image,
+    or the photo) and the model's notes say so: the prompt is never silently dropped, nor replaced by a generic text."""
+    mesh = pending["mesh"]
+    try:
+        mesh["texture_prompt"] = await asyncio.wait_for(reading, TEXTURE_PROMPT_TIMEOUT)
+        mesh["texture_source"] = "prompt"
+    except (TexturePromptError, TimeoutError) as exc:
+        reason = str(exc) or "it took too long"
+        logger.warning("Texture prompt not written (%s): Meshy textures from its input image", reason)
+        mesh.update(texture_prompt=None, texture_source="input")
+        pending["warnings"].append(f"The texture description could not be written ({reason}): the 3D model was textured from the image instead.")
+
+
 async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pending: dict, source: str, image: bytes | None = None,
                       url: str | None = None, input_task_id: str | None = None) -> TaskStatusResponse:
     """Image to 3D from the cleaned image (its Image to Image task, no re-upload) or the original photo."""
@@ -930,6 +960,7 @@ async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pendi
             GenerationOptions(should_texture=mesh["textured"], enable_pbr=mesh["textured"]),
             image=None if input_task_id else image, mime_type=mime, image_url=None if input_task_id else url, input_task_id=input_task_id,
             texture_prompt=mesh["texture_prompt"] if mesh["textured"] else None, target_polycount=mesh["target_polycount"],
+            texture_source=mesh.get("texture_source"),
         )
     except MeshyError as exc:
         await _refund(request, pending)  # nothing more will come of it

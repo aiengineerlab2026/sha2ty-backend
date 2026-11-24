@@ -140,7 +140,9 @@ def image_to_3d_payload(options: GenerationOptions, source: dict[str, Any], text
         # image, which is the cleaned one, never the cluttered original.
         if texture_source == "image" and "image_url" in source:
             payload["texture_image_url"] = source["image_url"]
-        elif texture_source == "prompt" and texture_prompt and texture_model != "meshy-n1":
+        elif texture_source == "prompt" and texture_prompt:
+            # Sent whatever the texture model: meshy-n1 refuses it, and check_image_to_3d says so before submission
+            # instead of the prompt being dropped without a word.
             payload["texture_prompt"] = texture_prompt
     return payload
 
@@ -257,6 +259,9 @@ class MeshyService:
         `input_task_id`: a SUCCEEDED Image to Image task with exactly one image (the cleaned photo), used as the input
         without re-uploading it. `texture_source`: settings.meshy_texture_source. Invalid combinations are refused
         here (400) before anything is paid for."""
+        source_kind = texture_source or self._settings.meshy_texture_source
+        if options.should_texture and source_kind == "prompt" and not (texture_prompt or "").strip():
+            raise MeshyError(400, "Texturing from a prompt was asked for, but no texture_prompt was given.")
         source: dict[str, Any] = {"input_task_id": input_task_id} if input_task_id else {"image_url": await self._image_source(image, mime_type, image_url)}
         payload = image_to_3d_payload(options, source, texture_prompt, target_polycount, texture_source or self._settings.meshy_texture_source,
                                       **quality_options(self._settings))
