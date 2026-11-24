@@ -110,7 +110,10 @@ class Settings(BaseSettings):
     r2_access_key_id: SecretStr = SecretStr("")
     r2_secret_access_key: SecretStr = SecretStr("")
     r2_bucket: str = "cads"
-    api_public_url: str = "http://localhost:8010"
+    # This API's public origin, for the file URLs it hands out and saves ({api_public_url}/api/files/<key>). Empty: the
+    # origin each request reached (its Host header, services/cdn.REQUEST_ORIGIN). The old default, localhost:8010, was
+    # written into every saved URL by a server deployed without this setting. Set it in production to pin the domain.
+    api_public_url: str = ""
     cdn_public_url: str = ""
 
     cors_origins: list[str] = []

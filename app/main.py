@@ -24,7 +24,7 @@ from app import handlers  # noqa: F401  subscribes the event handlers
 from app.core.config import get_settings
 from app.schemas.vendor import HealthResponse
 from app.services.astra_service import AstraService
-from app.services.cdn import Cdn
+from app.services.cdn import REQUEST_ORIGIN, Cdn
 from app.services.meshy_service import MeshyService
 from app.services.storage import Storage
 
@@ -76,6 +76,18 @@ app.add_middleware(
     allow_credentials=True,  # the web app calls this API directly with its session cookies
     expose_headers=["Retry-After"],
 )
+
+@app.middleware("http")
+async def public_origin(request, call_next):
+    """The origin this request reached, for the file URLs built while serving it (services/cdn.api_origin)."""
+    host = request.headers.get("host")
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    token = REQUEST_ORIGIN.set(f"{'https' if proto == 'https' else 'http'}://{host}" if host else None)
+    try:
+        return await call_next(request)
+    finally:
+        REQUEST_ORIGIN.reset(token)
+
 
 # Cookie sessions → bearer token for every route (the browser's only way in: frontend next.config rewrites /api/*).
 app.add_middleware(SessionCookies)
