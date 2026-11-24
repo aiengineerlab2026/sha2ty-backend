@@ -95,6 +95,10 @@ class TaskStatusResponse(BaseModel):
     phase: str | None = None
     warnings: list[str] | None = None  # e.g. cleaning skipped / failed / rejected: the original photo was meshed
     clean_image_url: str | None = None  # the Meshy-cleaned image actually meshed (absent when the original was)
+    # Meshy: the cleaned image's check (status passed / failed / inconclusive, issues, notes) once it ran, and, while
+    # phase is "awaiting_approval", the unchecked cleaned image the user is asked to accept or reject.
+    cleaning_check: dict | None = None
+    review_image_url: str | None = None
 
 
 def sniff_image_mime(data: bytes) -> str | None:
@@ -764,7 +768,8 @@ async def generate_model(
     # grouping, naming, checks. Image to 3D has no geometry prompt, so what is removed is removed in the image.
     kind_type = furniture_type(category, kind or None, details)
     clean_prompt = meshy_clean_prompt(category, kind or None, settings.meshy_clean_prompt, settings.meshy_clean_hints,
-                                      spec.loose_objects if spec and spec.needs_cleaning else None) if settings.meshy_clean_image else None
+                                      spec.loose_objects if spec and spec.needs_cleaning else None,
+                                      neutral_background=not settings.meshy_remove_background) if settings.meshy_clean_image else None
     base_texture = meshy_texture_prompt(category, title, details, kind or None)
     split = split_prompt(category, kind or None)  # the vendor's furniture type's parts: no photo reading needed
     conditioning = None
@@ -865,8 +870,10 @@ def _mesh_steps(pending: dict, status: str, progress: int) -> list[GenerationSte
 
 def _status(task_id: str, pending: dict, phase: str, **kw) -> TaskStatusResponse:
     """A task answer with its phase, the warnings so far and the cleaned image (when one is used)."""
+    check = pending.get("cleaning_check")
     return TaskStatusResponse(task_id=task_id, phase=phase, warnings=list(pending.get("warnings") or []) or None,
-                              clean_image_url=pending.get("clean_image_url"), **kw)
+                              clean_image_url=pending.get("clean_image_url"), review_image_url=pending.get("review_image_url"),
+                              cleaning_check={k: check.get(k) for k in ("status", "issues", "notes", "decision")} if check else None, **kw)
 
 
 def _finish(request: Request, task_id: str, pending: dict, response: TaskStatusResponse) -> TaskStatusResponse:
@@ -874,6 +881,10 @@ def _finish(request: Request, task_id: str, pending: dict, response: TaskStatusR
     and processing again. ponytail: in-process dict with a TTL; a shared store if the API runs on several hosts."""
     lock = pending.get("_lock")
     keep = {"user_id": pending.get("user_id"), "result": response, "finished": time.monotonic(), "_lock": lock}
+    if response.status == "SUCCEEDED" and pending.get("mesh_task_id"):
+        # What a "Retry Auto Split" needs to run the same chain again from the finished Image to 3D task (no new
+        # generation). ponytail: in memory for FINISHED_TTL with the photo bytes; persist it if retries must outlive that.
+        keep["retry"] = {k: v for k, v in pending.items() if k not in ("_lock", "result")}
     pending.clear()
     pending.update(keep)
     tasks = request.app.state.pending_cdn
@@ -930,11 +941,13 @@ async def _start_mesh(request: Request, meshy: MeshyService, task_id: str, pendi
                    steps=_mesh_steps(pending, "IN_PROGRESS", 0))
 
 
-async def _use_original(request: Request, meshy: MeshyService, task_id: str, pending: dict, what: str, reason: str) -> TaskStatusResponse:
+async def _use_original(request: Request, meshy: MeshyService, task_id: str, pending: dict, what: str, reason: str,
+                        chosen: bool = False) -> TaskStatusResponse:
     """The configured fallback when cleaning failed or its image was rejected: the original photo is meshed and the
-    model says so (meshy_use_original_on_bad_cleaning), or the conversion stops and the try is refunded."""
+    model says so (meshy_use_original_on_bad_cleaning), or the conversion stops and the try is refunded. chosen: the
+    user picked the original themselves (always honoured)."""
     photo, url = pending.get("photo"), pending.get("image_url")
-    if not (get_settings().meshy_use_original_on_bad_cleaning and (photo or url)):
+    if not ((chosen or get_settings().meshy_use_original_on_bad_cleaning) and (photo or url)):
         return await _clean_failed(request, task_id, pending, reason, 0)
     logger.warning("Meshy image cleaning %s %s (%s): meshing the original photo", task_id, what, reason[:200])
     pending["warnings"].append(cleaning_warning(what, reason))
@@ -985,26 +998,109 @@ async def conditioned_image(request: Request, meshy: MeshyService, cdn: Cdn | No
         return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image is not a PNG, JPG or WEBP")
     photo = pending.get("photo")
     check = await run_in_threadpool(fidelity.compare_images, photo, cleaned, (pending.get("details") or {}).get("bbox"), True) if photo else \
-        {"stage": "cleaning", "mode": "removal", "ok": None, "issues": [], "notes": ["Only an image URL was given: the cleaned image was not compared with the original."]}
+        {"stage": "cleaning", "mode": "removal", "status": "inconclusive", "ok": None, "issues": [], "notes": ["Only an image URL was given: the cleaned image was not compared with the original."]}
     pending["cleaning_check"] = check
     if check.get("ok") is False:
         check["rejected"] = True
         pending["rejected_clean"] = cleaned
         return await _use_original(request, meshy, task_id, pending, "rejected", "The cleaned image changed the furniture: " + "; ".join(check["issues"][:2]))
-    # No photo reading (the default Meshy path) means no box to compare layout in: that is recorded in the check's notes,
-    # not raised as a warning on every model. Any other unjudged check is.
-    if check.get("ok") is None and (not photo or (pending.get("details") or {}).get("bbox")):
-        pending["warnings"].append("The cleaned image was used but could not be fully checked against the original photo: " + "; ".join(check.get("notes", [])[:1]))
+    if check.get("ok") is None:  # inconclusive: never treated as a pass without saying so
+        reason = "; ".join(check.get("notes", [])[:1]) or "it could not be compared with the original photo"
+        policy = get_settings().meshy_inconclusive_cleaning
+        if policy == "use_original":
+            pending["rejected_clean"] = cleaned
+            return await _use_original(request, meshy, task_id, pending, "unchecked", reason)
+        if policy == "ask":
+            pending.update(stage="approval", awaiting_clean=cleaned)
+            pending["review_image_url"] = await _upload_clean(cdn, pending, task_id, cleaned)
+            return _awaiting(task_id, pending)
+        pending["warnings"].append("The cleaned image was used without a full check: " + reason)
+    return await _accept_clean(request, meshy, cdn, task_id, pending, cleaned)
+
+
+async def _upload_clean(cdn: Cdn | None, pending: dict, task_id: str, cleaned: bytes) -> str | None:
+    if cdn is None:
+        return None
+    try:
+        return await run_in_threadpool(cdn.upload, f"{pending.get('user_id')}/{pending.get('model_id') or task_id}.clean.png", cleaned,
+                                       sniff_image_mime(cleaned) or "image/png")
+    except CdnError as exc:
+        logger.warning("Cleaned image not uploaded: %s", exc.message)
+        return None
+
+
+def _awaiting(task_id: str, pending: dict) -> TaskStatusResponse:
+    """Waiting for the user to accept or reject an unchecked cleaned image (POST /tasks/{id}/cleaning). No Meshy call."""
+    return _status(task_id, pending, "awaiting_approval", status="IN_PROGRESS", progress=IMAGE_STAGE, retry_after_seconds=5,
+                   steps=_steps(("SUCCEEDED", 100), ("PENDING", 0)))
+
+
+async def _accept_clean(request: Request, meshy: MeshyService, cdn: Cdn | None, task_id: str, pending: dict, cleaned: bytes) -> TaskStatusResponse:
+    """The cleaned image is meshed: Image to 3D from ITS Image to Image task (input_task_id), never the original photo."""
     # The cleaned image is the reference from here on (grouping, appearance): the photo still shows what was removed.
     pending["reference"] = cleaned
     pending["image_step_status"] = "SUCCEEDED"
-    if cdn is not None:
-        try:
-            pending["clean_image_url"] = await run_in_threadpool(cdn.upload, f"{pending.get('user_id')}/{pending.get('model_id') or task_id}.clean.png", cleaned,
-                                                                 sniff_image_mime(cleaned) or "image/png")
-        except CdnError as exc:
-            logger.warning("Cleaned image not uploaded: %s", exc.message)
+    pending["clean_image_url"] = pending.pop("review_image_url", None) or await _upload_clean(cdn, pending, task_id, cleaned)
     return await _start_mesh(request, meshy, task_id, pending, "cleaned", image=cleaned, input_task_id=pending["image_task_id"])
+
+
+class CleaningDecision(BaseModel):
+    use: Literal["cleaned", "original"]
+
+
+@router.post("/tasks/{task_id}/cleaning", response_model=TaskStatusResponse)
+async def decide_cleaning(
+    task_id: str,
+    body: CleaningDecision,
+    request: Request,
+    meshy: Annotated[MeshyService, Depends(get_meshy)],
+    cdn: Annotated[Cdn, Depends(get_cdn)],
+    user_id: Annotated[str, Depends(current_user)],
+) -> TaskStatusResponse:
+    """The user's answer to an inconclusive cleaned image (phase awaiting_approval): mesh it, or mesh the original."""
+    pending = request.app.state.pending_cdn.get(task_id)
+    if not pending or pending.get("user_id") != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
+    async with pending.setdefault("_lock", asyncio.Lock()):
+        if pending.get("stage") != "approval":
+            raise HTTPException(status.HTTP_409_CONFLICT, "This conversion is not waiting for a decision about the cleaned image.")
+        cleaned = pending.pop("awaiting_clean")
+        pending["cleaning_check"]["decision"] = body.use
+        logger.info("Meshy cleaning %s: the user chose the %s image", task_id, body.use)
+        if body.use == "original":
+            pending["rejected_clean"] = cleaned
+            pending.pop("review_image_url", None)
+            return await _use_original(request, meshy, task_id, pending, "declined", "you chose the original photo", chosen=True)
+        pending["warnings"].append("You approved the cleaned image; it could not be checked automatically against the original photo.")
+        return await _accept_clean(request, meshy, cdn, task_id, pending, cleaned)
+
+
+SPLIT_RETRIES = 2  # Auto Split costs 10 Meshy credits each time: a bounded number of retries per conversion
+
+
+@router.post("/tasks/{task_id}/retry-split", response_model=TaskStatusResponse)
+async def retry_split(task_id: str, request: Request, user_id: Annotated[str, Depends(current_user)]) -> TaskStatusResponse:
+    """Auto Split again on the SAME finished Image to 3D task (no new generation, no new try). Poll GET /tasks/{id} as
+    for a conversion; the answer is a new model built from the new split."""
+    pending = request.app.state.pending_cdn.get(task_id)
+    if not pending or pending.get("user_id") != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found.")
+    async with pending.setdefault("_lock", asyncio.Lock()):
+        snapshot = pending.get("retry")
+        if not snapshot:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This conversion cannot be split again (not finished, not Meshy, or expired).")
+        if (pending["result"].components or {}).get("split", {}).get("accepted"):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This model was already split into separate parts.")
+        tries = int(snapshot.get("split_retries") or 0)
+        if tries >= SPLIT_RETRIES:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"Auto Split was already retried {SPLIT_RETRIES} times for this model.")
+        lock = pending["_lock"]
+        pending.clear()
+        pending.update(snapshot, _lock=lock, split_retries=tries + 1, split_task_id=None, split_failed=None,
+                       split=snapshot.get("split") or split_prompt(snapshot.get("category"), snapshot.get("kind") or None))
+        logger.info("Meshy Auto Split retry %d for %s on image-to-3d task %s", tries + 1, task_id, pending.get("mesh_task_id"))
+        return _status(task_id, pending, "auto_split", status="IN_PROGRESS", progress=90, retry_after_seconds=2,
+                       steps=_mesh_steps(pending, "SUCCEEDED", 100))
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -1026,6 +1122,8 @@ async def get_task(
     async with pending.setdefault("_lock", asyncio.Lock()):
         if "result" in pending:
             return pending["result"]
+        if pending.get("stage") == "approval":
+            return _awaiting(task_id, pending)
         if pending.get("stage") in ("image", "validation"):
             return await conditioned_image(request, meshy, cdn, task_id, pending)
         return await _mesh_task(task_id, request, meshy, cdn, user_id, background, pending, registered)

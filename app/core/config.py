@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # Optional extra cleaning instruction per furniture family (bed, wardrobe, sofa, table, chair, door or a catalogue
     # category), e.g. MESHY_CLEAN_HINTS='{"bed": "Keep the upholstered headboard."}'. No vision model writes these.
     meshy_clean_hints: dict[str, str] = {}
+    # Transparent background (Meshy remove_background). Off: the prompt asks for a flat neutral-gray backdrop instead.
+    # Measured: on light furniture the removal deleted whole doors (RGBA 0,0,0,0), which Image to 3D then textured dark.
+    meshy_remove_background: bool = False
+    # A cleaned image whose check is inconclusive (it could not be compared with the original): "ask" waits for the
+    # user to choose the cleaned image or the original; "use_original" meshes the original; "use_cleaned" meshes the
+    # cleaned one and says it was unchecked. A failed check always falls back (meshy_use_original_on_bad_cleaning).
+    meshy_inconclusive_cleaning: Literal["ask", "use_original", "use_cleaned"] = "ask"
     meshy_clean_timeout_seconds: float = 600.0  # an Image to Image task still running after this counts as failed
     # Optional advanced analysis for Meshy: read the photo with the configured vision model (listing, estimated size,
     # components, structural model, analysis-based split parts). Off (default): the Meshy path makes no vision call.

@@ -21,7 +21,7 @@ from app.core import config
 from app.core.config import Settings
 from app.main import app
 from app.services import fidelity
-from app.services.generation_prompt import MESHY_CLEAN_PROMPT, meshy_clean_prompt
+from app.services.generation_prompt import MESHY_CLEAN_PROMPT, MESHY_NEUTRAL_BACKGROUND, meshy_clean_prompt, split_prompt
 from app.services.meshy_service import MeshyError, MeshyService, check_image_to_3d
 from tests.test_generation_architecture import FakeCdn, textured_glb
 
@@ -129,7 +129,7 @@ class Recorder:
         self.vision, self.refunds, self.tries = [], 0, 0
 
 
-def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furniture", kind="double bed", polls=12, astra=None, **settings):
+def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furniture", kind="double bed", polls=12, astra=None, on_poll=None, **settings):
     """POST /generate, then poll until the task ends. Every vision entry point records (and Meshy's must stay empty)."""
     rec = Recorder()
 
@@ -170,6 +170,8 @@ def run(tmp_path, monkeypatch, meshy: Meshy, provider="meshy", category="furnitu
             if res.status_code == 200 and "glb_url" not in first:
                 for _ in range(polls):
                     seen.append(client.get(f"/api/vendor/tasks/{first['task_id']}").json())
+                    if on_poll:  # a test acting mid-task (a decision, a retry); what it returns is the next answer
+                        seen[-1] = on_poll(client, first["task_id"], seen[-1]) or seen[-1]
                     if seen[-1]["status"] in ("SUCCEEDED", "FAILED", "CANCELED"):
                         break
                 again = client.get(f"/api/vendor/tasks/{first['task_id']}").json() if seen else None
@@ -213,7 +215,8 @@ def test_meshy_cleans_with_image_to_image_then_meshes_that_task_with_no_vision_c
     doc = done["components"]
     check = doc["cleaning"]["check"]
     # no photo reading: no box to compare layout in, so the absolute checks ran and the layout was not judged (not faked)
-    assert doc["cleaning"]["used"] == "cleaned" and check["mode"] == "removal" and check["ok"] is None and "No photo reading" in check["notes"][0]
+    assert doc["cleaning"]["used"] == "cleaned" and check["mode"] == "removal" and check["status"] == "passed"
+    assert check["checked"] == ["alpha", "colours"] and "layout and edges not compared" in check["notes"][0]  # said, not hidden
     assert doc["meshyInput"]["inputTaskId"] == "img-1" and doc["meshyInput"]["texture"] == "input_image"
     # 10. no spec: no structural model, said plainly; parts named from geometry
     assert not doc["structural"]["built"] and "No structural specification" in doc["structural"]["uncertain"][0] and "carpenter" not in doc
@@ -229,8 +232,9 @@ def test_meshy_cleans_with_image_to_image_then_meshes_that_task_with_no_vision_c
 def test_the_cleaning_prompt_is_configurable_without_a_vision_model():
     p = meshy_clean_prompt("wardrobe", None, hints={"wardrobe": "Keep the crown moulding."})
     assert p.startswith(MESHY_CLEAN_PROMPT) and "The main furniture item is a wardrobe." in p and p.endswith("Keep the crown moulding.")
-    assert meshy_clean_prompt("furniture", None, override="Only remove the cat.") == "Only remove the cat."
-    assert meshy_clean_prompt("furniture", None) == MESHY_CLEAN_PROMPT  # nothing typed: nothing assumed
+    assert meshy_clean_prompt("furniture", None, override="Only remove the cat.", neutral_background=False) == "Only remove the cat."
+    assert meshy_clean_prompt("furniture", None, override="Only remove the cat.").endswith(MESHY_NEUTRAL_BACKGROUND)
+    assert meshy_clean_prompt("furniture", None, neutral_background=False) == MESHY_CLEAN_PROMPT  # nothing typed: nothing assumed
 
 
 # ---- 4, 5: the fallback policy ----
@@ -506,7 +510,7 @@ def test_without_a_reading_a_reframed_cleaning_is_not_rejected_by_comparing_the_
     buf = io.BytesIO()
     reframed.save(buf, "PNG")
     check = fidelity.compare_images(PHOTO, buf.getvalue(), None, removal=True)
-    assert check["ok"] is None and not check["issues"]
+    assert check["status"] == "passed" and not check["issues"] and "layout" not in check["checked"]
 
 
 @pytest.mark.parametrize(("cleaned", "box", "why"), [
@@ -525,5 +529,7 @@ def test_an_empty_or_reframed_cleaned_image_is_not_passed_as_checked():
     Image.new("RGB", (600, 420), (255, 255, 255)).save(empty, "PNG")
     assert fidelity.compare_images(PHOTO, empty.getvalue(), None, removal=True)["ok"] is False
     square = bed(white=True, W=500, H=500)
-    framed = fidelity.compare_images(PHOTO, square, None, removal=True)
-    assert framed["ok"] is None and "framed differently" in framed["notes"][0]
+    framed = fidelity.compare_images(PHOTO, square, BOX, removal=True)  # colours checked; the layout cannot be
+    assert framed["status"] == "passed" and "layout" not in framed["checked"] and "framed differently" in framed["notes"][0]
+    unread = fidelity.compare_images(b"not an image", CLEANED, None, removal=True)  # nothing to compare with
+    assert unread["status"] == "inconclusive" and unread["ok"] is None

@@ -380,7 +380,7 @@ def test_same_vendor_photo_returns_the_cached_model(tmp_path, monkeypatch):
     monkeypatch.setattr(vendor, "read_furniture_spec", spec_of(fake_details))
     monkeypatch.setattr(vendor, "take_try", one_try)
     monkeypatch.setattr(vendor.generator_setting, "current", admin_chose_meshy)
-    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, meshy_vision_analysis=True, gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
+    s = Settings(meshy_api_key="msy-test", meshy_clean_image=False, meshy_auto_split=False, meshy_vision_analysis=True, gemini_api_key="gem-test", storage_dir=tmp_path, supabase_url="https://db.test", supabase_service_role_key="service")
     monkeypatch.setattr(vendor, "get_settings", lambda: s)
     app.dependency_overrides.update({vendor.current_user: lambda: "vendor-1", vendor.get_meshy: lambda: FakeMeshy(), vendor.get_cdn: lambda: FakeCdn(), config.get_settings: lambda: s})
     png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
