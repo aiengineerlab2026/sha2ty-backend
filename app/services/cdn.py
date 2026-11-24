@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import mimetypes
+from contextvars import ContextVar
 from urllib.parse import quote
 
 import boto3
@@ -18,6 +19,17 @@ class CdnError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+# scheme://host of the request being served (main.public_origin): with API_PUBLIC_URL unset, file URLs name the host
+# the caller actually reached, never a localhost default. The Host header only: on Cloud Run it is the service's own
+# domain (requests are routed by it); X-Forwarded-Host is set by the caller and is not trusted.
+REQUEST_ORIGIN: ContextVar[str | None] = ContextVar("request_origin", default=None)
+LOCAL_ORIGIN = "http://localhost:8000"  # scripts and tests: no request, no setting
+
+
+def api_origin(settings: Settings) -> str:
+    return (settings.api_public_url or REQUEST_ORIGIN.get() or LOCAL_ORIGIN).rstrip("/")
 
 
 UPLOAD = TransferConfig(multipart_threshold=8 * 1024 * 1024, multipart_chunksize=8 * 1024 * 1024, max_concurrency=8, use_threads=True)
@@ -46,7 +58,7 @@ class Cdn:
     @property
     def prefix(self) -> str:
         """Every public file URL starts with this (keys follow it)."""
-        return (self.settings.cdn_public_url or f"{self.settings.api_public_url}/api/files").rstrip("/") + "/"
+        return (self.settings.cdn_public_url or f"{api_origin(self.settings)}/api/files").rstrip("/") + "/"
 
     def public_url(self, key: str) -> str:
         return f"{self.prefix}{quote(key)}"
@@ -80,6 +92,6 @@ class Cdn:
 def file_prefixes(settings: Settings) -> tuple[str, ...]:
     """Where the platform's own files live: R2 (through this API or its public URL) and, for older files, Supabase Storage."""
     return (
-        (settings.cdn_public_url or f"{settings.api_public_url}/api/files").rstrip("/") + "/",
+        (settings.cdn_public_url or f"{api_origin(settings)}/api/files").rstrip("/") + "/",
         f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/",
     )
