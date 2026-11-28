@@ -421,18 +421,32 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
         parts.append(_part(c, c["id"], c.get("name") or "Handle", c.get("kind") or "handle", lo, hi, geometry="hardware", hardware=hw,
                            host=host["id"] if host else None, assembly=(host or {}).get("assembly") or (host or {}).get("mover_of"),
                            estimated=False))
-    for c in [*kinds.get("shelf", []), *kinds.get("divider", [])]:
+    # Inside the carcass: the space its assembled boards leave (not the doors' opening, which a plinth or a crown
+    # moves): above the base board, under the top board, between the sides, in front of the back. Dividers stand
+    # on the base and meet the top; shelves rest between the sides or a divider. Boards meet face to face (a joint),
+    # never through each other.
+    board = {p["kind"]: p for p in parts if p["kind"] in ("base_panel", "top_panel", "back_panel")}
+    iy0 = float(board["base_panel"]["hi"][1]) if "base_panel" in board else base_y + BOARD
+    iy1 = float(board["top_panel"]["lo"][1]) if "top_panel" in board else H - BOARD
+    iz0 = float(board["back_panel"]["hi"][2]) if "back_panel" in board else -D / 2 + BACK
+    walls = [ox0, ox1]
+    for c in kinds.get("divider", []):
         r = rect(c)
         if not r:
             continue
-        x0, x1 = max(x_of(r[0]), ox0), min(x_of(r[2]), ox1)
-        if c.get("kind") == "shelf":
-            y = y_of((r[1] + r[3]) / 2)
-            lo, hi = [x0, y - BOARD / 2, -D / 2 + BACK], [x1, y + BOARD / 2, inner_front - 0.005]
-        else:
-            x = (x0 + x1) / 2
-            lo, hi = [x - BOARD / 2, oy0, -D / 2 + BACK], [x + BOARD / 2, oy1, inner_front - 0.005]
-        parts.append(_part(c, c["id"], c.get("name") or c["id"], c.get("kind"), lo, hi, assembly="carcass"))
+        x = float(np.clip((max(x_of(r[0]), ox0) + min(x_of(r[2]), ox1)) / 2, ox0 + BOARD / 2, ox1 - BOARD / 2))
+        parts.append(_part(c, c["id"], c.get("name") or c["id"], "divider", [x - BOARD / 2, iy0, iz0], [x + BOARD / 2, iy1, inner_front - 0.005], assembly="carcass"))
+        walls += [x - BOARD / 2, x + BOARD / 2]
+    walls.sort()
+    for c in kinds.get("shelf", []):
+        r = rect(c)
+        if not r:
+            continue
+        mid = (x_of(r[0]) + x_of(r[2])) / 2
+        left = max([w for w in walls if w <= mid + 1e-9], default=ox0)  # the compartment the shelf sits in
+        right = min([w for w in walls if w >= mid - 1e-9 and w > left], default=ox1)
+        y = float(np.clip(y_of((r[1] + r[3]) / 2), iy0 + BOARD / 2, iy1 - BOARD / 2))
+        parts.append(_part(c, c["id"], c.get("name") or c["id"], "shelf", [left, y - BOARD / 2, iz0], [right, y + BOARD / 2, inner_front - 0.005], assembly="carcass"))
     # anything else listed and physical (a mirror on its own, a fixed panel…) that has not been placed
     done = {p["id"] for p in parts}
     for c in physical:

@@ -39,11 +39,12 @@ def size(c):
 # ---- the regression case ----
 
 
-def test_the_old_reconstruction_is_rejected_for_what_was_wrong_with_it():
+def test_the_old_reconstruction_is_diagnosed_for_what_was_wrong_with_it():
     old = json.loads((FIX / "mirror_wardrobe.before.json").read_text())
     _, doc = model_validation.validate_and_repair((FIX / "mirror_wardrobe.before.glb").read_bytes(), old)
     v = doc["validation"]
-    assert v["status"] == "needs_repair" and not v["publishable"]
+    # its quality is recorded as it is (never marked valid to let it through); a usable file still publishes
+    assert v["status"] == "needs_repair" and v["technical"] == "issues" and v["publishable"] and v["usable"]
     assert any("flicker" in e for e in v["errors"]) and any("pass through each other" in e for e in v["errors"])
 
 
