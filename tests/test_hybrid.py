@@ -67,7 +67,9 @@ def test_panels_are_flat_closed_boards_at_the_real_size(wardrobe):
     assert abs(w - 1.6) < 0.01 and abs(h - 2.0) < 0.01 and abs(d - 0.58) < 0.06  # metres, handles proud of the front
     for c in doc["components"]:
         size = np.subtract(c["box"][1], c["box"][0])
-        if "panel" in c["name"].lower() or (c["name"].startswith("Door") and "handle" not in c["name"]):
+        if c.get("kind") == "back_panel":
+            assert abs(sorted(size)[0] - 0.006) < 1e-3, c["name"]  # a back panel is thin by design
+        elif "panel" in c["name"].lower() or (c["name"].startswith("Door") and "handle" not in c["name"]):
             assert abs(sorted(size)[0] - 0.018) < 1e-3, c["name"]  # one board thickness, flat
     for geom in scene.geometry.values():
         if len(geom.vertices) == 24:  # a plain board
@@ -85,14 +87,18 @@ def test_vendor_measurements_win_and_are_marked_measured():
 # ---- appearance: the photo's own pixels ----
 
 
-def test_each_door_is_textured_with_its_own_colour_from_the_photo_without_its_handle(wardrobe):
+def test_each_door_gets_its_own_clean_colour_from_the_photo_not_a_photo_of_it(wardrobe):
+    """Painted doors: a clean colour sampled from the door's own pixels (its handle, the wall and its neighbours
+    masked out), never the photographed door pasted on."""
     glb, doc = wardrobe
-    door1, door2 = texture_of(glb, "Door 1"), texture_of(glb, "Door 2")
-    assert np.abs(np.median(door1.reshape(-1, 3), 0) - F.PINK).max() < 12  # the pink outer door stays pink
-    assert np.abs(np.median(door2.reshape(-1, 3), 0) - F.WHITE).max() < 12  # the white inner door stays white
-    brass = (np.abs(door1 - F.BRASS).sum(-1) < 40).mean()
-    assert brass < 0.002  # its handle is its own part, painted out of the panel's texture
-    assert all(c["material"]["fromPhoto"] for c in doc["components"] if c["name"].startswith("Door"))
+    hexes = {c["name"]: c["material"] for c in doc["components"]}
+
+    def rgb(h):
+        return np.array([int(h[i:i + 2], 16) for i in (1, 3, 5)])
+
+    assert np.abs(rgb(hexes["Door 1"]["color"]) - F.PINK).max() < 14 and hexes["Door 1"]["source"] == "colour sample"
+    assert np.abs(rgb(hexes["Door 2"]["color"]) - F.WHITE).max() < 14
+    assert not any(gltf(glb).get("images") or [])  # painted fronts are not photo textures
     assert not any(c["material"]["confirmed"] for c in doc["components"])  # the vendor confirms materials
 
 

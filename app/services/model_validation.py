@@ -159,19 +159,28 @@ def validate_and_repair(glb: bytes, doc_in: dict[str, Any], only: set[str] | Non
             if "TEXCOORD_0" in attrs:
                 uv = _read(doc, views, attrs["TEXCOORD_0"]).astype(np.float64)
                 bad = ~np.isfinite(uv)
-                if bad.any() or (procedural and (uv.min() < -1e-3 or uv.max() > 1 + 1e-3)):
-                    uv[bad] = 0
-                    _write(doc, views, attrs["TEXCOORD_0"], np.clip(uv, 0, 1).astype(np.float32) if procedural else uv.astype(np.float32))
-                    repairs.append(f"{name}: had invalid texture coordinates; clamped to the texture.")
+                if bad.any():
+                    # Only an invalid number is replaced: real-size UVs tile past 0..1 on purpose (a texture repeats
+                    # across a large panel). A collapsed or stretched mapping is reported by geometry_between, never
+                    # "repaired" by clamping, which would destroy it.
+                    rows = bad.any(axis=1)
+                    if procedural and "NORMAL" in attrs:
+                        from app.services import solids
+
+                        uv[rows] = solids.face_uv(pos[rows], _read(doc, views, attrs["NORMAL"]).astype(np.float64)[rows])
+                    else:
+                        uv[bad] = 0
+                    _write(doc, views, attrs["TEXCOORD_0"], uv.astype(np.float32))
+                    repairs.append(f"{name}: had invalid texture coordinates; recomputed from its faces.")
             if plain and comp.get("box"):
                 # A plain board is its recorded box: a vertex that drifted off it goes back onto the nearest face of
                 # that box (the design as built), which also closes the solid again.
                 faces = np.array(comp["box"], float)
                 off = np.min(np.abs(pos[:, None, :] - faces[None]), axis=1).max()
                 if off > 1e-4:
-                    from app.services.hybrid import box_mesh
+                    from app.services import solids
 
-                    rebuilt = box_mesh(faces[0], faces[1])[0]
+                    rebuilt = solids.mesh_arrays(solids.box(faces[0], faces[1]))[0]
                     if len(rebuilt) == len(pos):  # the builder's own vertex layout: the board as designed, exactly
                         _write(doc, views, attrs["POSITION"], rebuilt.astype(np.float32))
                         pos = rebuilt
@@ -198,7 +207,8 @@ def validate_and_repair(glb: bytes, doc_in: dict[str, Any], only: set[str] | Non
         # thickness: a plain wooden board (not glass, metal or a handle) of one board thickness
         size = hi_all - lo_all
         cls = (comp.get("material") or {}).get("class")
-        board_like = plain and cls not in ("glass", "mirror", "metal", "generated") and not any(w in name.lower() for w in ("handle", "knob", "pull", "leg"))
+        board_like = plain and cls not in ("glass", "mirror", "metal", "generated") and comp.get("kind") not in ("back_panel", "mirror", "glass") \
+            and not any(w in name.lower() for w in ("handle", "knob", "pull", "leg"))
         thin = int(np.argmin(size))
         if board_like and abs(size[thin] - BOARD) > 1e-4:
             if abs(size[thin] - BOARD) <= THICKNESS_SNAP * BOARD:
@@ -230,9 +240,159 @@ def validate_and_repair(glb: bytes, doc_in: dict[str, Any], only: set[str] | Non
                 # Against the vendor's measurements it is wrong; against an estimate it is a note.
                 (errors if doc_in.get("sizeSource") == "vendor" else warnings).append(f"The model is {v:.2f} m {k}, its recorded size is {want:.2f} m.")
     out = write_glb(doc, views) if repairs else glb
+    if only is None:  # the whole model: real geometry between parts and the UVs
+        between = geometry_between(out, doc_in)
+        errors += between["errors"]
+        warnings += between["warnings"]
+        doc_in.setdefault("hybrid", {})["geometryMetrics"] = between["metrics"]
     doc_in["validation"] = {**(doc_in.get("validation") or {}), "ok": not errors, "errors": errors, "warnings": warnings, "repairs": repairs,
                             "checks": ["normals", "uv", "materials", "closed", "flat", "thickness", "duplicates", "overlap", "size",
                                        "volume", "floating", "handle ownership", "pivots"]}
+    doc_in["validation"] = verdict(doc_in)
     if repairs:
         logger.info("Model repairs: %s", repairs)
     return out, doc_in
+
+
+# ---- geometry between parts, UVs, and the verdict ----
+
+INTERSECTION_CM3 = 1.0  # two solids sharing more than this many cm³ pass through each other
+COPLANAR_CM2 = 1.0  # two same-facing faces of different parts overlapping more than this in one plane: z-fighting
+FRAME_FILL = 0.85  # a frame whose volume is this share of its box is a filled board, not a frame
+UV_STRETCH = 4.0  # texel density varying more than this across one part: stretched
+
+
+def _triangles(doc: dict, views: list[bytes], node: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    pos_all, idx_all, uv_all, off = [], [], [], 0
+    for prim in doc["meshes"][node["mesh"]].get("primitives") or []:
+        attrs = prim.get("attributes") or {}
+        pos = _read(doc, views, attrs["POSITION"]).astype(np.float64)
+        idx = _read(doc, views, prim["indices"]).ravel().astype(np.int64) if "indices" in prim else np.arange(len(pos))
+        pos_all.append(pos)
+        idx_all.append(idx + off)
+        uv_all.append(_read(doc, views, attrs["TEXCOORD_0"]).astype(np.float64) if "TEXCOORD_0" in attrs else None)
+        off += len(pos)
+    uv = np.concatenate(uv_all) if uv_all and all(u is not None for u in uv_all) else None
+    return np.concatenate(pos_all), np.concatenate(idx_all), uv
+
+
+def _manifold(pos: np.ndarray, idx: np.ndarray):
+    import manifold3d as mf
+
+    keys = np.round(pos, 6)
+    uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+    tri = inv.ravel()[idx.reshape(-1, 3)]
+    tri = tri[(tri[:, 0] != tri[:, 1]) & (tri[:, 1] != tri[:, 2]) & (tri[:, 0] != tri[:, 2])]
+    m = mf.Manifold(mf.Mesh(vert_properties=uniq.astype(np.float32), tri_verts=tri.astype(np.uint32)))
+    return m if m.status() == mf.Error.NoError else None
+
+
+def _planes(pos: np.ndarray, idx: np.ndarray) -> dict[tuple, list[np.ndarray]]:
+    """Triangles grouped by the plane they lie in (axis-aligned planes only: boards, frames, panes)."""
+    tri = pos[idx.reshape(-1, 3)]
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    area = np.linalg.norm(n, axis=1)
+    n = n / np.maximum(area[:, None], 1e-12)
+    out: dict[tuple, list[np.ndarray]] = {}
+    for t, nn, a in zip(tri, n, area):
+        axis = int(np.argmax(np.abs(nn)))
+        if a < 1e-10 or abs(nn[axis]) < 0.999:
+            continue
+        key = (axis, int(np.sign(nn[axis])), round(float(t[0][axis]), 4))
+        out.setdefault(key, []).append(np.delete(t, axis, axis=1))
+    return out
+
+
+def _coplanar_overlap(a: dict, b: dict) -> float:
+    """m² of same-facing faces of two parts lying in the same plane over each other (what z-fights)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    total = 0.0
+    for key in set(a) & set(b):
+        pa = unary_union([Polygon(t) for t in a[key] if Polygon(t).area > 0])
+        pb = unary_union([Polygon(t) for t in b[key] if Polygon(t).area > 0])
+        total += pa.intersection(pb).area
+    return total
+
+
+def geometry_between(glb: bytes, doc_in: dict[str, Any]) -> dict[str, Any]:
+    """Real-geometry checks between parts and on each part's UVs: {errors, warnings, metrics}."""
+    doc, binary = read_glb(glb)
+    views = _views(doc, binary)
+    linked = _linked(doc)
+    comps = {c["id"]: c for c in doc_in.get("components") or []}
+    parts = []
+    for i, node in _parts(doc):
+        if i not in linked:
+            continue
+        pid = node["extras"]["partId"]
+        pos, idx, uv = _triangles(doc, views, node)
+        parts.append({"id": pid, "name": node.get("name") or pid, "pos": pos, "idx": idx, "uv": uv, "lo": pos.min(0), "hi": pos.max(0),
+                      "generated": (comps.get(pid) or {}).get("generation") == "meshy", "kind": (comps.get(pid) or {}).get("kind")})
+    errors, warnings = [], []
+    metrics: dict[str, Any] = {"intersections": [], "zFighting": [], "uv": {}}
+    solids = {p["id"]: _manifold(p["pos"], p["idx"]) for p in parts}
+    planes = {p["id"]: _planes(p["pos"], p["idx"]) for p in parts}
+    for n, a in enumerate(parts):
+        # a frame is a frame: its opening is really there
+        if a["kind"] == "door_frame" and solids[a["id"]] is not None:
+            fill = solids[a["id"]].volume() / max(float(np.prod(a["hi"] - a["lo"])), 1e-12)
+            if fill > FRAME_FILL and any((c.get("assembly") == comps.get(a["id"], {}).get("assembly")) and c.get("kind") in ("mirror", "glass") for c in comps.values()):
+                errors.append(f"{a['name']}: is a filled board, not a frame around its pane.")
+        for b in parts[n + 1:]:
+            if np.any(a["hi"] < b["lo"] - 1e-4) or np.any(b["hi"] < a["lo"] - 1e-4):
+                continue
+            sa, sb = solids[a["id"]], solids[b["id"]]
+            if sa is not None and sb is not None:
+                vol = (sa ^ sb).volume() * 1e6
+                if vol > INTERSECTION_CM3:
+                    metrics["intersections"].append({"a": a["id"], "b": b["id"], "cm3": round(vol, 1)})
+                    (warnings if a["generated"] or b["generated"] else errors).append(f"{a['name']} and {b['name']} pass through each other ({vol:.0f} cm³).")
+            area = _coplanar_overlap(planes[a["id"]], planes[b["id"]]) * 1e4
+            if area > COPLANAR_CM2:
+                metrics["zFighting"].append({"a": a["id"], "b": b["id"], "cm2": round(area, 1)})
+                errors.append(f"{a['name']} and {b['name']} have {area:.0f} cm² of faces in the same place (they flicker).")
+    for p in parts:  # UVs: present, finite, not degenerate, not stretched
+        if p["uv"] is None or p["generated"]:
+            continue
+        tri = p["pos"][p["idx"].reshape(-1, 3)]
+        uvt = p["uv"][p["idx"].reshape(-1, 3)]
+        area3 = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        areauv = 0.5 * np.abs((uvt[:, 1, 0] - uvt[:, 0, 0]) * (uvt[:, 2, 1] - uvt[:, 0, 1]) - (uvt[:, 2, 0] - uvt[:, 0, 0]) * (uvt[:, 1, 1] - uvt[:, 0, 1]))
+        real = area3 > 1e-8
+        degenerate = int(np.sum(real & (areauv < 1e-12)))
+        density = areauv[real] / area3[real]
+        stretch = float(density.max() / max(density.min(), 1e-12)) if density.size and density.min() > 0 else float("inf") if density.size else 1.0
+        metrics["uv"][p["id"]] = {"degenerate": degenerate, "stretch": round(min(stretch, 1e6), 2)}
+        if not np.all(np.isfinite(p["uv"])):
+            errors.append(f"{p['name']}: has invalid texture coordinates.")
+        elif degenerate:
+            errors.append(f"{p['name']}: {degenerate} faces have no texture area (the texture collapses to a line there).")
+        elif stretch > UV_STRETCH:
+            warnings.append(f"{p['name']}: its texture is stretched ({stretch:.1f}× between faces).")
+    return {"errors": errors, "warnings": warnings, "metrics": metrics}
+
+
+def verdict(doc_in: dict[str, Any]) -> dict[str, Any]:
+    """The model's status: valid, valid_with_warnings, needs_confirmation (something only the vendor can settle: a
+    movement the photo does not show, a material that fell back), needs_repair (critical errors remain), failed."""
+    v = doc_in.get("validation") or {}
+    confirm = []
+    for label in (doc_in.get("animation") or {}).get("uncertain") or []:
+        confirm.append(f"How {label} moves is uncertain in the photo: confirm or change it.")
+    for f in (doc_in.get("hybrid") or {}).get("materialFallbacks") or []:
+        confirm.append(f"{f['component']}: its material could not be sampled cleanly ({f['reason']}); a plain colour was used.")
+    for p in doc_in.get("componentFailures") or []:
+        confirm.append(f"{p['name']} was not generated: regenerate it or leave it out.")
+    if not doc_in.get("components"):
+        status = "failed"
+    elif v.get("errors"):
+        status = "needs_repair"
+    elif confirm:
+        status = "needs_confirmation"
+    elif [w for w in v.get("warnings") or [] if not w.startswith("Estimated, not seen")]:
+        status = "valid_with_warnings"
+    else:
+        status = "valid"
+    return {**v, "status": status, "confirm": confirm, "publishable": status in ("valid", "valid_with_warnings")}

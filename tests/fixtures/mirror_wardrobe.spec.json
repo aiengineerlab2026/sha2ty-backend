@@ -1,0 +1,949 @@
+{
+ "version": "furniture-spec-v3",
+ "details": {
+  "object_type": "Two-door wardrobe with one mirrored door",
+  "matches_category": true,
+  "category": "wardrobe",
+  "name": "Cream Panelled Mirrored Wardrobe",
+  "description": "A cream wardrobe with a two-panel door and a full-length mirrored door in a matching frame. Dark wood-toned sides, a slim projecting top and a low plinth contrast with the lightly distressed fronts.",
+  "bbox": [
+   0.157,
+   0.188,
+   0.852,
+   0.839
+  ],
+  "orientation": "three_quarter",
+  "proportions": [
+   1.0,
+   0.295,
+   0.977
+  ],
+  "width_m": 2.2,
+  "depth_m": 0.65,
+  "height_m": 2.15,
+  "dimension_source": "inferred",
+  "materials": [
+   "Cream-finished wood or wood-based panels",
+   "Dark wood-finished panels",
+   "Mirror glass"
+  ],
+  "colors": [
+   "Warm cream",
+   "Dark brown",
+   "Silver mirror"
+  ],
+  "components": [
+   {
+    "name": "Cabinet carcass assembly",
+    "bbox": null,
+    "material": "Wood or wood-based cabinet panels",
+    "color": "#594632",
+    "confidence": 0.95
+   },
+   {
+    "name": "Right side panel",
+    "bbox": null,
+    "material": "Dark wood-finished cabinet panel; substrate uncertain",
+    "color": "#58432F",
+    "confidence": 0.83
+   },
+   {
+    "name": "Left side panel",
+    "bbox": null,
+    "material": "Wood or wood-based cabinet panel; finish unconfirmed",
+    "color": null,
+    "confidence": 0.65
+   },
+   {
+    "name": "Projecting dark top panel",
+    "bbox": null,
+    "material": "Dark wood-finished panel",
+    "color": "#4C3929",
+    "confidence": 0.88
+   },
+   {
+    "name": "Internal base panel",
+    "bbox": null,
+    "material": "Wood or wood-based cabinet panel",
+    "color": null,
+    "confidence": 0.64
+   },
+   {
+    "name": "Rear enclosure panel",
+    "bbox": null,
+    "material": "Wood-based backing panel; construction unconfirmed",
+    "color": null,
+    "confidence": 0.57
+   },
+   {
+    "name": "Dark front plinth",
+    "bbox": null,
+    "material": "Dark wood-finished board",
+    "color": "#4E3929",
+    "confidence": 0.89
+   },
+   {
+    "name": "Left cream panelled door",
+    "bbox": null,
+    "material": "Cream-painted wood or wood-based panel",
+    "color": "#D5D1BE",
+    "confidence": 0.94
+   },
+   {
+    "name": "Right mirrored door assembly",
+    "bbox": null,
+    "material": "Cream-finished frame and mirror glass",
+    "color": "#D5D1BE",
+    "confidence": 0.96
+   },
+   {
+    "name": "Cream mirror door frame",
+    "bbox": null,
+    "material": "Cream-painted wood or wood-based frame",
+    "color": "#D5D1BE",
+    "confidence": 0.95
+   },
+   {
+    "name": "Full-length mirror pane",
+    "bbox": null,
+    "material": "Mirror glass",
+    "color": "#C0C4C2",
+    "confidence": 0.99
+   }
+  ],
+  "hidden": "The interior, rear, underside and left outer side are concealed. Door tracks, hinges and other operating hardware are not clearly visible.",
+  "confidence": 0.9,
+  "warnings": [
+   "Dimensions are approximate estimates, not measured or annotated sizes.",
+   "The wood species and panel substrate cannot be established from the photograph.",
+   "The doors appear consistent with sliding fronts, but neither tracks nor hinges are clearly visible; their mechanism remains uncertain.",
+   "No separate handles are clearly visible.",
+   "The bed, plant and curtains are mirror reflections, not objects supplied with or placed inside the wardrobe.",
+   "Hidden construction and suggested interior fittings require verification before fabrication."
+  ],
+  "model": "gpt-6-astra"
+ },
+ "analysis": {
+  "objectType": "wardrobe",
+  "frontQuad": [
+   [
+    0.17,
+    0.226
+   ],
+   [
+    0.812,
+    0.197
+   ],
+   [
+    0.818,
+    0.838
+   ],
+   [
+    0.172,
+    0.795
+   ]
+  ],
+  "viewYaw": 8.0,
+  "exclusions": [
+   {
+    "kind": "reflection",
+    "quad": [
+     [
+      0.503,
+      0.247
+     ],
+     [
+      0.775,
+      0.237
+     ],
+     [
+      0.775,
+      0.765
+     ],
+     [
+      0.503,
+      0.747
+     ]
+    ]
+   }
+  ],
+  "summary": "A rectangular cabinet on a dark plinth, with a shallow projecting top, one cream panelled door and one cream-framed mirrored door.",
+  "components": [
+   {
+    "id": "body",
+    "name": "Cabinet carcass assembly",
+    "nameAr": "",
+    "shape": "Rectangular cabinet assembly",
+    "position": "main structure",
+    "box": [
+     0.023,
+     0.035,
+     0.99,
+     0.97
+    ],
+    "dimensions": {
+     "width": 0.97,
+     "height": 0.95,
+     "depth": 0.96
+    },
+    "color": "#594632",
+    "material": "Wood or wood-based cabinet panels",
+    "texture": "Subtle wood grain",
+    "role": "structural",
+    "visibility": "visible",
+    "materialClass": "other",
+    "finish": "satin",
+    "confidence": 0.95,
+    "separateMesh": false,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "carcass",
+    "assembly": null,
+    "logical": true,
+    "geometry": "panel",
+    "quad": null,
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Stationary cabinet structure."
+    }
+   },
+   {
+    "id": "side_right",
+    "name": "Right side panel",
+    "nameAr": "",
+    "shape": "Tall rectangular panel",
+    "position": "right side",
+    "box": [
+     0.938,
+     0.029,
+     0.994,
+     0.965
+    ],
+    "dimensions": {
+     "width": 0.012,
+     "height": 0.94,
+     "depth": 0.94
+    },
+    "color": "#58432F",
+    "material": "Dark wood-finished cabinet panel; substrate uncertain",
+    "texture": "Subtle vertical wood grain",
+    "role": "structural",
+    "visibility": "visible",
+    "materialClass": "wood_veneer",
+    "finish": "satin",
+    "confidence": 0.83,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "side_panel",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": null,
+    "sideQuad": [
+     [
+      0.81,
+      0.208
+     ],
+     [
+      0.846,
+      0.204
+     ],
+     [
+      0.846,
+      0.807
+     ],
+     [
+      0.81,
+      0.821
+     ]
+    ],
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Fixed side of the cabinet."
+    }
+   },
+   {
+    "id": "side_left",
+    "name": "Left side panel",
+    "nameAr": "",
+    "shape": "Tall rectangular panel",
+    "position": "left side, concealed",
+    "box": null,
+    "dimensions": {
+     "width": 0.012,
+     "height": 0.94,
+     "depth": 0.94
+    },
+    "color": null,
+    "material": "Wood or wood-based cabinet panel; finish unconfirmed",
+    "texture": "Not visible",
+    "role": "structural",
+    "visibility": "inferred",
+    "materialClass": "other",
+    "finish": "unknown",
+    "confidence": 0.65,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "side_panel",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": null,
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Structurally necessary stationary cabinet side."
+    }
+   },
+   {
+    "id": "top_panel",
+    "name": "Projecting dark top panel",
+    "nameAr": "",
+    "shape": "Shallow rectangular slab with a projecting edge",
+    "position": "top",
+    "box": [
+     0.0,
+     0.0,
+     1.0,
+     0.071
+    ],
+    "dimensions": {
+     "width": 1.0,
+     "height": 0.014,
+     "depth": 1.0
+    },
+    "color": "#4C3929",
+    "material": "Dark wood-finished panel",
+    "texture": "Fine wood grain",
+    "role": "structural",
+    "visibility": "visible",
+    "materialClass": "wood_veneer",
+    "finish": "satin",
+    "confidence": 0.88,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "top_panel",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": [
+     [
+      0.158,
+      0.224
+     ],
+     [
+      0.813,
+      0.191
+     ],
+     [
+      0.813,
+      0.201
+     ],
+     [
+      0.158,
+      0.233
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "above",
+      "target": "door_left"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Fixed cabinet top."
+    }
+   },
+   {
+    "id": "base_panel",
+    "name": "Internal base panel",
+    "nameAr": "",
+    "shape": "Horizontal rectangular panel",
+    "position": "bottom of carcass, concealed behind fronts",
+    "box": null,
+    "dimensions": {
+     "width": 0.94,
+     "height": 0.012,
+     "depth": 0.9
+    },
+    "color": null,
+    "material": "Wood or wood-based cabinet panel",
+    "texture": "Not visible",
+    "role": "structural",
+    "visibility": "inferred",
+    "materialClass": "other",
+    "finish": "unknown",
+    "confidence": 0.64,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "base_panel",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": null,
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "above",
+      "target": "plinth_front"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Stationary structural base."
+    }
+   },
+   {
+    "id": "back_panel",
+    "name": "Rear enclosure panel",
+    "nameAr": "",
+    "shape": "Thin rectangular panel",
+    "position": "rear, concealed",
+    "box": null,
+    "dimensions": {
+     "width": 0.95,
+     "height": 0.94,
+     "depth": null
+    },
+    "color": null,
+    "material": "Wood-based backing panel; construction unconfirmed",
+    "texture": "Not visible",
+    "role": "structural",
+    "visibility": "inferred",
+    "materialClass": "other",
+    "finish": "unknown",
+    "confidence": 0.57,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "back_panel",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": null,
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "behind",
+      "target": "door_left"
+     },
+     {
+      "type": "behind",
+      "target": "door_right"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Inferred fixed rear enclosure."
+    }
+   },
+   {
+    "id": "plinth_front",
+    "name": "Dark front plinth",
+    "nameAr": "",
+    "shape": "Long low rectangular board",
+    "position": "bottom front",
+    "box": [
+     0.022,
+     0.892,
+     0.952,
+     0.998
+    ],
+    "dimensions": {
+     "width": 0.97,
+     "height": 0.043,
+     "depth": null
+    },
+    "color": "#4E3929",
+    "material": "Dark wood-finished board",
+    "texture": "Subtle wood grain",
+    "role": "structural",
+    "visibility": "visible",
+    "materialClass": "wood_veneer",
+    "finish": "satin",
+    "confidence": 0.89,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "plinth",
+    "assembly": "body",
+    "logical": false,
+    "geometry": "panel",
+    "quad": [
+     [
+      0.172,
+      0.769
+     ],
+     [
+      0.818,
+      0.806
+     ],
+     [
+      0.818,
+      0.838
+     ],
+     [
+      0.172,
+      0.795
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "below",
+      "target": "door_left"
+     },
+     {
+      "type": "below",
+      "target": "door_right"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Fixed lower cabinet support and facing."
+    }
+   },
+   {
+    "id": "door_left",
+    "name": "Left cream panelled door",
+    "nameAr": "",
+    "shape": "Tall rectangular door with two unequal recessed fields",
+    "position": "front left",
+    "box": [
+     0.026,
+     0.045,
+     0.452,
+     0.917
+    ],
+    "dimensions": {
+     "width": 0.49,
+     "height": 0.9,
+     "depth": 0.045
+    },
+    "color": "#D5D1BE",
+    "material": "Cream-painted wood or wood-based panel",
+    "texture": "Lightly distressed finish with visible vertical grain",
+    "role": "functional",
+    "visibility": "visible",
+    "materialClass": "painted_wood",
+    "finish": "matte",
+    "confidence": 0.94,
+    "separateMesh": true,
+    "decoration": "recessed_panel",
+    "complexity": "regular",
+    "kind": "sliding_door",
+    "assembly": null,
+    "logical": false,
+    "geometry": "panel",
+    "quad": [
+     [
+      0.175,
+      0.232
+     ],
+     [
+      0.469,
+      0.217
+     ],
+     [
+      0.469,
+      0.785
+     ],
+     [
+      0.175,
+      0.768
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [
+     {
+      "rect": [
+       0.07,
+       0.06,
+       0.93,
+       0.59
+      ],
+      "profile": "raised",
+      "border": 0.035
+     },
+     {
+      "rect": [
+       0.07,
+       0.63,
+       0.93,
+       0.95
+      ],
+      "profile": "raised",
+      "border": 0.035
+     }
+    ],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "left_of",
+      "target": "door_right"
+     }
+    ],
+    "motion": {
+     "type": "slide",
+     "hinge": null,
+     "direction": "right",
+     "limit": null,
+     "travel": null,
+     "revealsInterior": true,
+     "confidence": 0.33,
+     "reason": "Broad adjacent fronts and the central stile suggest sliding doors, but tracks, hinges and handles are not resolved."
+    }
+   },
+   {
+    "id": "door_right",
+    "name": "Right mirrored door assembly",
+    "nameAr": "",
+    "shape": "Tall rectangular framed mirror assembly",
+    "position": "front right",
+    "box": [
+     0.453,
+     0.029,
+     0.942,
+     0.951
+    ],
+    "dimensions": {
+     "width": 0.5,
+     "height": 0.92,
+     "depth": 0.045
+    },
+    "color": "#D5D1BE",
+    "material": "Cream-finished frame and mirror glass",
+    "texture": "Distressed frame surrounding a smooth reflective pane",
+    "role": "functional",
+    "visibility": "visible",
+    "materialClass": "other",
+    "finish": "mixed matte and reflective",
+    "confidence": 0.96,
+    "separateMesh": false,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "sliding_door",
+    "assembly": null,
+    "logical": true,
+    "geometry": "frame",
+    "quad": [
+     [
+      0.472,
+      0.216
+     ],
+     [
+      0.811,
+      0.207
+     ],
+     [
+      0.811,
+      0.807
+     ],
+     [
+      0.472,
+      0.785
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "right_of",
+      "target": "door_left"
+     }
+    ],
+    "motion": {
+     "type": "slide",
+     "hinge": null,
+     "direction": "left",
+     "limit": null,
+     "travel": null,
+     "revealsInterior": true,
+     "confidence": 0.33,
+     "reason": "The wide framed front appears compatible with a sliding arrangement; no definite track or hinge is visible."
+    }
+   },
+   {
+    "id": "door_right_frame",
+    "name": "Cream mirror door frame",
+    "nameAr": "",
+    "shape": "Rectangular perimeter frame with a narrow inner lip",
+    "position": "around the right door mirror",
+    "box": [
+     0.453,
+     0.029,
+     0.942,
+     0.951
+    ],
+    "dimensions": {
+     "width": 0.5,
+     "height": 0.92,
+     "depth": 0.045
+    },
+    "color": "#D5D1BE",
+    "material": "Cream-painted wood or wood-based frame",
+    "texture": "Lightly distressed vertical grain",
+    "role": "structural",
+    "visibility": "visible",
+    "materialClass": "painted_wood",
+    "finish": "matte",
+    "confidence": 0.95,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "door_frame",
+    "assembly": "door_right",
+    "logical": false,
+    "geometry": "frame",
+    "quad": [
+     [
+      0.472,
+      0.216
+     ],
+     [
+      0.811,
+      0.207
+     ],
+     [
+      0.811,
+      0.807
+     ],
+     [
+      0.472,
+      0.785
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [
+     {
+      "rect": [
+       0.075,
+       0.045,
+       0.925,
+       0.95
+      ],
+      "profile": "raised",
+      "border": 0.018
+     }
+    ],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "door_right"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "No independent movement; moves only with its parent door assembly."
+    }
+   },
+   {
+    "id": "door_right_mirror",
+    "name": "Full-length mirror pane",
+    "nameAr": "",
+    "shape": "Tall rectangular pane",
+    "position": "inside the right door frame",
+    "box": [
+     0.498,
+     0.075,
+     0.89,
+     0.887
+    ],
+    "dimensions": {
+     "width": 0.405,
+     "height": 0.81,
+     "depth": 0.008
+    },
+    "color": "#C0C4C2",
+    "material": "Mirror glass",
+    "texture": "Smooth reflective surface",
+    "role": "functional",
+    "visibility": "visible",
+    "materialClass": "mirror",
+    "finish": "polished",
+    "confidence": 0.99,
+    "separateMesh": true,
+    "decoration": "none",
+    "complexity": "regular",
+    "kind": "mirror",
+    "assembly": "door_right",
+    "logical": false,
+    "geometry": "pane",
+    "quad": [
+     [
+      0.503,
+      0.247
+     ],
+     [
+      0.775,
+      0.237
+     ],
+     [
+      0.775,
+      0.765
+     ],
+     [
+      0.503,
+      0.747
+     ]
+    ],
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "inside",
+      "target": "door_right_frame"
+     },
+     {
+      "type": "attached_to",
+      "target": "door_right"
+     }
+    ],
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "direction": null,
+     "limit": null,
+     "travel": null,
+     "revealsInterior": false,
+     "confidence": 1.0,
+     "reason": "Fixed into the door frame; no independent movement."
+    }
+   }
+  ],
+  "movable": true,
+  "bodyId": "body",
+  "interior": {
+   "hasInterior": true,
+   "confidence": 0.25,
+   "items": [
+    {
+     "kind": "shelf",
+     "count": 1,
+     "behind": [
+      "door_left",
+      "door_right"
+     ]
+    },
+    {
+     "kind": "rail",
+     "count": 1,
+     "behind": [
+      "door_left",
+      "door_right"
+     ]
+    }
+   ]
+  }
+ },
+ "loose_objects": [],
+ "design_features": [
+  "Two broad full-height fronts",
+  "Cream left door with a tall upper recessed panel and a shorter lower recessed pa",
+  "Rectangular raised trim around both left-door panels",
+  "Full-length mirror within a broad cream perimeter frame",
+  "Lightly distressed cream finish with visible grain",
+  "Dark brown right side contrasting with the light fronts",
+  "Thin projecting dark top cap",
+  "Low dark plinth without visible individual legs",
+  "No visible projecting handles"
+ ]
+}

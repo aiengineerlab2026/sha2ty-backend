@@ -88,6 +88,46 @@ class Interior(BaseModel):
     items: list[InteriorItem] = []
 
 
+KINDS = ("carcass", "side_panel", "top_panel", "crown_trim", "base_panel", "plinth", "back_panel", "shelf", "divider", "door", "sliding_door",
+         "drawer_front", "fixed_panel", "door_frame", "mirror", "glass", "moulding", "handle", "knob", "leg", "rail", "headboard", "footboard",
+         "tabletop", "seat", "backrest", "armrest", "cushion", "other")
+GEOMETRIES = ("panel", "frame", "pane", "moulding", "trim", "turned", "profile", "organic")
+
+
+def _quad(v: Any) -> list[list[float]] | None:
+    """Four [x, y] corners (image fractions, 0..1), top-left, top-right, bottom-right, bottom-left; None if unusable."""
+    try:
+        pts = [[min(max(float(p[0]), 0.0), 1.0), min(max(float(p[1]), 0.0), 1.0)] for p in v]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if len(pts) != 4:
+        return None
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return pts if max(xs) - min(xs) > 0.003 and max(ys) - min(ys) > 0.003 else None
+
+
+class Moulding(BaseModel):
+    """A rectangular moulding (a frame of trim) on a part's front face: its outer rectangle as fractions of that face
+    (0..1, origin top left), its profile, and its border width as a share of the face's shorter side."""
+    rect: list[float]
+    profile: Literal["raised", "recessed"] = "raised"
+    border: float = Field(default=0.04, gt=0, le=0.3)
+
+    @field_validator("rect", mode="before")
+    @classmethod
+    def _rect(cls, v: Any) -> list[float]:
+        x0, y0, x1, y1 = (min(max(float(n), 0.0), 1.0) for n in v)
+        return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+
+    @field_validator("border", mode="before")
+    @classmethod
+    def _border(cls, v: Any) -> float:
+        try:
+            return min(max(float(v), 0.005), 0.3)
+        except (TypeError, ValueError):
+            return 0.04
+
+
 class Component(BaseModel):
     id: str
     name: str = Field(min_length=1, max_length=60)
@@ -110,6 +150,16 @@ class Component(BaseModel):
     # texture; "complex" (organic carving, sculpted or upholstered form) cannot be built from boxes and is reported.
     decoration: Literal["none", "fluted", "grooved", "raised_panel", "recessed_panel", "arched", "carved", "upholstered", "other"] = "none"
     complexity: Literal["regular", "complex"] = "regular"
+    # The assembly reading (services/assembly.py): what the part physically is, the logical assembly it belongs to (a
+    # mirrored door holds its frame and its mirror), whether it is only that logical grouping (never a solid of its
+    # own), its geometry, the corners of its visible front face in the IMAGE, and the mouldings on that face.
+    kind: str = "other"
+    assembly: str | None = None
+    logical: bool = False
+    geometry: str = "panel"
+    quad: list[list[float]] | None = None
+    sideQuad: list[list[float]] | None = None
+    mouldings: list[Moulding] = []
     relations: list[Relation] = []
     motion: Motion = Motion()
 
@@ -117,6 +167,40 @@ class Component(BaseModel):
     @classmethod
     def _motion(cls, v: Any) -> Any:
         return v if isinstance(v, dict) else {}
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _kind(cls, v: Any) -> str:
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in KINDS else "other"
+
+    @field_validator("geometry", mode="before")
+    @classmethod
+    def _geometry(cls, v: Any) -> str:
+        v = str(v or "").strip().lower()
+        return v if v in GEOMETRIES else "panel"
+
+    @field_validator("quad", "sideQuad", mode="before")
+    @classmethod
+    def _quads(cls, v: Any) -> list[list[float]] | None:
+        return _quad(v) if v else None
+
+    @field_validator("mouldings", mode="before")
+    @classmethod
+    def _mouldings(cls, v: Any) -> list[Any]:
+        out = []
+        for m in v or []:
+            try:
+                out.append(Moulding.model_validate(m))
+            except (ValueError, TypeError):
+                continue
+        return out[:12]
+
+    @field_validator("assembly", mode="before")
+    @classmethod
+    def _assembly(cls, v: Any) -> str | None:
+        v = re.sub(r"[^a-z0-9]+", "_", str(v or "").lower()).strip("_")[:40]
+        return v or None
 
     @field_validator("materialClass", mode="before")
     @classmethod
@@ -157,13 +241,57 @@ class Component(BaseModel):
         return [x0, y0, x1, y1] if x1 - x0 > 0.005 and y1 - y0 > 0.005 else None
 
 
+class Exclusion(BaseModel):
+    """A photographed region that is NOT furniture material: a reflection in a mirror or glass, a cast shadow, the
+    background, an object standing in front. Never sampled for colours or textures."""
+    kind: Literal["reflection", "shadow", "background", "object", "highlight"] = "background"
+    quad: list[list[float]]
+
+    @field_validator("quad", mode="before")
+    @classmethod
+    def _q(cls, v: Any) -> list[list[float]]:
+        q = _quad(v)
+        if q is None:
+            raise ValueError("not a quadrilateral")
+        return q
+
+
 class MeshAnalysis(BaseModel):
     objectType: str = Field(min_length=1, max_length=80)
+    # The object's whole front face in the image (four corners, image fractions) and the camera's side angle in
+    # degrees (+ when the object's right side shows): the perspective the assembly corrects for.
+    frontQuad: list[list[float]] | None = None
+    viewYaw: float = 0.0
+    exclusions: list[Exclusion] = []
     summary: str = ""
     components: list[Component] = Field(min_length=1)
     movable: bool = False  # the object has parts a person opens, slides or folds
     bodyId: str = ""  # the main structural body (the stationary part everything is attached to)
     interior: Interior = Interior()
+
+    @field_validator("frontQuad", mode="before")
+    @classmethod
+    def _front(cls, v: Any) -> list[list[float]] | None:
+        return _quad(v) if v else None
+
+    @field_validator("viewYaw", mode="before")
+    @classmethod
+    def _yaw(cls, v: Any) -> float:
+        try:
+            return min(max(float(v), -80.0), 80.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @field_validator("exclusions", mode="before")
+    @classmethod
+    def _exclusions(cls, v: Any) -> list[Any]:
+        out = []
+        for e in v or []:
+            try:
+                out.append(Exclusion.model_validate(e))
+            except (ValueError, TypeError):
+                continue
+        return out[:20]
 
     @field_validator("interior", mode="before")
     @classmethod
@@ -199,6 +327,20 @@ _COMPONENT_SCHEMA = {
         "confidence": {"type": "number", "description": "0..1: how sure you are of this part (its presence, box and size)"},
         "visibility": {"type": "string", "enum": ["visible", "inferred"]},
         "separateMesh": {"type": "boolean", "description": "true for a physical part a person could recolour or move on its own"},
+        "kind": {"type": "string", "enum": list(KINDS), "description": "What the part physically is"},
+        "assembly": {"type": ["string", "null"], "description": "The id of the logical assembly it belongs to (a mirror and its frame belong to their door)"},
+        "logical": {"type": "boolean", "description": "true for a grouping only (a mirrored door made of a frame and a mirror): never a solid of its own"},
+        "geometry": {"type": "string", "enum": list(GEOMETRIES), "description": "panel (flat board), frame (a border around an opening), pane (glass / mirror), moulding, trim, turned, profile, organic"},
+        "quad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}},
+                 "description": "Its visible FRONT face's four corners in the IMAGE (fractions of the image, origin top left): top-left, top-right, bottom-right, bottom-left; null if its front is not visible"},
+        "sideQuad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}}, "description": "A side panel's visible outer face, the same way; null otherwise"},
+        "mouldings": {"type": "array", "items": {"type": "object", "properties": {
+            "rect": {"type": "array", "items": {"type": "number"}, "description": "outer rectangle as fractions of THIS part's front face, x0 y0 x1 y1"},
+            "profile": {"type": "string", "enum": ["raised", "recessed"]},
+            "border": {"type": "number", "description": "the moulding's width as a share of the face's shorter side (~0.03)"}},
+            "required": ["rect", "profile", "border"]}, "description": "Every rectangular moulding on its front face, one entry each"},
+        "decoration": {"type": "string", "enum": ["none", "fluted", "grooved", "raised_panel", "recessed_panel", "arched", "carved", "upholstered", "other"]},
+        "complexity": {"type": "string", "enum": ["regular", "complex"]},
         "motion": {
             "type": "object",
             "properties": {
@@ -236,6 +378,13 @@ SCHEMA = {
         "components": {"type": "array", "items": _COMPONENT_SCHEMA},
         "movable": {"type": "boolean", "description": "Does this object have parts a person opens, slides, folds or lifts?"},
         "bodyId": {"type": "string", "description": "The id of the main structural body (stationary; the others attach to it)"},
+        "frontQuad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}},
+                      "description": "The whole object's FRONT face corners in the image (fractions): top-left, top-right, bottom-right, bottom-left"},
+        "viewYaw": {"type": "number", "description": "Camera angle in degrees: 0 straight on, positive when the object's right side is visible"},
+        "exclusions": {"type": "array", "items": {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["reflection", "shadow", "background", "object", "highlight"]},
+            "quad": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}}, "required": ["kind", "quad"]},
+            "description": "Regions on the furniture that are NOT its material: reflections in mirrors or glass, cast shadows, objects in front"},
         "interior": {
             "type": "object",
             "properties": {

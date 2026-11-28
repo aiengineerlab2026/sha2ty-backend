@@ -188,3 +188,76 @@ def arrays(solid: mf.Manifold, lo, hi) -> tuple[np.ndarray, np.ndarray, np.ndarr
     span = np.maximum(hi - lo, 1e-9)
     uv = np.column_stack([np.clip((pos[:, 0] - lo[0]) / span[0], 0, 1), np.clip(1 - (pos[:, 1] - lo[1]) / span[1], 0, 1)])
     return pos, nrm, uv, np.arange(len(pos))
+
+
+# ---- semantic primitives (services/assembly.py) ----
+
+MOULDING_HEIGHT = 0.006  # a raised moulding stands this proud of its face
+MOULDING_DEPTH = 0.004  # a recessed one is sunk this deep
+TILE = 0.6  # metres one material texture covers (UVs are in real size: no stretching between faces)
+
+
+def frame(lo, hi, opening) -> mf.Manifold:
+    """A frame with a real opening through it (a mirror or glass door's frame): the board minus the opening."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    x0, y0, x1, y1 = opening
+    return box(lo, hi) - box([x0, y0, lo[2] - 1e-3], [x1, y1, hi[2] + 1e-3])
+
+
+def moulding_ring(lo, hi, rect, border: float) -> mf.Manifold:
+    """A rectangular ring on the front face: `rect` (fractions of the face, origin top left), `border` (share of the
+    face's shorter side), MOULDING_HEIGHT thick, sitting on the face (to add) or into it (to cut)."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    s = hi - lo
+    x0, x1 = lo[0] + rect[0] * s[0], lo[0] + rect[2] * s[0]
+    y1, y0 = hi[1] - rect[1] * s[1], hi[1] - rect[3] * s[1]
+    b = max(0.006, border * min(s[0], s[1]))
+    if x1 - x0 <= 2 * b or y1 - y0 <= 2 * b:
+        return mf.Manifold()
+    outer = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    inner = [(x0 + b, y0 + b), (x0 + b, y1 - b), (x1 - b, y1 - b), (x1 - b, y0 + b)]  # clockwise: the hole
+    return mf.Manifold.extrude(mf.CrossSection([outer, inner]), MOULDING_HEIGHT)
+
+
+def with_mouldings(solid: mf.Manifold, lo, hi, mouldings: list[dict[str, Any]]) -> tuple[mf.Manifold, list[dict[str, Any]]]:
+    """Every moulding of the face as geometry: raised ones added on the face, recessed ones cut into it."""
+    made = []
+    front = float(np.asarray(hi, float)[2])
+    for m in mouldings or []:
+        ring = moulding_ring(lo, hi, m["rect"], float(m.get("border") or 0.04))
+        if ring.is_empty():
+            continue
+        if m.get("profile") == "recessed":
+            solid = solid - ring.translate([0, 0, front - MOULDING_DEPTH])
+        else:
+            solid = solid + ring.translate([0, 0, front - 1e-4])
+        made.append({"rect": [round(v, 3) for v in m["rect"]], "profile": m.get("profile") or "raised", "method": "geometry"})
+    return solid, made
+
+
+def face_uv(pos: np.ndarray, nrm: np.ndarray, tile: float = TILE) -> np.ndarray:
+    """UVs by the face each triangle lies on, in real size (metres / tile): front and back from x / y, left and right
+    from z / y, top and bottom from x / z; each oriented as seen from outside, so nothing is mirrored or stretched."""
+    a = np.abs(nrm)
+    major = np.argmax(a, axis=1)
+    sign = np.sign(nrm[np.arange(len(nrm)), major])
+    u, v = np.empty(len(pos)), np.empty(len(pos))
+    z, y, x = pos[:, 2], pos[:, 1], pos[:, 0]
+    fb, lr, tb = major == 2, major == 0, major == 1
+    u[fb], v[fb] = np.where(sign[fb] > 0, x[fb], -x[fb]), y[fb]  # back faces read from behind
+    u[lr], v[lr] = np.where(sign[lr] > 0, -z[lr], z[lr]), y[lr]
+    u[tb], v[tb] = x[tb], np.where(sign[tb] > 0, -z[tb], z[tb])
+    return np.column_stack([u / tile, v / tile])
+
+
+def mesh_arrays(solid: mf.Manifold, tile: float = TILE) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Flat-shaded triangles with face-specific real-size UVs: positions, normals, UVs, indices."""
+    mesh = solid.to_mesh()
+    verts = np.asarray(mesh.vert_properties, float)[:, :3]
+    tris = np.asarray(mesh.tri_verts, np.int64)
+    pos = verts[tris].reshape(-1, 3)
+    a, b, c = pos[0::3], pos[1::3], pos[2::3]
+    n = np.cross(b - a, c - a)
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    nrm = np.repeat(n, 3, axis=0)
+    return pos, nrm, face_uv(pos, nrm, tile), np.arange(len(pos))

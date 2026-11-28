@@ -125,7 +125,7 @@ def test_broken_geometry_is_found_and_repaired_without_changing_the_design(built
     uv = model_validation._read(d, views, p["attributes"]["TEXCOORD_0"])
     uv[0] = np.nan
     model_validation._write(d, views, p["attributes"]["TEXCOORD_0"], uv)
-    p = prim("Top Panel")  # bent: one corner pushed 1 cm off the board
+    p = prim(next(n["name"] for n in d["nodes"] if (n.get("extras") or {}).get("kind") == "top_panel"))  # bent: one corner pushed 1 cm off the board
     pos = model_validation._read(d, views, p["attributes"]["POSITION"])
     pos[0, 1] += 0.01
     model_validation._write(d, views, p["attributes"]["POSITION"], pos)
@@ -136,7 +136,7 @@ def test_broken_geometry_is_found_and_repaired_without_changing_the_design(built
     doc["components"].append({**next(c for c in doc["components"] if c["name"] == "Door 4"), "id": "door_4_copy"})
     fixed, report = model_validation.validate_and_repair(write_glb(d, views), doc)
     repairs = " ".join(report["validation"]["repairs"])
-    for what in ("Door 1: was inside out", "Door 2: had invalid normals", "Door 3: had invalid texture", "Top Panel: was 8.0 mm off flat; rebuilt", "copy was removed"):
+    for what in ("Door 1: was inside out", "Door 2: had invalid normals", "Door 3: had invalid texture", "was 8.0 mm off flat; rebuilt", "copy was removed"):
         assert what in repairs, what
     assert report["validation"]["ok"], report["validation"]["errors"]
     assert "door_4_copy" not in nodes_by_part(fixed) and len(report["components"]) == 14

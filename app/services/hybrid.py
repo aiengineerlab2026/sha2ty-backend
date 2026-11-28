@@ -31,7 +31,7 @@ from typing import Any
 
 import numpy as np
 
-from app.services import animation, carpenter, photo_tools, solids, structural
+from app.services import animation, assembly, carpenter, materials, photo_tools, solids, structural
 from app.services.generation_prompt import furniture_family
 from app.services.glb_size import write_glb
 
@@ -104,54 +104,6 @@ def _rect(obj: list[float], box: list[float], size: tuple[int, int]) -> tuple[in
     return r if r[2] - r[0] >= 4 and r[3] - r[1] >= 4 else None
 
 
-FURNITURE_SHARE_MIN = 0.6  # a part region less furniture than this (a side seen edge-on, the room around it): its colour only
-
-
-def part_texture(img, obj: list[float], box: list[float], mounted: list[list[float]], silhouette: np.ndarray | None = None) -> tuple[bytes | None, list[float]] | None:
-    """(JPEG of the part's region with what is mounted on it painted out, its median colour 0..1) or None. Pixels outside
-    the furniture's silhouette (the wall behind a thin side, the ceiling over the top) are never used: they are filled
-    from the part's own pixels, and a region that is mostly not furniture gives its colour only (texture None)."""
-    import cv2
-    from PIL import Image
-
-    from app.services import photo_tools
-
-    rect = _rect(obj, box, img.size)
-    if rect is None:
-        return None
-    crop, warped = photo_tools.rectified(np.asarray(img), rect)  # straightened when the photo shows it at an angle
-    crop = crop.copy()
-    h, w = crop.shape[:2]
-    mask = np.zeros((h, w), np.uint8)
-    if silhouette is not None and not warped:
-        outside = silhouette[rect[1]:rect[3], rect[0]:rect[2]] == 0
-        if outside.shape == (h, w) and outside.any():
-            inside = ~outside
-            if inside.mean() < FURNITURE_SHARE_MIN:
-                colour = (np.median(crop[inside].reshape(-1, 3), axis=0) / 255.0).tolist() if inside.any() else None
-                return (None, colour) if colour else None
-            mask[outside] = 255  # filled from the furniture's own pixels below
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    for m in mounted:  # handles, knobs, mounts: fractions of the object box → fractions of this part
-        mx0, my0 = (m[0] - box[0]) / bw, (m[1] - box[1]) / bh
-        mx1, my1 = (m[2] - box[0]) / bw, (m[3] - box[1]) / bh
-        pad_x, pad_y = 0.15 * (mx1 - mx0) + 2 / w, 0.15 * (my1 - my0) + 2 / h
-        x0, y0 = max(0, int((mx0 - pad_x) * w)), max(0, int((my0 - pad_y) * h))
-        x1, y1 = min(w, int((mx1 + pad_x) * w) + 1), min(h, int((my1 + pad_y) * h) + 1)
-        if x1 > x0 and y1 > y0:
-            mask[y0:y1, x0:x1] = 255
-    if mask.any() and mask.mean() < 0.5 * 255:
-        crop = cv2.inpaint(crop, mask, 5, cv2.INPAINT_TELEA)
-    elif mask.mean() >= 0.5 * 255:
-        return None, (np.median(crop[mask == 0].reshape(-1, 3), axis=0) / 255.0).tolist() if (mask == 0).any() else None
-    colour = (np.median(crop.reshape(-1, 3), axis=0) / 255.0).tolist()
-    out = Image.fromarray(crop)
-    out.thumbnail((TEXTURE_MAX, TEXTURE_MAX))
-    buf = io.BytesIO()
-    out.save(buf, "JPEG", quality=88)
-    return buf.getvalue(), colour
-
-
 # ---- geometry ----
 
 
@@ -177,54 +129,16 @@ def box_mesh(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
             quad = [base, base + 2, base + 1, base, base + 3, base + 2]
         idx += quad
     pos, nrm = np.array(pos), np.array(nrm)
-    return pos, nrm, _uv(pos, lo, hi), np.array(idx)
+    return pos, nrm, solids.face_uv(pos, nrm), np.array(idx)
 
 
-def _uv(pos: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
-    span = np.maximum(hi - lo, 1e-9)
-    return np.column_stack([(pos[:, 0] - lo[0]) / span[0], 1 - (pos[:, 1] - lo[1]) / span[1]])
-
-
-def flutes(lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Vertical half-round ribs standing on the front face (+z) of a panel: a fluted front as geometry."""
-    width = hi[0] - lo[0]
-    count = int(width // FLUTE_PITCH)
-    if count < 3:
-        return None
-    r = 0.45 * width / count
-    angles = np.linspace(0, np.pi, 9)  # the front half of the round, left edge to right edge
-    pos, nrm, idx = [], [], []
-    for i in range(count):
-        cx = lo[0] + (i + 0.5) * width / count
-        base = len(pos)
-        for a in angles:
-            n = np.array([-np.cos(a), 0.0, np.sin(a)])
-            for y in (lo[1], hi[1]):
-                pos.append([cx + r * n[0], y, hi[2] + r * n[2]])
-                nrm.append(n)
-        for k in range(len(angles) - 1):
-            a0, a1, b0, b1 = base + 2 * k, base + 2 * k + 1, base + 2 * k + 2, base + 2 * k + 3
-            idx += [a0, b0, b1, a0, b1, a1]
-    p = np.array(pos)
-    return p, np.array(nrm), _uv(p, lo, hi), np.array(idx)
-
-
-def _merge(*meshes):
-    pos, nrm, uv, idx, off = [], [], [], [], 0
-    for m in meshes:
-        if m is None:
-            continue
-        pos.append(m[0]), nrm.append(m[1]), uv.append(m[2]), idx.append(m[3] + off)
-        off += len(m[0])
-    return np.concatenate(pos), np.concatenate(nrm), np.concatenate(uv), np.concatenate(idx)
-
-
-def write(parts: list[dict[str, Any]]) -> bytes:
-    """One node and mesh per part; its texture (the photo region) or colour; partId and how it was made in extras."""
+def write(parts: list[dict[str, Any]], assemblies: list[dict[str, Any]] | None = None) -> bytes:
+    """One node and mesh per physical part (partId in its extras), under its logical assembly's node: an assembly is a
+    parent with no mesh of its own (a mirrored door is its frame and its mirror, never a third solid)."""
     views: list[bytes] = []
     accessors, meshes, nodes, materials, images, textures = [], [], [], [], [], []
 
-    def view(blob: bytes, target: int | None = None) -> int:
+    def view(blob: bytes) -> int:
         views.append(blob)
         return len(views) - 1
 
@@ -238,7 +152,10 @@ def write(parts: list[dict[str, Any]]) -> bytes:
                 acc.update(min=arr.min(0).tolist(), max=arr.max(0).tolist())
             accessors.append(acc)
         accessors.append({"bufferView": view(np.ascontiguousarray(idx, dtype=np.uint32).tobytes()), "componentType": 5125, "count": int(idx.size), "type": "SCALAR"})
-        pbr: dict[str, Any] = {"baseColorFactor": [*part["colour"], part.get("alpha", 1.0)], "metallicFactor": part["metallic"], "roughnessFactor": part["roughness"]}
+        # glTF base-colour factors are LINEAR; the colours here are sRGB (as photographed): converted, or a viewer shows
+        # every plain-colour part washed out. Textures stay sRGB images (the viewer decodes them as such).
+        linear = [srgb_to_linear(c) for c in part["colour"]]
+        pbr: dict[str, Any] = {"baseColorFactor": [*linear, part.get("alpha", 1.0)], "metallicFactor": part["metallic"], "roughnessFactor": part["roughness"]}
         if part.get("texture"):
             images.append({"bufferView": view(part["texture"]), "mimeType": "image/jpeg"})
             textures.append({"source": len(images) - 1, "sampler": 0})
@@ -247,18 +164,32 @@ def write(parts: list[dict[str, Any]]) -> bytes:
         materials.append(material)
         meshes.append({"name": part["name"], "primitives": [{"attributes": {"POSITION": a0, "NORMAL": a0 + 1, "TEXCOORD_0": a0 + 2}, "indices": a0 + 3, "material": len(materials) - 1}]})
         nodes.append({"name": part["name"], "mesh": len(meshes) - 1, "extras": part["extras"]})
+    groups: dict[str, list[int]] = {}
+    for i, part in enumerate(parts):
+        groups.setdefault(part.get("assembly") or "", []).append(i)
+    root_children = list(groups.pop("", []))
+    known = {a["id"]: a for a in assemblies or []}
+    for asm_id, members in groups.items():
+        a = known.get(asm_id, {"id": asm_id, "name": asm_id})
+        nodes.append({"name": a.get("name") or asm_id, "children": members, "extras": {"assemblyId": asm_id, "logical": True, "kind": a.get("kind")}})
+        root_children.append(len(nodes) - 1)
+    nodes.append({"name": "Furniture", "children": root_children})
     doc: dict[str, Any] = {
-        "asset": {"version": "2.0", "generator": "sha2ty hybrid"}, "scene": 0,
-        "scenes": [{"nodes": [len(nodes)]}],
-        "nodes": nodes + [{"name": "Furniture", "children": list(range(len(nodes)))}],
-        "meshes": meshes, "materials": materials, "accessors": accessors, "buffers": [{}],
+        "asset": {"version": "2.0", "generator": "sha2ty hybrid assembly"}, "scene": 0,
+        "scenes": [{"nodes": [len(nodes) - 1]}],
+        "nodes": nodes, "meshes": meshes, "materials": materials, "accessors": accessors, "buffers": [{}],
         "bufferViews": [{} for _ in views],
-        **({"images": images, "textures": textures, "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}]} if images else {}),
+        **({"images": images, "textures": textures, "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]} if images else {}),
     }
     return write_glb(doc, views)
 
 
 # ---- the build ----
+
+
+def srgb_to_linear(c: float) -> float:
+    c = min(max(float(c), 0.0), 1.0)
+    return round(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4, 5)
 
 
 def _finish(spec: dict[str, Any] | None, cls: str) -> tuple[float, float]:
@@ -299,134 +230,154 @@ def with_vendor_size(details: dict[str, Any], width: float | None, height: float
 
 def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, kind: str | None, mode: str = "hybrid",
           size: tuple[float | None, float | None, float | None] = (None, None, None)) -> tuple[bytes | None, dict[str, Any]]:
-    """(the GLB, its part document) or (None, {"reason": why not}) when this photo cannot be rebuilt here. `size`:
-    the vendor's width, height and depth in metres, which win over the photo's estimate."""
+    """(the GLB, its part document) or (None, {"reason": why not}). `size`: the vendor's width, height and depth in
+    metres, which win over the photo's estimate. Physical parts come from the constraint assembly (services/
+    assembly.py), their shapes from the solids engine, their materials from clean samples of the photo."""
     details = with_vendor_size((spec_doc or {}).get("details") or {}, *size)
     analysis = (spec_doc or {}).get("analysis") or {}
     why = unsuitable(analysis)
     if why:
         return None, {"reason": why}
-    _, report = structural.build(details, analysis, category, kind)
-    if not report.get("built"):
-        return None, {"reason": " ".join(report.get("uncertain") or []) or "The structure could not be rebuilt from the photo."}
-    spec_by_id = {c["id"]: c for c in analysis.get("components") or []}
-    obj = details.get("bbox") if isinstance(details.get("bbox"), list) and len(details.get("bbox")) == 4 else [0.0, 0.0, 1.0, 1.0]
-    img = _photo(photo)
-    materials = report.get("materials") or {}
-    # Real positions: carpenter's centimetres from the envelope's low corner → metres, centred on x and z, floor at y 0.
-    raw = report["components"]
-    lows = np.array([[p["positionCm"][k] - p["sizeCm"][d] / 2 for k, d in (("x", "width"), ("y", "height"), ("z", "depth"))] for p in raw]) / 100
-    highs = lows + np.array([[p["sizeCm"]["width"], p["sizeCm"]["height"], p["sizeCm"]["depth"]] for p in raw]) / 100
-    lo_all, hi_all = lows.min(0), highs.max(0)
-    size_m = report.get("sizeM") or {}
-    if details.get("dimension_source") == "vendor" and size_m:
-        # The vendor's measurements are the model's: the parts read from the photo (which stop a little short of the
-        # object's edges) are stretched along each axis to fill them exactly.
-        want = np.array([size_m.get("width") or 0, size_m.get("height") or 0, size_m.get("depth") or 0], float)
-        span = np.maximum(hi_all - lo_all, 1e-9)
-        k = np.where(want > 0, want / span, 1.0)
-        lows, highs = lo_all + (lows - lo_all) * k, lo_all + (highs - lo_all) * k
-        lo_all, hi_all = lows.min(0), highs.max(0)
-    shift = np.array([-(lo_all[0] + hi_all[0]) / 2, -lo_all[1], -(lo_all[2] + hi_all[2]) / 2])
-    built, limits, decorations = [], [], []
-    rgb = np.asarray(img)
-    silhouette = photo_tools.silhouette(rgb, obj)
-    bands = line_bands(spec_by_id, rgb, obj)
-    for p, lo, hi in zip(raw, lows + shift, highs + shift):
-        spec = spec_by_id.get(p.get("specId") or "")
-        if spec is not None and is_complex(spec) and p.get("source") != "inferred":
-            continue  # its shape is generated on its own (pending_components), never a block in its place
-        mspec = materials.get(p.get("specId") or "") or {}
-        cls = str(mspec.get("class") or (spec or {}).get("materialClass") or p.get("materialCategory") or "wood")
-        metallic, rough = _finish(spec, cls)
-        colour = _hex((spec or {}).get("color")) or _hex(mspec.get("color")) or [0.72, 0.58, 0.4]
-        texture = None
-        visible = bool(spec and spec.get("box") and spec.get("visibility") != "inferred" and p.get("source") != "inferred")
-        own = visible and spec is not None and not (_area(spec["box"]) >= 0.64 and p.get("source") == "inferred")
-        if own and cls not in PANE_CLASSES:
-            mounted = [o["box"] for o in spec_by_id.values() if o is not spec and o.get("box") and _inside(o["box"], spec["box"])
-                       and _area(o["box"]) < 0.5 * _area(spec["box"])]
-            got = part_texture(img, obj, spec["box"], mounted, silhouette)
-            if got:
-                texture, colour = got[0], got[1] or colour
-        elif spec is not None and spec.get("box") and cls not in PANE_CLASSES:
-            rect = _rect(obj, spec["box"], img.size)  # an inferred panel of a seen body: the body's own colour
-            if rect:
-                colour = (np.median(np.asarray(img.crop(rect)).reshape(-1, 3), axis=0) / 255.0).tolist()
-        deco = (spec or {}).get("decoration") or "none"
-        if deco in solids.DECORATIONS and (hi - lo).min() < 0.1:
-            rect = _rect(obj, spec["box"], img.size) if spec and spec.get("box") else None
-            band = None
-            if deco in ("grooved", "fluted"):
-                # Lines are built only where the photo shows them: the band of the part (e.g. the lower third of a door)
-                # with a regular line pattern; a matching sibling (the same decoration and size) shares what was seen
-                # on it. None anywhere: the reading said so, but the photo does not; not built.
-                band = bands.get(p.get("specId"))
-            if deco in ("grooved", "fluted") and band is None:
-                mesh = box_mesh(lo, hi)
-                decorations.append({"component": p["id"], "decoration": deco, "method": "not built",
-                                    "reason": "The photo shows no regular lines on this part."})
-            else:
-                part_lo, part_hi = lo.copy(), hi.copy()
-                if band is not None:  # the band's height range (photo rows run top → down)
-                    part_lo[1], part_hi[1] = hi[1] - band["to"] * (hi[1] - lo[1]), hi[1] - band["from"] * (hi[1] - lo[1])
-                solid, made = solids.decorated(lo, hi, deco, band, region=(part_lo, part_hi) if band is not None else None)
-                mesh = solids.arrays(solid, lo, hi)
-                decorations.append({"component": p["id"], **made, **({"band": [round(band["from"], 2), round(band["to"], 2)]} if band else {})})
-        elif spec is not None and any(w in _words(spec) for w in HANDLE_WORDS) and re.search(r"\b(round|rounded|circular|semicircular|disc|knob|cylindrical)\b", f"{_words(spec)} {spec.get('shape') or ''}".lower()):
-            # A round knob or pull: a disc / cylinder standing on its door, its face the photo's size.
-            r = 0.5 * min(hi[0] - lo[0], hi[1] - lo[1])
-            centre = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]]
-            disc = solids.mf.Manifold.cylinder(hi[2] - lo[2], r, r, solids.SEGMENTS).translate(centre)
-            mesh = solids.arrays(disc, lo, hi)
-            decorations.append({"component": p["id"], "decoration": "round", "method": "geometry"})  # shaped: never flattened
-        else:
-            mesh = box_mesh(lo, hi)
-            if deco not in ("none", "upholstered", "carved"):
-                decorations.append({"component": p["id"], "decoration": deco, "method": "not built", "reason": "Not a decoration the geometry engine makes."})
-        estimated = p.get("source") == "inferred"
-        built.append({
-            "name": p["name"], "id": p["id"], "lo": lo, "hi": hi, "mesh": mesh, "texture": texture, "colour": [float(c) for c in colour],
-            "alpha": 0.35 if cls == "glass" else 1.0, "metallic": metallic, "roughness": rough, "spec": spec, "cls": cls, "estimated": estimated,
-            "extras": {"partId": p["id"], "role": p.get("role"), "source": p.get("source"), "generation": "procedural",
-                       **({"specId": p["specId"]} if p.get("specId") else {}), **({"estimated": True} if estimated else {})},
-        })
-    glb = write(built)
+    dims, known, size_notes = structural.size(details)
+    if dims is None:
+        return None, {"reason": " ".join(size_notes) or "The overall size could not be read."}
+    W, H, D = dims
     family = furniture_family(category, kind)
-    pending = pending_components(analysis, details, rgb, obj)
+    plan = assembly.assemble(analysis, details, (W, H, D), family)
+    if len(plan["parts"]) < 2:
+        return None, {"reason": "Too few located parts to assemble the furniture from."}
+    # The carcass parts hang under the reading's own carcass id when it has one (never a second invented carcass).
+    carcass = next((a["id"] for a in plan["assemblies"] if a.get("kind") == "carcass" and a["id"] != "carcass"), None)
+    if carcass:
+        plan["assemblies"] = [a for a in plan["assemblies"] if a["id"] != "carcass"]
+        for p in plan["parts"]:
+            if p.get("assembly") == "carcass":
+                p["assembly"] = carcass
+    spec_by_id = {c["id"]: c for c in analysis.get("components") or []}
+    img = _photo(photo)
+    rgb = np.asarray(img)
+    silhouette = photo_tools.silhouette(rgb, details.get("bbox"))
+    bands = line_bands(spec_by_id, rgb, details.get("bbox") or [0, 0, 1, 1])
+    # A part the photo does not show takes the finish of the visible part of the same structure.
+    visible_carcass = next((p["spec"] for p in plan["parts"] if p.get("assembly") in (carcass, "carcass") and p.get("spec") and not p["estimated"]
+                            and (p["spec"].get("quad") or p["spec"].get("sideQuad") or p["spec"].get("box"))), None)
+    built, decorations, fallbacks = [], [], []
+    for p in plan["parts"]:
+        lo, hi, spec = p["lo"], p["hi"], p.get("spec")
+        source_spec = spec_by_id.get(p.get("material_from") or "") or spec
+        if p["estimated"] or source_spec is None or not (source_spec.get("quad") or source_spec.get("sideQuad") or source_spec.get("box")):
+            source_spec = source_spec if (source_spec or {}).get("color") and not p["estimated"] else (visible_carcass or source_spec or spec_by_id.get(carcass or "", {}))
+        cls = str((source_spec or {}).get("materialClass") or "other")
+        _, rough = _finish(source_spec, cls)
+        mat = materials.extract(rgb, source_spec, analysis, silhouette, rough, details.get("bbox"))
+        if p["kind"] in ("mirror", "glass"):
+            mat = materials.extract(rgb, {"kind": p["kind"]}, analysis, None, rough)
+        if mat["source"] == "reading colour":
+            fallbacks.append({"component": p["id"], "reason": mat.get("reason") or "no clean surface in the photo", "used": "reading colour"})
+        # geometry: the part's semantic shape
+        if p["geometry"] == "frame" and p.get("opening"):
+            solid = solids.frame(lo, hi, p["opening"])
+            decorations.append({"component": p["id"], "decoration": "frame with opening", "method": "geometry"})
+        elif p["geometry"] == "pane":
+            solid = solids.box(lo, hi)
+        elif p["kind"] in ("knob", "handle") and re.search(r"\b(round|rounded|circular|semicircular|disc|knob|cylindrical)\b", f"{_words(spec or {})} {(spec or {}).get('shape') or ''}".lower()):
+            r = 0.5 * min(hi[0] - lo[0], hi[1] - lo[1])
+            solid = solids.mf.Manifold.cylinder(hi[2] - lo[2], r, r, solids.SEGMENTS).translate([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
+            decorations.append({"component": p["id"], "decoration": "round", "method": "geometry"})
+        else:
+            deco = (spec or {}).get("decoration") or "none"
+            band = bands.get((spec or {}).get("id")) if deco in ("fluted", "grooved") else None
+            if deco in ("fluted", "grooved", "recessed_panel", "raised_panel", "arched") and not p.get("mouldings") and (deco not in ("fluted", "grooved") or band):
+                region = None
+                if band:
+                    region = (np.array([lo[0], hi[1] - band["to"] * (hi[1] - lo[1]), lo[2]]), np.array([hi[0], hi[1] - band["from"] * (hi[1] - lo[1]), hi[2]]))
+                solid, made = solids.decorated(lo, hi, deco, band, region=region)
+                decorations.append({"component": p["id"], **made})
+            else:
+                solid = solids.box(lo, hi)
+                if deco in ("fluted", "grooved") and not band:
+                    decorations.append({"component": p["id"], "decoration": deco, "method": "not built", "reason": "The photo shows no regular lines on this part."})
+        if p.get("mouldings"):
+            solid, made = solids.with_mouldings(solid, lo, p["hi"], [m if isinstance(m, dict) else m.model_dump() for m in p["mouldings"]])
+            decorations += [{"component": p["id"], "decoration": f"{m['profile']} moulding", **m} for m in made]
+        built.append({
+            "name": p["name"], "id": p["id"], "kind": p["kind"], "assembly": p.get("assembly"), "lo": lo, "hi": hi,
+            "mesh": solids.mesh_arrays(solid), "solid": solid, "texture": mat.get("texture"), "colour": [float(c) for c in mat["color"]],
+            "alpha": mat.get("alpha", 1.0), "metallic": mat["metallic"], "roughness": mat["roughness"], "spec": spec, "estimated": p["estimated"],
+            "material": {k: mat.get(k) for k in ("class", "source", "confidence", "grain") if mat.get(k) is not None}, "mover_of": p.get("mover_of"), "host": p.get("host"),
+            "extras": {"partId": p["id"], "kind": p["kind"], "assembly": p.get("assembly"), "source": "inferred" if p["estimated"] else "observed",
+                       "generation": "procedural", **({"specId": spec["id"]} if spec else {}), **({"estimated": True} if p["estimated"] else {})},
+        })
+    glb = write(built, plan["assemblies"])
     components = [{
-        "id": b["id"], "name": b["name"], "mesh": i, "node": i, "nameAr": (b["spec"] or {}).get("nameAr") or None, "editable": True,
+        "id": b["id"], "name": b["name"], "kind": b["kind"], "assembly": b["assembly"], "mesh": i, "node": i,
+        "nameAr": (b["spec"] or {}).get("nameAr") or None, "editable": True,
         "box": [[round(float(v), 4) for v in b["lo"]], [round(float(v), 4) for v in b["hi"]]],
         **({"analysisId": b["spec"]["id"]} if b["spec"] and not b["estimated"] else {}),
         **({"estimated": True, "naming": "estimated"} if b["estimated"] else {}),
-        "material": {"class": b["cls"], "color": "#%02X%02X%02X" % tuple(int(255 * c) for c in b["colour"]), "fromPhoto": bool(b["texture"]),
-                     "confirmed": False},
+        "material": {**b["material"], "color": "#%02X%02X%02X" % tuple(int(255 * min(max(c, 0), 1)) for c in b["colour"]),
+                     "fromPhoto": b["material"].get("source") in ("texture sample", "colour sample"), "confirmed": False},
         "generation": "procedural",
     } for i, b in enumerate(built)]
+    size_m = {"width": round(W, 3), "height": round(H, 3), "depth": round(D, 3)}
     doc: dict[str, Any] = {
-        "version": 1, "separated": True, "method": mode, "modelType": family, "components": components, "analysis": analysis,
-        # The reading itself (sizes, box in the photo): a rebuild at confirmed sizes needs no new vision call.
+        "version": 2, "separated": True, "method": mode, "modelType": family, "components": components, "analysis": analysis,
+        "assemblies": [{"id": a["id"], "name": a.get("name"), "kind": a.get("kind"), "children": [b["id"] for b in built if b["assembly"] == a["id"]]}
+                       for a in plan["assemblies"]],
         "specDetails": {k: details.get(k) for k in ("bbox", "width_m", "height_m", "depth_m", "dimension_source", "proportions", "object_type") if k in details},
-        "sizeM": report.get("sizeM"), "scaleKnown": report.get("scaleKnown", False),
-        "sizeSource": "vendor" if details.get("dimension_source") == "vendor" else "photo" if report.get("scaleKnown") else "estimated",
-        "hybrid": {"mode": mode, "decorations": decorations, "excluded": report.get("excluded") or [],
+        "sizeM": size_m, "scaleKnown": known,
+        "sizeSource": "vendor" if details.get("dimension_source") == "vendor" else "photo" if known else "estimated",
+        "hybrid": {"mode": mode, "engine": "assembly", "decorations": decorations, "materialFallbacks": fallbacks, "notes": plan["notes"],
+                   "frontPlane": plan.get("frontPlane"),
                    "note": "Sizes are estimated from the photo unless the vendor confirmed them; inferred parts are marked estimated."},
     }
+    pending = pending_components(analysis, details, rgb, (W, H, D))
     for c in pending:
-        movable = {x["id"] for x in components if ((spec_by_id.get(x.get("analysisId") or "") or {}).get("motion") or {}).get("type") not in (None, "none")}
+        movable = {x["id"] for x in components if any(b["mover_of"] and b["id"] == x["id"] for b in built)}
         c["attachedTo"] = host_of(c, components, movable)
     if pending:
         doc["pendingComponents"] = [{k: v for k, v in c.items() if k != "image"} for c in pending]
         doc["hybrid"]["complex"] = [c["id"] for c in pending]
-    if limits:
-        doc["limits"] = " ".join(limits)
-    glb, doc = animation.configure(glb, doc)
-    doc = attach(doc, spec_by_id)
-    doc["_pendingImages"] = {c["group"]: c["image"] for c in pending}  # popped by the caller: never stored or sent
+    doc["animation"] = motions(built, plan["assemblies"], (W, H, D))
+    doc["attachments"] = {f: a["component"] for a in doc["animation"]["animations"] for f in a["follow"]}
     doc["validation"] = validate(doc, family)
-    logger.info("Hybrid %s: %d parts, %d textured from the photo, %d animations, %d errors", family, len(built),
-                sum(bool(b["texture"]) for b in built), len((doc.get("animation") or {}).get("animations") or []), len(doc["validation"]["errors"]))
+    doc["_pendingImages"] = {c["group"]: c["image"] for c in pending}  # popped by the caller: never stored or sent
+    logger.info("Hybrid %s (assembly): %d parts, %d assemblies, %d textured, %d fallbacks, %d motions", family, len(built), len(plan["assemblies"]),
+                sum(bool(b["texture"]) for b in built), len(fallbacks), len(doc["animation"]["animations"]))
     return glb, doc
+
+
+def motions(built: list[dict[str, Any]], assemblies: list[dict[str, Any]], size: tuple[float, float, float]) -> dict[str, Any]:
+    """The doors' and drawers' movements as the reading gives them, written at build time: the moving part (a door, or a
+    door assembly's frame), the parts that go with it (its pane, its mouldings are part of it, its handles), the hinge
+    or the slide. A movement the photo does not show clearly stays, marked uncertain, for the vendor to confirm."""
+    W, H, D = size
+    whole = ([-W / 2, 0.0, -D / 2], [W / 2, H, D / 2])
+    asm = {a["id"]: a for a in assemblies}
+    entries, uncertain = [], []
+    for b in built:
+        owner = b.get("mover_of")
+        if not owner:
+            continue
+        spec = asm.get(owner, {}).get("spec") or b.get("spec") or {}
+        motion = dict(spec.get("motion") or {})
+        if motion.get("type") in (None, "none"):
+            continue
+        if motion.get("type") == "slide" and motion.get("direction") in (None, "none", "front"):
+            motion["direction"] = "right" if (b["lo"][0] + b["hi"][0]) / 2 < 0 else "left"
+            if b["kind"] == "drawer_front":
+                motion["direction"] = "front"
+        if motion.get("type") == "slide" and motion["direction"] in ("left", "right"):
+            motion["travel"] = max(0.05, ((b["hi"][0] - b["lo"][0]) - 0.04) / W)
+        entry = animation._entry({"id": b["id"], "box": [b["lo"].tolist(), b["hi"].tolist()]}, motion, whole, spec.get("name") or b["name"], spec.get("nameAr") or None, "assembly")
+        entry["follow"] = [o["id"] for o in built if o is not b and (o.get("assembly") == owner and owner in asm or o.get("host") in (b["id"], owner))]
+        if float(motion.get("confidence") or 0) < 0.4:
+            entry["uncertain"] = True
+            entry["enabled"] = True  # shown and playable, flagged for the vendor's confirmation
+            uncertain.append(entry["label"])
+        entries.append(entry)
+    return {"version": 1, "movable": bool(entries), "animations": entries, "flagged": [], "source": "assembly", "authoritative": True,
+            **({"uncertain": uncertain} if uncertain else {})}
 
 
 def line_bands(spec_by_id: dict[str, dict[str, Any]], rgb: np.ndarray, obj: list[float]) -> dict[str, dict[str, Any]]:
@@ -450,27 +401,31 @@ def line_bands(spec_by_id: dict[str, dict[str, Any]], rgb: np.ndarray, obj: list
     return found
 
 
-def pending_components(analysis: dict[str, Any], details: dict[str, Any], rgb: np.ndarray, obj: list[float]) -> list[dict[str, Any]]:
-    """The complex parts, each with its box in the model, the structural part it is attached to, and its cutout from
-    the original photo (background transparent, pixels untouched) for the mesh provider. Repeated ones share a group."""
-    dims, _, _ = structural.size(details)
-    if dims is None:
-        return []
-    W, H, D = dims
+def pending_components(analysis: dict[str, Any], details: dict[str, Any], rgb: np.ndarray, size: tuple[float, float, float]) -> list[dict[str, Any]]:
+    """The complex parts, each with its box in the model (placed like any other part: its perspective-corrected front
+    rectangle, its role's depth), and its cutout from the original photo for the mesh provider."""
+    W, H, D = size
+    quad = assembly.front_quad(analysis, details)
+    Hm = assembly.homography(quad) if quad else None
+    obj = details.get("bbox") or [0, 0, 1, 1]
     mask = photo_tools.silhouette(rgb, obj)
+    complex_comps = [c for c in analysis.get("components") or [] if is_complex(c) and (c.get("box") or c.get("quad")) and c.get("visibility") != "inferred"]
+    placed = assembly._loose(complex_comps, lambda c: assembly.front_rect(c, Hm, obj), W, H, D)
     out = []
-    for c in analysis.get("components") or []:
-        if not is_complex(c) or not c.get("box") or c.get("visibility") == "inferred":
+    for p in placed:
+        c = p["spec"]
+        if c.get("quad"):
+            xs, ys = [q[0] for q in c["quad"]], [q[1] for q in c["quad"]]
+            rect = (int(min(xs) * rgb.shape[1]), int(min(ys) * rgb.shape[0]), int(max(xs) * rgb.shape[1]), int(max(ys) * rgb.shape[0]))
+        else:
+            rect = _rect(obj, c["box"], (rgb.shape[1], rgb.shape[0]))
+        if rect is None or rect[2] - rect[0] < 4 or rect[3] - rect[1] < 4:
             continue
-        box3 = structural._box3(c, W, H, D)
-        rect = _rect(obj, c["box"], (rgb.shape[1], rgb.shape[0]))
-        if box3 is None or rect is None:
-            continue
-        lo, hi = np.array(box3[0]), np.array(box3[1])  # structural._box3 is already centred on x and z, floor at y 0
+        lo, hi = p["lo"], p["hi"]
         out.append({"id": re.sub(r"[^a-z0-9]+", "_", f"{c.get('name') or c['id']}".lower()).strip("_") + "_generated", "specId": c["id"],
                     "name": c.get("name") or c["id"], "nameAr": c.get("nameAr") or None, "decoration": c.get("decoration"),
                     "box": [[round(float(v), 4) for v in lo], [round(float(v), 4) for v in hi]],
-                    "relatedTo": [r.get("target") for r in c.get("relations") or [] if r.get("type") in ("attached_to", "on")],
+                    "relatedTo": [r.get("target") for r in c.get("relations") or [] if r.get("type") in ("attached_to", "on")] + ([c["assembly"]] if c.get("assembly") else []),
                     "group": group_key(c, hi - lo), "status": "pending", "image": photo_tools.cutout(rgb, rect, mask)})
     return out
 
@@ -546,7 +501,7 @@ def validate(doc: dict[str, Any], family: str) -> dict[str, Any]:
             errors.append(f"{c['name']}: has no volume.")
         cls = (c.get("material") or {}).get("class")
         thin = float(size.min())
-        if cls not in ("glass", "mirror", "metal") and not any(w in _words(c) for w in HANDLE_WORDS) and thin < 0.5 * board:
+        if cls not in ("glass", "mirror", "metal") and c.get("kind") not in ("back_panel", "mirror", "glass") and not any(w in _words(c) for w in HANDLE_WORDS) and thin < 0.5 * board:
             warnings.append(f"{c['name']}: {thin * 100:.1f} cm thick, thinner than a board.")
         near = any(o != c["id"] and np.all(lo <= boxes[o][1] + TOUCH) and np.all(boxes[o][0] <= hi + TOUCH) for o in boxes)
         if not near and len(comps) > 1 and c["id"] not in movers:  # a door or drawer hangs on hinges / runners
