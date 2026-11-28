@@ -6,3 +6,6 @@ storage/
 
 # DB row backups written by scripts (user data: never committed)
 backups/
+
+# macOS folder settings
+.DS_Store
