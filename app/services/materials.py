@@ -170,15 +170,21 @@ def extract(rgb: np.ndarray, component: dict[str, Any] | None, analysis: dict[st
     valid = _moulding_lines(valid, c.get("mouldings") or [])
     clean = valid > 0
     share = float(clean.mean())
-    if share < MIN_CLEAN or clean.sum() < MIN_PIXELS:
-        return {**fallback, "reason": f"only {share:.0%} of its surface is clean in the photo"}
+    small = c.get("kind") in ("handle", "knob") or str(c.get("geometry")) in ("hardware",)
+    need_px = 6 if small else MIN_PIXELS  # hardware is small in any photo: a handful of its own pixels is a sample
+    if share < MIN_CLEAN:
+        return {**fallback, "reason": f"only {share:.0%} of its surface is free of reflections, shadows and other parts"}
+    if clean.sum() < need_px:
+        return {**fallback, "reason": f"too small in the photo ({int(clean.sum())} pixels)"}
     lab = _lab(face[clean])
     lo, hi = np.percentile(lab[:, 0], [10, 90])
     keep = (lab[:, 0] >= lo) & (lab[:, 0] <= hi)
     kept = lab[keep] if keep.sum() > 30 else lab
     # The surface's own colour, not the room's lighting on it: hue from the median, lightness from the well-lit
     # pixels (the upper quartile of the trimmed range: a shaded half of a door is not its paint).
-    med = np.array([np.percentile(kept[:, 0], 75), np.median(kept[:, 1]), np.median(kept[:, 2])])
+    # Metal: the median (its highlights are reflections, not its colour); other surfaces: the well-lit quartile.
+    light = np.median(kept[:, 0]) if cls == "metal" else np.percentile(kept[:, 0], 75)
+    med = np.array([light, np.median(kept[:, 1]), np.median(kept[:, 2])])
     colour = cv2.cvtColor(np.uint8([[med]]), cv2.COLOR_LAB2RGB)[0, 0] / 255.0
     out = {"color": colour.tolist(), "texture": None, "metallic": metallic, "roughness": finish_rough, "alpha": 1.0, "source": "colour sample",
            "confidence": round(min(1.0, share * 1.2), 2), "class": cls}

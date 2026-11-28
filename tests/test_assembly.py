@@ -115,7 +115,9 @@ def test_materials_are_clean_samples_never_photo_crops(model):
     dark = np.array([int(p["plinth_front"]["material"]["color"][i:i + 2], 16) for i in (1, 3, 5)])
     assert dark.max() < 120  # the dark brown trim
     for c in doc["components"]:
-        assert c["material"]["source"] in ("colour sample", "texture sample", "physical"), c
+        # a side seen edge-on in shadow takes the reading's colour for it (recorded as an estimate); the rest is sampled
+        allowed = ("colour sample", "texture sample", "physical") + (("reading colour",) if c["kind"] in ("side_panel", "back_panel", "top_panel", "base_panel") else ())
+        assert c["material"]["source"] in allowed, c
 
 
 def test_the_model_matches_the_photo_part_by_part(model):
@@ -127,11 +129,13 @@ def test_the_model_matches_the_photo_part_by_part(model):
     assert all(p.get("colourDE", 0) < visual_check.DE_MAX for p in seen["parts"]) and not seen["issues"]
 
 
-def test_the_verdict_waits_for_the_vendor_where_the_photo_is_uncertain(model):
+def test_uncertainty_is_a_note_that_never_blocks_publishing(model):
     _, doc = model
     v = doc["validation"]
-    assert v["errors"] == [] and v["status"] == "needs_confirmation" and not v["publishable"]
-    assert len(doc["animation"]["uncertain"]) == 2  # sliding or hinged: not shown clearly, not invented
+    assert v["errors"] == [] and v["status"] == "valid_with_warnings" and v["publishable"]
+    assert "confirm" not in v and any(n["kind"] == "movement" for n in v["notes"])
+    assert len(doc["animation"]["uncertain"]) == 2  # sliding or hinged: recorded, not required to confirm
+    assert all(a["enabled"] and a["issues"] == [] for a in doc["animation"]["animations"])  # never disabled by a note
     assert doc["animation"]["authoritative"]
 
 

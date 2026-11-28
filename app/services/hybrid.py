@@ -187,6 +187,13 @@ def write(parts: list[dict[str, Any]], assemblies: list[dict[str, Any]] | None =
 # ---- the build ----
 
 
+def _delta_e(a, b) -> float:
+    import cv2
+
+    lab = cv2.cvtColor(np.uint8([[np.clip(np.asarray(a) * 255, 0, 255), np.clip(np.asarray(b) * 255, 0, 255)]]), cv2.COLOR_RGB2LAB).astype(float)[0]
+    return float(np.linalg.norm(lab[0] - lab[1]))
+
+
 def srgb_to_linear(c: float) -> float:
     c = min(max(float(c), 0.0), 1.0)
     return round(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4, 5)
@@ -243,6 +250,9 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
         return None, {"reason": " ".join(size_notes) or "The overall size could not be read."}
     W, H, D = dims
     family = furniture_family(category, kind)
+    img = _photo(photo)
+    rgb = np.asarray(img)
+    analysis = measure_hardware(analysis, details, rgb)
     plan = assembly.assemble(analysis, details, (W, H, D), family)
     if len(plan["parts"]) < 2:
         return None, {"reason": "Too few located parts to assemble the furniture from."}
@@ -254,14 +264,16 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
             if p.get("assembly") == "carcass":
                 p["assembly"] = carcass
     spec_by_id = {c["id"]: c for c in analysis.get("components") or []}
-    img = _photo(photo)
-    rgb = np.asarray(img)
     silhouette = photo_tools.silhouette(rgb, details.get("bbox"))
     bands = line_bands(spec_by_id, rgb, details.get("bbox") or [0, 0, 1, 1])
     # A part the photo does not show takes the finish of the visible part of the same structure.
+    # A carcass panel the photo does not show takes the finish of a visible side or top panel; never of a trim (a plinth
+    # or crown often has its own finish, and its strip in the photo takes in the floor or ceiling); else the reading's
+    # colour for the carcass itself (an estimate, recorded as such).
     visible_carcass = next((p["spec"] for p in plan["parts"] if p.get("assembly") in (carcass, "carcass") and p.get("spec") and not p["estimated"]
-                            and (p["spec"].get("quad") or p["spec"].get("sideQuad") or p["spec"].get("box"))), None)
-    built, decorations, fallbacks = [], [], []
+                            and p["kind"] in ("side_panel", "top_panel") and (p["spec"].get("quad") or p["spec"].get("sideQuad"))), None) \
+        or spec_by_id.get(carcass or "") or None
+    built, decorations, fallbacks, recesses = [], [], [], []
     for p in plan["parts"]:
         lo, hi, spec = p["lo"], p["hi"], p.get("spec")
         source_spec = spec_by_id.get(p.get("material_from") or "") or spec
@@ -269,13 +281,42 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
             source_spec = source_spec if (source_spec or {}).get("color") and not p["estimated"] else (visible_carcass or source_spec or spec_by_id.get(carcass or "", {}))
         cls = str((source_spec or {}).get("materialClass") or "other")
         _, rough = _finish(source_spec, cls)
+        if source_spec is not None and (source_spec.get("logical") or assembly.kind_of(source_spec) == "carcass"):
+            # The whole object's entry: its box is everything (mirrors, the room in them); its colour is the reading's.
+            source_spec = {k: v for k, v in source_spec.items() if k not in ("box", "quad", "sideQuad")}
         mat = materials.extract(rgb, source_spec, analysis, silhouette, rough, details.get("bbox"))
         if p["kind"] in ("mirror", "glass"):
             mat = materials.extract(rgb, {"kind": p["kind"]}, analysis, None, rough)
+        said = _hex((source_spec or {}).get("color"))
+        if said and mat["source"] == "colour sample" and (source_spec or {}).get("sideQuad") and not (source_spec or {}).get("quad") \
+                and _delta_e(mat["color"], said) > 15:
+            # A side seen edge-on, in its own shadow and the room's coloured light: its pixels are not its finish. The
+            # reading's colour for it is used, as an estimate.
+            mat = {**mat, "color": said, "source": "reading colour", "confidence": 0.5, "reason": "its visible face is in shadow in the photo"}
         if mat["source"] == "reading colour":
-            fallbacks.append({"component": p["id"], "reason": mat.get("reason") or "no clean surface in the photo", "used": "reading colour"})
+            fallbacks.append({"component": p["id"], "name": p["name"], "reason": mat.get("reason") or "no clean surface in the photo", "used": "reading colour"})
         # geometry: the part's semantic shape
-        if p["geometry"] == "frame" and p.get("opening"):
+        if p["geometry"] == "hardware":
+            hw = p["hardware"]
+            if hw["type"] == "bar":
+                solid = solids.bar_handle(lo, hi, hw["orientation"], hw["diameter"], hw["profile"], hw["mounts"])
+            elif hw["type"] == "knob":
+                solid = solids.knob(lo, hi)
+            else:
+                solid = None  # a recess is cut into its door below, not a part of its own
+            measured = (spec or {}).get("measured") or {}
+            if measured.get("colour") and mat["source"] != "colour sample":
+                mat = {**mat, "color": measured["colour"], "source": "colour sample", "confidence": measured.get("confidence", 0.6)}
+                fallbacks = [f for f in fallbacks if f["component"] != p["id"]]
+            if cls == "metal" or (spec or {}).get("materialClass") == "metal":
+                finish = str((spec or {}).get("finish") or "").lower()
+                mat = {**mat, "metallic": 0.85, "roughness": 0.25 if "polish" in finish or "chrome" in finish else 0.4}
+            if solid is None:
+                recesses.append(p)
+                continue
+            decorations.append({"component": p["id"], "decoration": f"{hw['type']} handle", "method": "geometry", "orientation": hw["orientation"],
+                                "lengthM": hw["length"], "estimated": hw["estimated"]})
+        elif p["geometry"] == "frame" and p.get("opening"):
             solid = solids.frame(lo, hi, p["opening"])
             decorations.append({"component": p["id"], "decoration": "frame with opening", "method": "geometry"})
         elif p["geometry"] == "pane":
@@ -305,9 +346,16 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
             "mesh": solids.mesh_arrays(solid), "solid": solid, "texture": mat.get("texture"), "colour": [float(c) for c in mat["color"]],
             "alpha": mat.get("alpha", 1.0), "metallic": mat["metallic"], "roughness": mat["roughness"], "spec": spec, "estimated": p["estimated"],
             "material": {k: mat.get(k) for k in ("class", "source", "confidence", "grain") if mat.get(k) is not None}, "mover_of": p.get("mover_of"), "host": p.get("host"),
+            **({"hardware": {k: v for k, v in p["hardware"].items() if k not in ("x0", "x1", "y0", "y1")}} if p.get("hardware") else {}),
             "extras": {"partId": p["id"], "kind": p["kind"], "assembly": p.get("assembly"), "source": "inferred" if p["estimated"] else "observed",
                        "generation": "procedural", **({"specId": spec["id"]} if spec else {}), **({"estimated": True} if p["estimated"] else {})},
         })
+    for r in recesses:  # finger recesses are cut into their door (the door stays one editable part)
+        host = next((b for b in built if b["id"] == r.get("host")), None)
+        if host is not None:
+            host["solid"] = host["solid"] - solids.recess(r["lo"], r["hi"])
+            host["mesh"] = solids.mesh_arrays(host["solid"])
+            decorations.append({"component": host["id"], "decoration": "recessed handle", "method": "geometry"})
     glb = write(built, plan["assemblies"])
     components = [{
         "id": b["id"], "name": b["name"], "kind": b["kind"], "assembly": b["assembly"], "mesh": i, "node": i,
@@ -318,6 +366,7 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
         "material": {**b["material"], "color": "#%02X%02X%02X" % tuple(int(255 * min(max(c, 0), 1)) for c in b["colour"]),
                      "fromPhoto": b["material"].get("source") in ("texture sample", "colour sample"), "confirmed": False},
         "generation": "procedural",
+        **({"hardware": b["hardware"], "host": b.get("host")} if b.get("hardware") else {}),
     } for i, b in enumerate(built)]
     size_m = {"width": round(W, 3), "height": round(H, 3), "depth": round(D, 3)}
     doc: dict[str, Any] = {
@@ -347,33 +396,122 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
     return glb, doc
 
 
+HARDWARE_KINDS = ("handle", "knob")
+
+
+def measure_hardware(analysis: dict[str, Any], details: dict[str, Any], rgb: np.ndarray) -> dict[str, Any]:
+    """Each handle the reading lists, found and measured on its owner's straightened face in the photo (photo_tools.
+    find_bar): its exact place, length, orientation, thickness when the photo resolves it, and its own colour. Only
+    hardware the reading lists is measured (a reflection in a mirror is never taken for a handle); panes and excluded
+    regions are masked out of the search. No extra AI call."""
+    import copy
+
+    import cv2
+
+    analysis = copy.deepcopy(analysis)
+    comps = analysis.get("components") or []
+    by_id = {c["id"]: c for c in comps}
+    obj = details.get("bbox")
+    h, w = rgb.shape[:2]
+    for c in comps:
+        if assembly.kind_of(c) not in HARDWARE_KINDS and not any(x in _words(c) for x in HANDLE_WORDS):
+            continue
+        owner_id = c.get("assembly") or next((r.get("target") for r in c.get("relations") or [] if r.get("type") in ("attached_to", "on")), None)
+        owner = by_id.get(owner_id or "")
+        quad = materials.quad_of(owner, obj) if owner else None
+        if not quad:
+            continue
+        mask = np.full((h, w), 255, np.uint8)
+        for o in comps:  # panes of the owner and everything excluded: never searched for a handle
+            if o is not c and (o.get("assembly") == owner_id and assembly.kind_of(o) in ("mirror", "glass")):
+                q = materials.quad_of(o, obj)
+                if q:
+                    cv2.fillPoly(mask, [np.array([[p[0] * w, p[1] * h] for p in q], np.int32)], 0)
+        for e in analysis.get("exclusions") or []:
+            cv2.fillPoly(mask, [np.array([[p[0] * w, p[1] * h] for p in e["quad"]], np.int32)], 0)
+        face, valid = materials.rectify(rgb, mask, quad)
+        declared = str(c.get("hardwareType") or "").lower()
+        expect = "knob" if "knob" in declared or assembly.kind_of(c) == "knob" else ("horizontal" if "horizontal" in declared else "vertical" if "vertical" in declared or "bar" in declared else None)
+        found = photo_tools.find_bar(face, valid, expect)
+        if not found:
+            continue
+        fh, fw = face.shape[:2]
+        x0, y0, x1, y1 = found["rect"]
+        src = np.array([[0, 0], [fw - 1, 0], [fw - 1, fh - 1], [0, fh - 1]], np.float32)
+        dst = np.array([[p[0] * w, p[1] * h] for p in quad], np.float32)
+        M = cv2.getPerspectiveTransform(src, dst)  # the face back into the image
+        corners = np.array([[[x0 * fw, y0 * fh], [x1 * fw, y0 * fh], [x1 * fw, y1 * fh], [x0 * fw, y1 * fh]]], np.float32)
+        img_pts = cv2.perspectiveTransform(corners, M)[0]
+        c["quad"] = [[float(p[0] / w), float(p[1] / h)] for p in img_pts]
+        c["assembly"] = c.get("assembly") or owner_id
+        short_px = min((x1 - x0) * fw, (y1 - y0) * fh)
+        c["measured"] = {"orientation": found["orientation"], "aspect": found["aspect"], "colour": found["colour"], "pixels": found["pixels"],
+                         "shortPx": round(float(short_px), 1), "confidence": found["confidence"], "owner": owner_id}
+    return analysis
+
+
+MOVING_KINDS = ("door", "sliding_door", "drawer_front", "door_frame")
+
+
 def motions(built: list[dict[str, Any]], assemblies: list[dict[str, Any]], size: tuple[float, float, float]) -> dict[str, Any]:
-    """The doors' and drawers' movements as the reading gives them, written at build time: the moving part (a door, or a
-    door assembly's frame), the parts that go with it (its pane, its mouldings are part of it, its handles), the hinge
-    or the slide. A movement the photo does not show clearly stays, marked uncertain, for the vendor to confirm."""
+    """One movement per movable assembly (a door, a drawer, a mirrored door: its frame moves and its pane, decorations
+    and hardware go with it), written at build time.
+
+    What the photo does not show clearly is filled with a sensible, editable default and recorded as a NOTE, never as an
+    issue (an issue disables the movement in the editor): an unknown hinge is taken from the handle (the hinge is on the
+    other side), else from the door's place in its row (a pair of doors opens from the seam between them). A door the
+    reading saw but gave no motion still opens when it is clearly a door, with that note."""
     W, H, D = size
     whole = ([-W / 2, 0.0, -D / 2], [W / 2, H, D / 2])
     asm = {a["id"]: a for a in assemblies}
+    movers = [b for b in built if b.get("mover_of")]
+    hinged_row = sorted([b for b in movers if b["kind"] in ("door", "door_frame")], key=lambda b: b["lo"][0])
     entries, uncertain = [], []
-    for b in built:
-        owner = b.get("mover_of")
-        if not owner:
-            continue
+    for b in movers:
+        owner = b["mover_of"]
         spec = asm.get(owner, {}).get("spec") or b.get("spec") or {}
         motion = dict(spec.get("motion") or {})
+        notes: list[str] = []
+        kind = (asm.get(owner) or {}).get("kind") or b["kind"]
         if motion.get("type") in (None, "none"):
-            continue
-        if motion.get("type") == "slide" and motion.get("direction") in (None, "none", "front"):
-            motion["direction"] = "right" if (b["lo"][0] + b["hi"][0]) / 2 < 0 else "left"
-            if b["kind"] == "drawer_front":
-                motion["direction"] = "front"
-        if motion.get("type") == "slide" and motion["direction"] in ("left", "right"):
+            # A door the reading confidently says is fixed stays fixed; an unclear one gets a usual, editable movement.
+            if kind not in ("door", "sliding_door", "drawer_front") or float(motion.get("confidence") or 0) >= 0.6:
+                continue
+            motion = {"type": "slide" if kind in ("sliding_door", "drawer_front") else "rotate", "confidence": 0.2}
+            notes.append("The photo does not show how it opens: a usual movement for its kind is set; change it if needed.")
+        follow = [o["id"] for o in built if o is not b and (o.get("assembly") == owner and owner in asm or o.get("host") in (b["id"], owner))]
+        if motion["type"] == "rotate" and motion.get("hinge") in (None, "none"):
+            handles = [o for o in built if o["id"] in follow and o["kind"] in ("handle", "knob")]
+            cx = (b["lo"][0] + b["hi"][0]) / 2
+            if handles:
+                hx = (handles[0]["lo"][0] + handles[0]["hi"][0]) / 2
+                motion["hinge"] = "left" if hx > cx else "right"
+                notes.append("Hinge side taken from the handle (the hinge is opposite it).")
+            else:
+                i = hinged_row.index(b) if b in hinged_row else -1
+                left_n = hinged_row[i - 1] if i > 0 else None
+                right_n = hinged_row[i + 1] if 0 <= i < len(hinged_row) - 1 else None
+                has_handle = lambda d: any(o.get("host") in (d["id"], d.get("mover_of")) or (o.get("assembly") == d.get("mover_of") and o["kind"] in ("handle", "knob")) for o in built)  # noqa: E731
+                # Two handleless doors side by side open from the seam between them: each hinges on its outer edge.
+                if right_n is not None and not has_handle(right_n) and (left_n is None or has_handle(left_n) or i % 2 == (1 if hinged_row and has_handle(hinged_row[0]) else 0)):
+                    motion["hinge"] = "left"
+                elif left_n is not None and not has_handle(left_n):
+                    motion["hinge"] = "right"
+                else:
+                    motion["hinge"] = "left" if cx < 0 else "right"
+                notes.append("Hinge side not visible: set from the door's place in its row.")
+        if motion["type"] == "slide" and motion.get("direction") in (None, "none", "front"):
+            motion["direction"] = "front" if kind == "drawer_front" or b["kind"] == "drawer_front" else "right" if (b["lo"][0] + b["hi"][0]) / 2 < 0 else "left"
+        if motion["type"] == "slide" and motion["direction"] in ("left", "right"):
             motion["travel"] = max(0.05, ((b["hi"][0] - b["lo"][0]) - 0.04) / W)
         entry = animation._entry({"id": b["id"], "box": [b["lo"].tolist(), b["hi"].tolist()]}, motion, whole, spec.get("name") or b["name"], spec.get("nameAr") or None, "assembly")
-        entry["follow"] = [o["id"] for o in built if o is not b and (o.get("assembly") == owner and owner in asm or o.get("host") in (b["id"], owner))]
-        if float(motion.get("confidence") or 0) < 0.4:
+        entry["follow"] = follow
+        notes += [i for i in entry["issues"] if not i.startswith("The hinge side was not detected")]
+        entry["issues"] = []  # nothing here is a defect: the movement is set, editable, and checked for collisions
+        entry["notes"] = notes
+        entry["enabled"] = True
+        if float(motion.get("confidence") or 0) < 0.4 or notes:
             entry["uncertain"] = True
-            entry["enabled"] = True  # shown and playable, flagged for the vendor's confirmation
             uncertain.append(entry["label"])
         entries.append(entry)
     return {"version": 1, "movable": bool(entries), "animations": entries, "flagged": [], "source": "assembly", "authoritative": True,

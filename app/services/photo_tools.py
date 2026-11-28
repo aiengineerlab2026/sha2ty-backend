@@ -197,3 +197,49 @@ def cutout(rgb: np.ndarray, rect: tuple[int, int, int, int], mask: np.ndarray | 
     buf = io.BytesIO()
     Image.fromarray(np.dstack([region, alpha])).save(buf, "PNG")
     return buf.getvalue()
+
+
+def find_bar(face: np.ndarray, valid: np.ndarray | None = None, expect: str | None = None) -> dict | None:
+    """A handle on a door's straightened face: the most elongated region whose colour stands out from the face's own
+    colour (a bar or a pull), else the most compact one (a knob). {"rect": [x0, y0, x1, y1] fractions of the face,
+    "orientation", "aspect", "colour" (RGB 0..1 of its own pixels), "pixels", "confidence"}; None when nothing stands
+    out clearly. `expect`: "vertical" / "horizontal" / "knob" from the reading, preferred when several regions qualify."""
+    h, w = face.shape[:2]
+    if h < 12 or w < 6:
+        return None
+    lab = cv2.cvtColor(face, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ok = np.ones((h, w), bool) if valid is None else valid > 0
+    base = np.median(lab[ok].reshape(-1, 3), axis=0)
+    diff = np.linalg.norm(lab - base, axis=2)
+    # The face's own variation (grain, light falloff) is not a handle: only what stands well above it.
+    thresh = max(14.0, float(np.percentile(diff[ok], 90)) * 1.5)
+    mask = ((diff > thresh) & ok).astype(np.uint8)
+    margin = max(1, int(0.03 * min(h, w)))  # the face's own edges (frame lines, shadows at the seam) are not a handle
+    mask[:margin], mask[-margin:], mask[:, :margin], mask[:, -margin:] = 0, 0, 0, 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    best, best_score = None, 0.0
+    for i in range(1, count):
+        x, y, bw, bh, area = stats[i]
+        if area < 3:
+            continue
+        long_side, short_side = max(bw, bh), max(1, min(bw, bh))
+        aspect = long_side / short_side
+        orientation = "vertical" if bh >= bw else "horizontal"
+        fill = area / max(bw * bh, 1)
+        if aspect >= 3 and long_side >= 0.08 * (h if orientation == "vertical" else w):
+            kind = orientation
+            score = aspect * fill * long_side
+        elif aspect < 1.8 and 0.01 * min(h, w) <= long_side <= 0.25 * min(h, w) and fill > 0.4:
+            kind = "knob"
+            score = fill * long_side * 0.5
+        else:
+            continue
+        if expect and kind == expect:
+            score *= 3
+        if score > best_score:
+            pix = face[labels == i]
+            best_score = score
+            best = {"rect": [x / w, y / h, (x + bw) / w, (y + bh) / h], "orientation": kind if kind != "knob" else "knob", "aspect": round(float(aspect), 2),
+                    "colour": (np.median(pix.reshape(-1, 3), axis=0) / 255.0).tolist(), "pixels": int(area),
+                    "confidence": round(float(min(1.0, (diff[labels == i].mean() / thresh - 1) + 0.4)), 2)}
+    return best
