@@ -159,6 +159,10 @@ class Component(BaseModel):
     geometry: str = "panel"
     quad: list[list[float]] | None = None
     sideQuad: list[list[float]] | None = None
+    # Hardware (spec v4): a handle's type as seen ("vertical_bar", "horizontal_bar", "knob", "recessed", "edge_pull");
+    # a door's opening hardware ("handle", "push", "handleless"). Hints only: sizes are measured in the photo.
+    hardwareType: str | None = None
+    opening: str | None = None
     mouldings: list[Moulding] = []
     relations: list[Relation] = []
     motion: Motion = Motion()
@@ -334,6 +338,10 @@ _COMPONENT_SCHEMA = {
         "quad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}},
                  "description": "Its visible FRONT face's four corners in the IMAGE (fractions of the image, origin top left): top-left, top-right, bottom-right, bottom-left; null if its front is not visible"},
         "sideQuad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}}, "description": "A side panel's visible outer face, the same way; null otherwise"},
+        "hardwareType": {"type": "string", "enum": ["vertical_bar", "horizontal_bar", "knob", "recessed", "edge_pull", "none"],
+                         "description": "Handles and knobs only: the hardware's type as seen; none otherwise"},
+        "opening": {"type": "string", "enum": ["handle", "push", "handleless", "none"],
+                    "description": "Doors and drawers only: how it is opened (a visible handle, push-to-open, a handleless edge); none otherwise"},
         "mouldings": {"type": "array", "items": {"type": "object", "properties": {
             "rect": {"type": "array", "items": {"type": "number"}, "description": "outer rectangle as fractions of THIS part's front face, x0 y0 x1 y1"},
             "profile": {"type": "string", "enum": ["raised", "recessed"]},
@@ -426,6 +434,9 @@ Rules:
   picture), is type "none". Never invent a movable part; give a low confidence when the photo does not show how
   it moves (no hinges or handle visible). Doors: hinge on the side away from the handle; two doors meeting in the
   middle hinge on their outer sides. Do not give every door the same hinge unless the photo shows it.
+- hardware: list every visible handle or knob as its own component (kind handle / knob) with its quad around just
+  the hardware, hardwareType, and assembly = the door or drawer it is on. A door with no visible handle: opening
+  "handleless" or "push"; never invent a handle.
 - revealsInterior: true only when opening it shows a hollow inside (a cupboard, a drawer), not a decorative panel.
 - interior: only for storage pieces whose inside is hidden. List simple, typical items (shelves, a hanging rail,
   dividers, drawer boxes) with a count, and only what such a piece usually has; hasInterior false otherwise.

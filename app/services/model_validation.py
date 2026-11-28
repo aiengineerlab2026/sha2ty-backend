@@ -375,24 +375,31 @@ def geometry_between(glb: bytes, doc_in: dict[str, Any]) -> dict[str, Any]:
 
 
 def verdict(doc_in: dict[str, Any]) -> dict[str, Any]:
-    """The model's status: valid, valid_with_warnings, needs_confirmation (something only the vendor can settle: a
-    movement the photo does not show, a material that fell back), needs_repair (critical errors remain), failed."""
+    """The model's status. Only genuine defects block publication:
+      valid                 no significant issue                                   publishable
+      valid_with_warnings   estimated materials, uncertain movements, estimated    publishable
+                            hidden parts, a part not generated: NOTES to read
+      needs_repair          critical geometry errors remain                        not publishable
+      failed                no usable geometry                                     not publishable
+    Ordinary uncertainty of a reconstruction from one photo is never an error and never needs a confirmation."""
     v = doc_in.get("validation") or {}
-    confirm = []
+    notes = []
     for label in (doc_in.get("animation") or {}).get("uncertain") or []:
-        confirm.append(f"How {label} moves is uncertain in the photo: confirm or change it.")
+        notes.append({"kind": "movement", "text": f"How {label} opens was estimated from the photo."})
     for f in (doc_in.get("hybrid") or {}).get("materialFallbacks") or []:
-        confirm.append(f"{f['component']}: its material could not be sampled cleanly ({f['reason']}); a plain colour was used.")
+        notes.append({"kind": "material", "text": f"{f.get('name') or f['component']}: material estimated ({f['reason']})."})
     for p in doc_in.get("componentFailures") or []:
-        confirm.append(f"{p['name']} was not generated: regenerate it or leave it out.")
+        notes.append({"kind": "component", "text": f"{p['name']} could not be generated; it can be regenerated."})
+    for w in v.get("warnings") or []:
+        notes.append({"kind": "estimate" if w.startswith("Estimated, not seen") else "check", "text": w})
     if not doc_in.get("components"):
         status = "failed"
     elif v.get("errors"):
         status = "needs_repair"
-    elif confirm:
-        status = "needs_confirmation"
-    elif [w for w in v.get("warnings") or [] if not w.startswith("Estimated, not seen")]:
+    elif notes:
         status = "valid_with_warnings"
     else:
         status = "valid"
-    return {**v, "status": status, "confirm": confirm, "publishable": status in ("valid", "valid_with_warnings")}
+    out = {**v, "status": status, "notes": notes, "publishable": status in ("valid", "valid_with_warnings")}
+    out.pop("confirm", None)  # the old mandatory confirmations: gone
+    return out

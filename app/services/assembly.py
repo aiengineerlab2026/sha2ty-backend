@@ -139,7 +139,8 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
     comps = [{**c, "kind": kind_of(c)} for c in analysis.get("components") or []]
     by_id = {c["id"]: c for c in comps}
     # A part that other parts name as their assembly is logical (the door of a frame and a mirror), whatever its flag.
-    parents = {c.get("assembly") for c in comps if c.get("assembly")}
+    # A handle naming its door does not make the door logical: hardware mounts on a part, it does not compose one.
+    parents = {c.get("assembly") for c in comps if c.get("assembly") and c["kind"] not in HARDWARE}
     logical = {c["id"] for c in comps if c.get("logical") or c["id"] in parents or c.get("kind") == "carcass"}
     quad = front_quad(analysis, details)
     Hm = homography(quad) if quad else None
@@ -286,21 +287,36 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
             parts.append(_part(c, c["id"], c.get("name") or c["id"], kind, lo, hi, mouldings=c.get("mouldings") or [], mover_of=c["id"],
                                assembly=c.get("assembly")))
 
-    # ---- hardware and inside parts ----
+    # ---- hardware: on its owner's mounting surface, sized from the photo, its depth by type ----
     hosts = {p["id"]: p for p in parts}
+
+    def mount_of(owner: str | None) -> dict[str, Any] | None:
+        """The physical part a handle mounts on: the part itself, or the moving part of a logical assembly (a mirrored
+        door's frame)."""
+        if not owner:
+            return None
+        return hosts.get(owner) or next((p for p in parts if p.get("mover_of") == owner), None)
+
     for c in kinds.get("handle", []) + kinds.get("knob", []):
         r = rect(c)
         if not r:
+            notes.append(f"{c.get('name') or 'A handle'}: its position is not visible in the photo, so it is not built.")
             continue
         cx, cy = x_of((r[0] + r[2]) / 2), y_of((r[1] + r[3]) / 2)
-        on = lambda p: p["lo"][0] <= cx <= p["hi"][0] and p["lo"][1] <= cy <= p["hi"][1]  # noqa: E731
-        # The reading's relation only when the handle really lies on that part (a handle by the line between two doors
-        # can be tied to the wrong one); else the front it lies on.
-        said = next((hosts.get(t) for t in [x.get("target") for x in c.get("relations") or []] + [c.get("assembly")] if t and t in hosts), None)
+        on = lambda p: p["lo"][0] - 0.01 <= cx <= p["hi"][0] + 0.01 and p["lo"][1] - 0.01 <= cy <= p["hi"][1] + 0.01  # noqa: E731
+        # Owner: the reading's (its assembly or relation), resolved to a physical mounting part, when the handle really
+        # lies on it (a handle by the line between two doors can be tied to the wrong one); else the front it lies on.
+        said = next((m for t in [c.get("assembly"), *[x.get("target") for x in c.get("relations") or []]] if (m := mount_of(t)) is not None), None)
         host = said if said is not None and on(said) else next((p for p in parts if p.get("mover_of") and on(p)), None)
+        hw = hardware_of(c, r, W, H)
         z0 = host["hi"][2] if host else front_z
-        parts.append(_part(c, c["id"], c.get("name") or "Handle", c.get("kind"), [x_of(r[0]), y_of(r[3]), z0], [x_of(r[2]), y_of(r[1]), z0 + HANDLE_PROUD],
-                           host=host["id"] if host else None, assembly=(host or {}).get("assembly")))
+        if hw["type"] == "recessed":
+            lo, hi = [hw["x0"], hw["y0"], z0 - 0.008], [hw["x1"], hw["y1"], z0]
+        else:
+            lo, hi = [hw["x0"], hw["y0"], z0], [hw["x1"], hw["y1"], z0 + hw["standoff"] + hw["diameter"] / 2]
+        parts.append(_part(c, c["id"], c.get("name") or "Handle", c.get("kind") or "handle", lo, hi, geometry="hardware", hardware=hw,
+                           host=host["id"] if host else None, assembly=(host or {}).get("assembly") or (host or {}).get("mover_of"),
+                           estimated=False))
     for c in [*kinds.get("shelf", []), *kinds.get("divider", [])]:
         r = rect(c)
         if not r:
@@ -380,6 +396,48 @@ def _loose(physical: list[dict[str, Any]], rect, W: float, H: float, D: float) -
                         lo=np.array([p["lo"][0], p["lo"][1], -p["hi"][2]]), hi=np.array([p["hi"][0], p["hi"][1], -p["lo"][2]]))
             out.append(back)
     return out
+
+
+# Hardware depth by type when the photo cannot show it (configurable defaults, always marked estimated): the grip's
+# distance from the door and its thickness.
+HARDWARE_DEFAULTS = {"bar": {"standoff": 0.032, "diameter": 0.016}, "knob": {"standoff": 0.022, "diameter": 0.03}, "recessed": {"standoff": 0.0, "diameter": 0.0}}
+MIN_RELIABLE_PX = 6  # a cross-section narrower than this in the photo is blur, not a measurement
+
+
+def hardware_of(c: dict[str, Any], r: list[float], W: float, H: float) -> dict[str, Any]:
+    """The handle's physical shape from its perspective-corrected rectangle: type and orientation (the reading's, else
+    the rectangle's aspect), length from its long side, thickness measured only when the photo resolves it, depth by
+    type. Every value says whether it was measured or estimated."""
+    w, h = (r[2] - r[0]) * W, (r[3] - r[1]) * H
+    m = c.get("measured") or {}
+    declared = str(c.get("hardwareType") or "").lower()
+    orientation = m.get("orientation") or ("vertical" if h >= w else "horizontal")
+    if declared in ("knob", "round_knob") or (not declared and (orientation == "knob" or max(w, h) / max(min(w, h), 1e-6) < 1.8)):
+        kind = "knob"
+    elif declared in ("recessed", "integrated_edge", "edge"):
+        kind = "recessed"
+    else:
+        kind = "bar"
+    if kind == "bar" and orientation == "knob":
+        orientation = "vertical" if h >= w else "horizontal"
+    d = HARDWARE_DEFAULTS[kind]
+    short_px = m.get("shortPx")
+    measured_thick = bool(short_px and short_px >= MIN_RELIABLE_PX)
+    cx, cy = -W / 2 + (r[0] + r[2]) / 2 * W, H - (r[1] + r[3]) / 2 * H
+    if kind == "bar":
+        length = h if orientation == "vertical" else w
+        dia = float(np.clip(min(w, h), 0.008, 0.04)) if measured_thick else d["diameter"]
+        half = (dia / 2, length / 2) if orientation == "vertical" else (length / 2, dia / 2)
+    elif kind == "knob":
+        dia = float(np.clip(max(w, h), 0.015, 0.08))
+        half = (dia / 2, dia / 2)
+    else:
+        dia, half = 0.0, (w / 2, h / 2)
+    return {"type": kind, "orientation": orientation if kind != "knob" else "none", "length": round(2 * max(half), 4), "diameter": round(dia, 4),
+            "standoff": d["standoff"], "mounts": 2 if kind == "bar" and 2 * max(half) > 0.08 else 1,
+            "profile": "rect" if "rect" in declared or "square" in str(c.get("shape") or "").lower() else "round",
+            "x0": cx - half[0], "x1": cx + half[0], "y0": cy - half[1], "y1": cy + half[1],
+            "estimated": {"length": not (c.get("quad") or m), "thickness": not measured_thick, "depth": True}}
 
 
 def stable_id(text: str) -> str:

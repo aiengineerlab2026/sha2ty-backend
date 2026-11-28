@@ -261,3 +261,54 @@ def mesh_arrays(solid: mf.Manifold, tile: float = TILE) -> tuple[np.ndarray, np.
     n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
     nrm = np.repeat(n, 3, axis=0)
     return pos, nrm, face_uv(pos, nrm, tile), np.arange(len(pos))
+
+
+# ---- hardware ----
+
+def bar_handle(lo, hi, orientation: str, diameter: float, profile: str = "round", posts: int = 2) -> mf.Manifold:
+    """A bar handle inside its box: a grip `diameter` thick along the box's long axis at the front of the box, standing
+    on `posts` mounting posts that reach back to the mounting face (the box's back). Round or rectangular grip."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    s = hi - lo
+    axis = 1 if orientation == "vertical" else 0
+    length = s[axis]
+    d = min(diameter, s[2], s[1 - axis] if axis == 1 else s[1])
+    centre = (lo + hi) / 2
+    grip_z = hi[2] - d / 2
+    if profile == "round":
+        grip = mf.Manifold.cylinder(length, d / 2, d / 2, SEGMENTS)  # along +z: turn it onto the axis
+        grip = grip.rotate([-90, 0, 0]) if axis == 1 else grip.rotate([0, 90, 0])
+        start = [centre[0], lo[1], grip_z] if axis == 1 else [lo[0], centre[1], grip_z]
+        grip = grip.translate(start)
+    else:
+        half = [d / 2, d / 2, d / 2]
+        a = np.array([centre[0] - half[0], lo[1], grip_z - half[2]]) if axis == 1 else np.array([lo[0], centre[1] - half[1], grip_z - half[2]])
+        b = np.array([centre[0] + half[0], hi[1], grip_z + half[2]]) if axis == 1 else np.array([hi[0], centre[1] + half[1], grip_z + half[2]])
+        grip = box(a, b)
+    out = grip
+    post_d = max(0.006, 0.6 * d)
+    for i in range(max(posts, 1) if length > 0.08 else 1):
+        t = 0.5 if posts <= 1 or length <= 0.08 else (0.1 + 0.8 * i / (posts - 1))
+        at = lo[axis] + t * length
+        post = mf.Manifold.cylinder(grip_z - lo[2], post_d / 2, post_d / 2, SEGMENTS)
+        pos = [centre[0], at, lo[2]] if axis == 1 else [at, centre[1], lo[2]]
+        out = out + post.translate(pos)
+    return out
+
+
+def knob(lo, hi) -> mf.Manifold:
+    """A round knob in its box: a stem from the mounting face and a rounded cap filling the box's front."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    s = hi - lo
+    r = 0.5 * min(s[0], s[1])
+    cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
+    cap_depth = min(s[2] * 0.6, r * 1.2)
+    stem = mf.Manifold.cylinder(s[2] - cap_depth / 2, 0.35 * r, 0.35 * r, SEGMENTS).translate([cx, cy, lo[2]])
+    cap = mf.Manifold.sphere(1.0, SEGMENTS).scale([r, r, cap_depth / 2]).translate([cx, cy, hi[2] - cap_depth / 2])
+    return stem + cap
+
+
+def recess(lo, hi, depth: float = 0.008) -> mf.Manifold:
+    """A finger recess to cut from a door: the box's footprint sunk `depth` into the face at the box's back."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    return box([lo[0], lo[1], lo[2] - depth], [hi[0], hi[1], lo[2] + 1e-3])
