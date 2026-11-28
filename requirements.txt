@@ -23,3 +23,5 @@ pyobjc-framework-Vision>=10; sys_platform == "darwin"
 reportlab>=4.2
 arabic-reshaper>=3.0
 python-bidi>=0.6
+manifold3d>=3.5
+mapbox-earcut>=2.1

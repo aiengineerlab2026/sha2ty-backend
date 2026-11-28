@@ -139,8 +139,15 @@ def _scales(span: np.ndarray, details: dict[str, Any] | None) -> tuple[np.ndarra
     return scales, not bool((details or {}).get("scale_known"))
 
 
+_HANDLE = re.compile(r"\b(?:handles?|knobs?|grips?)\b|\bpulls?\b(?![- ]out)")
+
+
 def _role(part: dict[str, Any]) -> str:
     blob = f"{part.get('type') or ''} {part.get('name') or ''}".lower()
+    # A handle is named after what it is on ("Door 1 handle", "drawer pull"): it is the handle, not the door. Read as a
+    # door it counted in the carcass envelope and pushed the inferred side panels out to the handles' front face.
+    if _HANDLE.search(blob):
+        return "handle"
     for role, words in _ROLES:
         if any(re.search(rf"\b{re.escape(word)}\b", blob) for word in words):
             return role

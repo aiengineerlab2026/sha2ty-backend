@@ -1,4 +1,10 @@
+import os
+
 import pytest
+
+# The generator pipeline's tests (Meshy / GPT Astra / Sol) run in "meshy" mode; the hybrid engine's tests pick their mode
+# explicitly. The application default is "hybrid" (config.generation_mode).
+os.environ["GENERATION_MODE"] = "meshy"
 
 from app.services import vision
 

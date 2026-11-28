@@ -106,6 +106,10 @@ class Component(BaseModel):
     finish: str = ""
     confidence: float = Field(default=0.5, ge=0, le=1)
     separateMesh: bool = True
+    # How its shape can be built (services/hybrid.py): a regular decoration is parametric geometry or the photo's own
+    # texture; "complex" (organic carving, sculpted or upholstered form) cannot be built from boxes and is reported.
+    decoration: Literal["none", "fluted", "grooved", "raised_panel", "recessed_panel", "arched", "carved", "upholstered", "other"] = "none"
+    complexity: Literal["regular", "complex"] = "regular"
     relations: list[Relation] = []
     motion: Motion = Motion()
 

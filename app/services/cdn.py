@@ -89,6 +89,20 @@ class Cdn:
             pass
 
 
+def file_key(url: str | None, settings: Settings) -> str | None:
+    """The storage key of one of the platform's own R2 files, from any URL form it was saved under (this API's
+    /api/files route on whatever host, or CDN_PUBLIC_URL). None for anything else."""
+    from urllib.parse import unquote, urlsplit
+
+    if not url or ".." in url:
+        return None
+    public = (settings.cdn_public_url or "").rstrip("/") + "/"
+    if settings.cdn_public_url and url.startswith(public):
+        return unquote(url[len(public):].split("?", 1)[0])
+    path = urlsplit(url).path
+    return unquote(path.split("/api/files/", 1)[1]) if "/api/files/" in path else None
+
+
 def file_prefixes(settings: Settings) -> tuple[str, ...]:
     """Where the platform's own files live: R2 (through this API or its public URL) and, for older files, Supabase Storage."""
     return (
