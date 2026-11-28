@@ -3,7 +3,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
@@ -20,6 +21,7 @@ from app.api.plans import router as plans_router
 from app.api.sb_proxy import router as sb_router
 from app.api.session import SessionCookies, router as session_router
 from app.api.vendor import router as vendor_router
+from app.services.cdn import CdnError
 from app import handlers  # noqa: F401  subscribes the event handlers
 from app.core.config import get_settings
 from app.schemas.vendor import HealthResponse
@@ -65,6 +67,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Shatably Vendor API", version="2.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(CdnError)
+async def storage_failed(_request: Request, exc: CdnError) -> JSONResponse:
+    """A failed upload or download is a real error the person must see (never a silent success): its own status and
+    message, wherever it happens (a rebuild, a repair, a generation)."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
 
 app.add_middleware(
     CORSMiddleware,

@@ -10,6 +10,7 @@ import hashlib
 import logging
 import hmac
 import time
+from urllib.parse import quote
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -350,3 +351,25 @@ async def put_vision(body: VisionBody, request: Request) -> dict[str, object]:
     except vision.VisionSettingError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return {"model": model}
+
+
+@router.get("/models/{model_id}/diagnostics", dependencies=[Depends(require_admin)])
+async def model_diagnostics(model_id: str, request: Request) -> dict[str, object]:
+    """A model's technical record, for admins only: what validation found and repaired, the issues left after the
+    automatic repair (with stable ids), the comparison with its photo and the correction rounds. Vendors and
+    customers never see these; they never block saving or publishing."""
+    settings = get_settings()
+    client: httpx.AsyncClient = request.app.state.auth_http
+    base = settings.supabase_url.rstrip("/") + "/rest/v1"
+    for table in ("models", "user_models"):
+        res = await client.get(f"{base}/{table}?id=eq.{quote(model_id)}&select=id,status,components", headers=service_headers(settings))
+        if res.status_code < 400 and res.json():
+            row = res.json()[0]
+            doc = row.get("components") or {}
+            check = doc.get("visualCheck") or {}
+            return {"id": row["id"], "table": table, "status": row.get("status"),
+                    "validation": doc.get("validation") or {}, "geometryMetrics": (doc.get("hybrid") or {}).get("geometryMetrics"),
+                    "quality": doc.get("quality"), "fidelity": doc.get("fidelity"),
+                    "visualCheck": {k: check.get(k) for k in ("issues", "meanIoU", "design", "silhouette", "hardware")},
+                    "visualCorrection": doc.get("visualCorrection"), "visionReview": doc.get("visionReview")}
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "No such model.")

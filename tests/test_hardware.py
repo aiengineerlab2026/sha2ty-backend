@@ -52,12 +52,14 @@ def test_handles_are_owned_by_their_door_and_handleless_doors_get_none_invented(
     assert len(doors) == 4 and all(a["enabled"] for a in doors)  # each still opens
 
 
-def test_only_real_damage_blocks_publishing():
+def test_only_a_missing_model_blocks_publishing():
     base = {"components": [{"id": "door"}], "animation": {"uncertain": ["Door 1"]}, "hybrid": {"materialFallbacks": [{"component": "side", "reason": "in shadow"}]}}
     v = model_validation.verdict({**base, "validation": {"errors": [], "warnings": []}})
     assert v["status"] == "valid_with_warnings" and v["publishable"] and {n["kind"] for n in v["notes"]} == {"movement", "material"}
     legacy = model_validation.verdict({**base, "validation": {"status": "needs_confirmation", "errors": [], "confirm": ["How Door 1 opens…"]}})
     assert legacy["publishable"] and "confirm" not in legacy  # an older save with nothing broken publishes
     broken = model_validation.verdict({**base, "validation": {"errors": ["Door 1: inside out."]}})
-    assert broken["status"] == "needs_repair" and not broken["publishable"]
-    assert model_validation.verdict({"components": [], "validation": {}})["status"] == "failed"
+    assert broken["status"] == "needs_repair" and broken["technical"] == "issues" and broken["publishable"]  # quality, not eligibility
+    assert broken["errors"] == ["Door 1: inside out."]  # recorded, never cleared to let it through
+    empty = model_validation.verdict({"components": [], "validation": {}})
+    assert empty["status"] == "failed" and not empty["publishable"]

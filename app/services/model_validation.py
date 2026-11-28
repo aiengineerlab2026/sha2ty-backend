@@ -107,7 +107,10 @@ def validate_and_repair(glb: bytes, doc_in: dict[str, Any], only: set[str] | Non
     views = _views(doc, binary)
     comps = {c["id"]: c for c in doc_in.get("components") or []}
     decorated = {d["component"] for d in (doc_in.get("hybrid") or {}).get("decorations") or [] if d.get("method") == "geometry"}
-    errors, warnings, repairs = list((doc_in.get("validation") or {}).get("errors") or []), list((doc_in.get("validation") or {}).get("warnings") or []), []
+    # Every pass is computed afresh from the geometry as it is now: an earlier pass's messages are never carried
+    # over (re-validating would repeat them). What an earlier pass found and this one no longer does is "resolved".
+    previous = (doc_in.get("validation") or {}).get("issues") or []
+    errors, warnings, repairs = [], [], []
     linked = _linked(doc)
     boxes: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     shapes: dict[str, str] = {}
@@ -240,15 +243,28 @@ def validate_and_repair(glb: bytes, doc_in: dict[str, Any], only: set[str] | Non
                 # Against the vendor's measurements it is wrong; against an estimate it is a note.
                 (errors if doc_in.get("sizeSource") == "vendor" else warnings).append(f"The model is {v:.2f} m {k}, its recorded size is {want:.2f} m.")
     out = write_glb(doc, views) if repairs else glb
-    if only is None:  # the whole model: real geometry between parts and the UVs
+    if only is None:  # the whole model: real geometry between parts and the UVs, repaired where it is safe
         between = geometry_between(out, doc_in)
+        for _ in range(REPAIR_PASSES):
+            fixed, made = repair_boards(out, doc_in, between["metrics"])
+            if not made:
+                break
+            out, repairs = fixed, repairs + made
+            between = geometry_between(out, doc_in)
         errors += between["errors"]
         warnings += between["warnings"]
         doc_in.setdefault("hybrid", {})["geometryMetrics"] = between["metrics"]
-    doc_in["validation"] = {**(doc_in.get("validation") or {}), "ok": not errors, "errors": errors, "warnings": warnings, "repairs": repairs,
+    issues = _issues(errors, warnings, between["metrics"] if only is None else {}, "geometry")
+    errors, warnings = list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
+    now = {i["id"] for i in issues}
+    doc_in["validation"] = {**{k: v for k, v in (doc_in.get("validation") or {}).items() if k not in ("errors", "warnings", "issues", "resolved")},
+                            "ok": not errors, "errors": errors, "warnings": warnings, "repairs": repairs, "issues": issues,
+                            "resolved": [i for i in previous if i.get("id") not in now],
                             "checks": ["normals", "uv", "materials", "closed", "flat", "thickness", "duplicates", "overlap", "size",
                                        "volume", "floating", "handle ownership", "pivots"]}
     doc_in["validation"] = verdict(doc_in)
+    if errors:
+        logger.info("Model validation: %d unresolved issue(s) after repair: %s", len(errors), errors[:5])
     if repairs:
         logger.info("Model repairs: %s", repairs)
     return out, doc_in
@@ -260,6 +276,119 @@ INTERSECTION_CM3 = 1.0  # two solids sharing more than this many cm³ pass throu
 COPLANAR_CM2 = 1.0  # two same-facing faces of different parts overlapping more than this in one plane: z-fighting
 FRAME_FILL = 0.85  # a frame whose volume is this share of its box is a filled board, not a frame
 UV_STRETCH = 4.0  # texel density varying more than this across one part: stretched
+REPAIR_PASSES = 2  # bounded: each pass trims the boards found overlapping, then everything is checked again
+# Which of two overlapping boards gives way: the one further down this list (an inside board yields to the carcass).
+YIELD = ["side_panel", "top_panel", "base_panel", "plinth", "crown_trim", "back_panel", "divider", "shelf"]
+
+
+def _issues(errors: list[str], warnings: list[str], metrics: dict[str, Any], stage: str) -> list[dict[str, Any]]:
+    """Each finding once, with a stable id (type, parts, stage): repeated validation finds the same ids, so nothing
+    is listed twice and a repaired issue simply disappears."""
+    out: dict[str, dict[str, Any]] = {}
+    for kind, key in (("intersection", "intersections"), ("coplanar", "zFighting")):
+        for m in metrics.get(key) or []:
+            a, b = sorted((m["a"], m["b"]))
+            iid = f"{kind}:{a}:{b}:{stage}"
+            out[iid] = {"id": iid, "type": kind, "components": [a, b], "stage": stage, "measure": m.get("cm3", m.get("cm2"))}
+    for severity, lines in (("error", errors), ("warning", warnings)):
+        for line in lines:
+            if " pass through each other" in line or " in the same place" in line:
+                continue  # recorded above from the metrics, by part ids
+            iid = f"{severity}:{hashlib.sha1(line.encode()).hexdigest()[:10]}:{stage}"
+            out.setdefault(iid, {"id": iid, "type": severity, "stage": stage, "text": line})
+    return list(out.values())
+
+
+def repair_boards(glb: bytes, doc_in: dict[str, Any], metrics: dict[str, Any]) -> tuple[bytes, list[str]]:
+    """Plain procedural boards found passing through each other, or with same-facing faces in one plane, set right:
+    the board that yields (YIELD: a divider to the base, a shelf to a divider) is trimmed to stop at the other's
+    face along the axis it overlaps least (a joint, faces touching); a coplanar same-facing face is moved 0.5 mm
+    inward. Only boards still exactly their recorded box are touched, and only when the board keeps most of its
+    size; the part's recorded box follows. (new GLB, what was done)."""
+    from app.services import solids
+
+    comps = {c["id"]: c for c in doc_in.get("components") or []}
+    decorated = {d["component"] for d in (doc_in.get("hybrid") or {}).get("decorations") or [] if d.get("method") == "geometry"}
+
+    def board(pid):
+        c = comps.get(pid) or {}
+        # carcass and inside boards only: a door or a drawer moves on its own pivot and is never trimmed
+        return c if c.get("generation") == "procedural" and c.get("box") and pid not in decorated and c.get("kind") in YIELD else None
+
+    def rank(c):
+        return YIELD.index(c["kind"]) if c.get("kind") in YIELD else len(YIELD)
+
+    boxes = {pid: [np.array(c["box"][0], float), np.array(c["box"][1], float)] for pid, c in comps.items() if board(pid)}
+    changed: dict[str, list[str]] = {}
+    crossing = {frozenset((m["a"], m["b"])) for m in metrics.get("intersections") or []}
+    for kind, key in (("intersection", "intersections"), ("coplanar", "zFighting")):
+        for m in metrics.get(key) or []:
+            a, b = comps.get(m["a"]), comps.get(m["b"])
+            if not a or not b or not board(a["id"]) or not board(b["id"]) or rank(a) == rank(b):
+                continue
+            if kind == "coplanar" and frozenset((m["a"], m["b"])) in crossing:
+                continue  # trimming the overlap already parts their faces
+            give, keep = (a, b) if rank(a) > rank(b) else (b, a)
+            glo, ghi = boxes[give["id"]]
+            klo, khi = boxes[keep["id"]]
+            if kind == "intersection":
+                depth = np.minimum(ghi, khi) - np.maximum(glo, klo)
+                if np.any(depth <= 0):
+                    continue
+                # every way to stop it at the other's face (each axis, from below or above): the one that keeps the
+                # most of the yielding board is the joint (a divider stands on the base, not beside it)
+                options = []
+                for ax in range(3):
+                    lo_cut = (np.r_[glo[:ax], khi[ax], glo[ax + 1:]], ghi)  # it starts where the other ends
+                    hi_cut = (glo, np.r_[ghi[:ax], klo[ax], ghi[ax + 1:]])  # it ends where the other starts
+                    options += [o for o in (lo_cut, hi_cut) if np.all(o[1] - o[0] > 0)]
+                if not options:
+                    continue
+                new = max(options, key=lambda o: float(np.prod(o[1] - o[0])))
+                what = f"stops at {keep.get('name') or keep['id']} instead of passing through it"
+            else:
+                new = None
+                for ax in range(3):
+                    for side in (0, 1):
+                        if abs(boxes[give["id"]][side][ax] - boxes[keep["id"]][side][ax]) < 1e-4:
+                            lo, hi = glo.copy(), ghi.copy()
+                            (lo if side == 0 else hi)[ax] += 0.0005 if side == 0 else -0.0005
+                            new = (lo, hi)
+                            break
+                    if new:
+                        break
+                if new is None:
+                    continue
+                what = f"its face no longer lies in the same place as {keep.get('name') or keep['id']}'s"
+            size_before, size_after = ghi - glo, new[1] - new[0]
+            if np.any(size_after <= 0.5 * size_before):
+                continue  # it would lose most of a dimension: not a safe repair
+            boxes[give["id"]] = [new[0], new[1]]
+            changed.setdefault(give["id"], []).append(f"{give.get('name') or give['id']}: {what}.")
+    if not changed:
+        return glb, []
+    doc, binary = read_glb(glb)
+    views = _views(doc, binary)
+    done = []
+    for i, node in _parts(doc):
+        pid = (node.get("extras") or {}).get("partId")
+        if pid not in changed:
+            continue
+        prims = doc["meshes"][node["mesh"]].get("primitives") or []
+        if len(prims) != 1:
+            continue
+        attrs = prims[0]["attributes"]
+        pos, nrm, uv, _ = solids.mesh_arrays(solids.box(*boxes[pid]))
+        if len(pos) != len(_read(doc, views, attrs["POSITION"])):
+            continue  # not the builder's own board layout: left as it is
+        _write(doc, views, attrs["POSITION"], pos.astype(np.float32))
+        if "NORMAL" in attrs:
+            _write(doc, views, attrs["NORMAL"], nrm.astype(np.float32))
+        if "TEXCOORD_0" in attrs:
+            _write(doc, views, attrs["TEXCOORD_0"], uv.astype(np.float32))
+        comps[pid]["box"] = [[round(float(v), 4) for v in boxes[pid][0]], [round(float(v), 4) for v in boxes[pid][1]]]
+        done += changed[pid]
+    return (write_glb(doc, views), done) if done else (glb, [])
 
 
 def _triangles(doc: dict, views: list[bytes], node: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -376,15 +505,18 @@ def geometry_between(glb: bytes, doc_in: dict[str, Any]) -> dict[str, Any]:
 
 
 def verdict(doc_in: dict[str, Any]) -> dict[str, Any]:
-    """The model's status. Only genuine defects block publication:
-      valid                 no significant issue                                   publishable
-      valid_with_warnings   estimated materials, uncertain movements, estimated    publishable
-                            hidden parts, a part not generated: NOTES to read
-      needs_repair          critical geometry errors remain                        not publishable
-      failed                no usable geometry                                     not publishable
-    Ordinary uncertainty of a reconstruction from one photo is never an error and never needs a confirmation."""
+    """The model's state, kept as separate properties (technical quality never decides publishing):
+      technical    "passed" | "issues": what the geometry checks found after repair (errors stay recorded as found)
+      status       the QUALITY: valid | valid_with_warnings (estimates, notes) | needs_repair (geometry issues left
+                   after automatic repair) | failed (no geometry at all)
+      repair       what was repaired automatically and how many issues are left
+      usable       a model that loads and shows its parts: it has geometry
+      publishable  = usable. Intersections, coplanar faces, UVs, colour or likeness differences, estimates and
+                   uncertain movements never stop a usable model from being saved or published; only a missing or
+                   broken model (no parts) does. The vendor's own listing choice is never changed here.
+    `notes`: the estimates a person may want to adjust (never a technical message, never an obligation)."""
     v = doc_in.get("validation") or {}
-    notes = []
+    notes: list[dict[str, str]] = []
     for label in (doc_in.get("animation") or {}).get("uncertain") or []:
         notes.append({"kind": "movement", "text": f"How {label} opens was estimated from the photo."})
     for f in (doc_in.get("hybrid") or {}).get("materialFallbacks") or []:
@@ -393,14 +525,12 @@ def verdict(doc_in: dict[str, Any]) -> dict[str, Any]:
         notes.append({"kind": "component", "text": f"{p['name']} could not be generated; it can be regenerated."})
     for w in v.get("warnings") or []:
         notes.append({"kind": "estimate" if w.startswith("Estimated, not seen") else "check", "text": w})
-    if not doc_in.get("components"):
-        status = "failed"
-    elif v.get("errors"):
-        status = "needs_repair"
-    elif notes:
-        status = "valid_with_warnings"
-    else:
-        status = "valid"
-    out = {**v, "status": status, "notes": notes, "publishable": status in ("valid", "valid_with_warnings")}
+    if doc_in.get("sizeSource") not in (None, "vendor"):
+        notes.append({"kind": "dimension", "text": "Overall sizes were estimated from the photo."})
+    errors = v.get("errors") or []
+    usable = bool(doc_in.get("components"))
+    status = "failed" if not usable else "needs_repair" if errors else "valid_with_warnings" if notes else "valid"
+    out = {**v, "status": status, "technical": "issues" if errors else "passed", "notes": notes, "usable": usable, "publishable": usable,
+           "repair": {"repaired": len(v.get("repairs") or []), "unresolved": len(errors), "automatic": True}}
     out.pop("confirm", None)  # the old mandatory confirmations: gone
     return out
