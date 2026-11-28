@@ -40,7 +40,7 @@ from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, nearest_aspect_ratio, quality_options, texture_conditioning
-from app.services import component_mesh, generator_setting, hybrid, model_validation
+from app.services import component_mesh, generator_setting, hybrid, model_validation, visual_check
 from app.api import hybrid_parts
 from app.services.texture_prompt import TexturePromptError, read_texture_prompt
 from app.services.quota import generation_usage, use_generation
@@ -756,12 +756,12 @@ async def generate_model(
                         task_id = uuid4().hex
                         request.app.state.pending_cdn[task_id] = {
                             "stage": "components", "user_id": user_id, "model_id": object_id, "base": glb, "doc": doc, "jobs": jobs,
-                            "spec": spec_doc, "category": category, "kind": kind, "cache_key": cache_key,
+                            "spec": spec_doc, "category": category, "kind": kind, "cache_key": cache_key, "photo": raw,
                             "details": details.model_dump(mode="json") if details else None,
                         }
                         return GenerateAccepted(task_id=task_id, provider=provider, remaining=remaining, details=details)
                     glb, doc = await hybrid_parts.assemble(cdn, glb, doc, jobs, settings)  # all cached, or all refused: set now
-                url, doc = await hybrid_done(cdn, user_id, object_id, glb, doc, spec_doc, category, kind)
+                url, doc = await hybrid_done(cdn, user_id, object_id, glb, doc, spec_doc, category, kind, photo=raw)
             except CdnError as exc:
                 await bus.publish(GenerationFailed(user_id, provider), request.app.state)
                 raise HTTPException(exc.status_code, exc.message) from exc
@@ -975,10 +975,17 @@ async def _clean_failed(request: Request, task_id: str, pending: dict, reason: s
 
 
 async def hybrid_done(cdn: Cdn, user_id: str, object_id: str, glb: bytes, doc: dict, spec_doc: dict | None, category: str | None,
-                      kind: str | None, key: str | None = None) -> tuple[str, dict]:
+                      kind: str | None, key: str | None = None, photo: bytes | None = None) -> tuple[str, dict]:
     """A rebuilt model finished: checked and repaired (model_validation), sized, its structural model beside it,
     uploaded. `key`: the file's storage key (a regenerated component writes a new version)."""
     glb, doc = await run_in_threadpool(model_validation.validate_and_repair, glb, doc)
+    if photo is not None:  # the model against the photo it was rebuilt from (deterministic, no AI call)
+        seen = await run_in_threadpool(visual_check.compare, glb, photo, doc)
+        seen.pop("_images", None)
+        doc["visualCheck"] = seen
+        if seen.get("issues"):
+            doc["validation"] = {**doc["validation"], "warnings": [*doc["validation"].get("warnings", []), *seen["issues"]]}
+            doc["validation"] = model_validation.verdict(doc)
     glb, _, doc = await sized(glb, None, doc)
     if "carpenter" not in doc and spec_doc:
         built = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb")
@@ -1004,7 +1011,8 @@ async def components_task(request: Request, meshy: MeshyService, cdn: Cdn, task_
     owner, object_id = pending["user_id"], pending["model_id"]
     key = f"{owner}/{object_id}.{uuid4().hex[:8]}.glb" if pending.get("regenerated") else None  # a new file: the saved one stays valid
     try:
-        url, doc = await hybrid_done(cdn, owner, object_id, glb, doc, pending.get("spec"), pending.get("category"), pending.get("kind"), key)
+        url, doc = await hybrid_done(cdn, owner, object_id, glb, doc, pending.get("spec"), pending.get("category"), pending.get("kind"), key,
+                                     photo=pending.get("photo"))
     except CdnError as exc:
         return _finish(request, task_id, pending, _status(task_id, pending, "failed", status="FAILED", progress=100, error=exc.message))
     if pending.get("cache_key"):
@@ -1103,7 +1111,7 @@ async def rebuild_hybrid(
                                                       "jobs": jobs, "spec": spec_doc, "category": body.category, "kind": body.kind, "regenerated": "rebuild"}
             return {"task_id": task_id, "status": "PENDING"}
         glb, doc = await hybrid_parts.assemble(cdn, glb, doc, jobs, settings)
-    url, doc = await hybrid_done(cdn, user_id, body.model_id, glb, doc, spec_doc, body.category, body.kind, f"{user_id}/{body.model_id}.{uuid4().hex[:8]}.glb")
+    url, doc = await hybrid_done(cdn, user_id, body.model_id, glb, doc, spec_doc, body.category, body.kind, f"{user_id}/{body.model_id}.{uuid4().hex[:8]}.glb", photo=photo)
     return {"status": "SUCCEEDED", "glb_url": url, "components": doc}
 
 

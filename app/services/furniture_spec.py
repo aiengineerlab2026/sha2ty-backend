@@ -37,7 +37,7 @@ from app.services.product_details import LISTING, Lang, clean
 
 logger = logging.getLogger(__name__)
 
-SPEC_VERSION = "furniture-spec-v2"  # bump with PROMPT or the schema: invalidates the cache
+SPEC_VERSION = "furniture-spec-v3"  # bump with PROMPT or the schema: invalidates the cache
 
 PROMPT = """You are a furniture modeller preparing a vendor's product photo for two 3D models: a visual one that must
 look exactly like the photo, and a structural one a carpenter can build from. The vendor says it is {what}.
@@ -80,6 +80,22 @@ side panels, top, base, back, frame, headboard, upholstery… whatever this obje
   tufted or shaped upholstery); flat panels, doors, shelves, boxes, regular grooves and flutes are "regular" even when
   decorated. Never call the whole object complex because one part is.
 - relations: how parts connect (door_left attached_to body, handle_1 attached_to door_left, shelf_1 inside body…).
+- kind: what each part physically is (side_panel, top_panel, crown_trim, plinth, back_panel, door, sliding_door,
+  drawer_front, door_frame, mirror, glass, moulding, handle, shelf, leg, tabletop, headboard…). A door that is a frame
+  holding a mirror or glass is a LOGICAL assembly: list it with logical true (no solid of its own), then its parts
+  with assembly = that door's id: its door_frame (geometry "frame"), its mirror or glass (geometry "pane"). Never list
+  the same physical part twice under two names.
+- quad: the corners of the part's visible FRONT face in the IMAGE (fractions of the image, not of the object), in
+  the order top-left, top-right, bottom-right, bottom-left, following the face's real edges (in perspective they are
+  not a rectangle). sideQuad: a visible side panel's outer face the same way.
+- mouldings: every rectangular moulding on a part's front face, one entry each (two panels of trim on a door are two
+  entries), as fractions of that face, raised or recessed, with the trim's width.
+- motion: sliding doors (two overlapping doors on tracks, no hinges) are kind sliding_door with motion "slide"
+  (direction left / right); hinged doors "rotate" with the hinge side. If the photo does not show which, give the
+  motion with confidence below 0.4 and say why: never assume a door turns because it is a door.
+- frontQuad: the whole object's front face corners in the image; viewYaw: the camera's side angle.
+- exclusions: every region on the furniture that is not its material (the room reflected in a mirror, a cast shadow,
+  an object standing in front), as image quads.
 - motion: only for parts that really move in use (hinged doors, drawers, sliding doors, flaps, lids); everything
   else is type "none". Never invent a movable part. Doors hinge on the side away from the handle.
 - interior: only for storage pieces whose inside is hidden: simple, typical items with a count.
