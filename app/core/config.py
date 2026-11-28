@@ -15,6 +15,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # How vendor photos become 3D models (services/hybrid.py): "hybrid" (default) and "deterministic" rebuild the
+    # furniture from the photo's spec (one vision call, no mesh generator) with each part textured from the photo;
+    # "meshy" is the generator pipeline (the admin's choice of Meshy / GPT Astra / GPT Sol). A photo the engine cannot
+    # rebuild (mostly upholstered or carved) falls back to the generator, and the model says why.
+    generation_mode: Literal["hybrid", "deterministic", "meshy"] = "hybrid"
     generation_limit: int = 30  # Meshy calls and GPT Astra calls allowed per vendor account (each)
     meshy_api_key: SecretStr = SecretStr("")
     meshy_base_url: str = "https://api.meshy.ai/openapi/v1"

@@ -44,7 +44,7 @@ def size(details: dict[str, Any] | None) -> tuple[tuple[float, float, float] | N
     d = details or {}
     w, h, dep = d.get("width_m"), d.get("height_m"), d.get("depth_m")
     notes: list[str] = []
-    known = d.get("dimension_source") == "annotated"
+    known = d.get("dimension_source") in ("annotated", "vendor")  # written on the image, or given by the vendor
     prop = d.get("proportions")  # width : depth : height
     if not all((w, h, dep)) and prop and len(prop) == 3 and all(p > 0 for p in prop):
         pw, pd, ph = prop

@@ -37,7 +37,7 @@ from app.services.product_details import LISTING, Lang, clean
 
 logger = logging.getLogger(__name__)
 
-SPEC_VERSION = "furniture-spec-v1"  # bump with PROMPT or the schema: invalidates the cache
+SPEC_VERSION = "furniture-spec-v2"  # bump with PROMPT or the schema: invalidates the cache
 
 PROMPT = """You are a furniture modeller preparing a vendor's product photo for two 3D models: a visual one that must
 look exactly like the photo, and a structural one a carpenter can build from. The vendor says it is {what}.
@@ -75,7 +75,11 @@ side panels, top, base, back, frame, headboard, upholstery… whatever this obje
   painted_wood, mdf, laminate, glass, mirror, metal, fabric, leather, stone, plastic or other; material and
   texture in words (e.g. "oak", "wood grain"); finish (matte, satin, gloss, brushed…).
 - confidence: 0..1 per part: low when its size or presence is a guess.
-- relations: how parts connect (door_left attached_to body, shelf_1 inside body…).
+- decoration: none, fluted (vertical ribs), grooved, raised_panel, recessed_panel, arched, carved, upholstered or
+  other. complexity: "complex" only for a part whose SHAPE is organic or sculpted (floral carving, sculpted leg,
+  tufted or shaped upholstery); flat panels, doors, shelves, boxes, regular grooves and flutes are "regular" even when
+  decorated. Never call the whole object complex because one part is.
+- relations: how parts connect (door_left attached_to body, handle_1 attached_to door_left, shelf_1 inside body…).
 - motion: only for parts that really move in use (hinged doors, drawers, sliding doors, flaps, lids); everything
   else is type "none". Never invent a movable part. Doors hinge on the side away from the handle.
 - interior: only for storage pieces whose inside is hidden: simple, typical items with a count.

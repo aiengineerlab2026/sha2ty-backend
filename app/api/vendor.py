@@ -40,7 +40,8 @@ from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, nearest_aspect_ratio, quality_options, texture_conditioning
-from app.services import generator_setting
+from app.services import component_mesh, generator_setting, hybrid, model_validation
+from app.api import hybrid_parts
 from app.services.texture_prompt import TexturePromptError, read_texture_prompt
 from app.services.quota import generation_usage, use_generation
 
@@ -73,6 +74,7 @@ class GenerateReady(BaseModel):
     source_glb_url: str | None = None  # the untouched generated GLB, when glb_url is its split (modular) version
     # Other states of the same product (supabase/model_states.sql): {"open": {"glb_url", "components"}}.
     states: dict | None = None
+    mode: str | None = None  # hybrid / deterministic (services/hybrid.py) or meshy (the generator)
 
 
 class GenerationStep(BaseModel):
@@ -654,8 +656,15 @@ async def generate_model(
     lang: Annotated[Literal["ar", "en"], Form()] = "ar",  # the listing (name, description) in the vendor's interface language
     # Wardrobes with an open and a closed state: the photo of it open (`image` is the closed one).
     open_image: Annotated[UploadFile | None, File()] = None,
+    # The vendor's choice of how the model is made; empty: GENERATION_MODE.
+    mode: Annotated[Literal["hybrid", "deterministic", "meshy"] | None, Form()] = None,
+    # The vendor's own measurements (metres): they win over the photo's estimate in the rebuilt model.
+    width_m: Annotated[float | None, Form(gt=0, le=20)] = None,
+    height_m: Annotated[float | None, Form(gt=0, le=20)] = None,
+    depth_m: Annotated[float | None, Form(gt=0, le=20)] = None,
 ) -> GenerateAccepted | GenerateReady:
     provider = await generator_setting.current(settings, request.app.state.auth_http)
+    mode = mode or settings.generation_mode
     logger.info("Generate: generator=%s (admin setting) category=%r kind=%r", provider, category, kind)
     raw = await image.read() if image is not None else b""
     open_raw = await open_image.read() if open_image is not None else b""
@@ -674,10 +683,11 @@ async def generate_model(
     db = request.app.state.auth_http
     # Meshy reads nothing with the vision model unless the optional analysis is on (the two-state wardrobe builder,
     # which is not Meshy, still reads its photos).
-    vision_reading = provider != "meshy" or settings.meshy_vision_analysis
+    vision_reading = provider != "meshy" or settings.meshy_vision_analysis or mode != "meshy"
     # The same photo, vendor and options → the model generated before (model_cache): no vision call,
     # no Meshy / Astra job, no try used. Per vendor: a model is never served from another studio's files.
-    cache_key = glb_cache_key(raw + open_raw, user_id, provider, category, title, textured, kind, builds_wardrobe(provider, category, kind, bool(open_raw))) if raw else None
+    cache_key = glb_cache_key(raw + open_raw, user_id, provider if mode == "meshy" else f"{provider}|{mode}-1", category, title, textured, kind,
+                              builds_wardrobe(provider, category, kind, bool(open_raw))) if raw else None
     hit = await vision.cache_get(settings, db, cache_key, table="model_cache") if cache_key else None
     if hit and hit.get("glb_url"):
         details = ProductDetails.model_validate(hit["details"]) if hit.get("details") else None
@@ -721,6 +731,43 @@ async def generate_model(
             return GenerateReady(task_id=object_id, provider=provider, glb_url=url, details=details, components=components, states=states)
         preread = details  # read once: the image-to-3D path below reuses it
 
+    fallback: str | None = None  # why the hybrid engine handed this photo to the generator
+    if raw and mode != "meshy":
+        remaining = await take_try(request, user_id, provider, settings)
+        spec = prespec or await read_spec(request, settings, raw, mime, category, title, kind, lang)
+        spec_doc = spec.model_dump(mode="json") if spec else None
+        glb, doc = await run_in_threadpool(hybrid.build, raw, spec_doc, category, kind or None, mode, (width_m, height_m, depth_m)) if spec_doc \
+            else (None, {"reason": "The photo could not be read."})
+        if glb is None:
+            # Not rebuilt here: the try goes back, and the generator below takes its own and says why it was used.
+            await bus.publish(GenerationFailed(user_id, provider), request.app.state)
+            fallback = f"Made by the 3D generator, not rebuilt part by part: {doc.get('reason')}"
+            logger.info("Hybrid engine declined (%s): %s", mode, doc.get("reason"))
+            prespec = spec
+        else:
+            details = spec.details if spec else preread
+            images = doc.pop("_pendingImages", {})
+            doc["cost"] = {"visionCalls": "at most 1 (the photo's spec, cached per photo)", "meshGeneratorCalls": 0}
+            doc["structureSpec"] = {"category": category, "kind": kind or None}
+            try:
+                if doc.get("pendingComponents"):
+                    jobs = await hybrid_parts.start(request, meshy, cdn, settings, user_id, object_id, doc, images)
+                    if any("task" in j for j in jobs.values()):  # complex parts are being generated: poll the task
+                        task_id = uuid4().hex
+                        request.app.state.pending_cdn[task_id] = {
+                            "stage": "components", "user_id": user_id, "model_id": object_id, "base": glb, "doc": doc, "jobs": jobs,
+                            "spec": spec_doc, "category": category, "kind": kind, "cache_key": cache_key,
+                            "details": details.model_dump(mode="json") if details else None,
+                        }
+                        return GenerateAccepted(task_id=task_id, provider=provider, remaining=remaining, details=details)
+                    glb, doc = await hybrid_parts.assemble(cdn, glb, doc, jobs, settings)  # all cached, or all refused: set now
+                url, doc = await hybrid_done(cdn, user_id, object_id, glb, doc, spec_doc, category, kind)
+            except CdnError as exc:
+                await bus.publish(GenerationFailed(user_id, provider), request.app.state)
+                raise HTTPException(exc.status_code, exc.message) from exc
+            await remember(url, details, doc)
+            return GenerateReady(task_id=object_id, provider=provider, glb_url=url, remaining=remaining, details=details, components=doc, mode=mode)
+
     if provider in ("astra", "sol"):  # both OpenAI models via the Responses API
         if not settings.astra_configured:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
@@ -749,6 +796,8 @@ async def generate_model(
             glb, source_glb, components = await sized(glb, source_glb, components)
             components = await run_in_threadpool(validated, glb, components, category, kind, raw, details.bbox if details else None)
             components = {**with_structural(components, built, spec_doc), "raw_glb_url": cdn.public_url(f"{user_id}/{object_id}.raw.glb")}
+            if fallback:
+                components["limits"] = " ".join(x for x in (components.get("limits"), fallback) if x)
             components = await run_in_threadpool(fidelity_checked, components, raw_glb, glb, raw, None, details.bbox if details else None)
             url = await run_in_threadpool(cdn.upload, f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
             source_url = schedule_source(background, source_glb, cdn, f"{user_id}/{object_id}.source.glb")
@@ -802,7 +851,7 @@ async def generate_model(
         "vision_off": not settings.meshy_vision_analysis,
         "textured": textured,
         "photo": raw or None,  # the reference for the checks when the model arrives (dropped with the task)
-        "warnings": [],
+        "warnings": [fallback] if fallback else [],
     }
     if by_prompt:  # written now, from the original photo, before any Meshy task exists
         photo_for_texture = raw or (await meshy.download_bytes(public_url) if public_url else None) or b""
@@ -923,6 +972,170 @@ async def _clean_failed(request: Request, task_id: str, pending: dict, reason: s
         error=f"{IMAGE_FAILED} {reason}".strip() if reason else IMAGE_FAILED,
         steps=_steps(("FAILED", progress), ("PENDING", 0)),
     ))
+
+
+async def hybrid_done(cdn: Cdn, user_id: str, object_id: str, glb: bytes, doc: dict, spec_doc: dict | None, category: str | None,
+                      kind: str | None, key: str | None = None) -> tuple[str, dict]:
+    """A rebuilt model finished: checked and repaired (model_validation), sized, its structural model beside it,
+    uploaded. `key`: the file's storage key (a regenerated component writes a new version)."""
+    glb, doc = await run_in_threadpool(model_validation.validate_and_repair, glb, doc)
+    glb, _, doc = await sized(glb, None, doc)
+    if "carpenter" not in doc and spec_doc:
+        built = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb")
+        doc = with_structural(doc, built, spec_doc)
+    url = await run_in_threadpool(cdn.upload, key or f"{user_id}/{object_id}.glb", glb, "model/gltf-binary")
+    return url, doc
+
+
+async def components_task(request: Request, meshy: MeshyService, cdn: Cdn, task_id: str, pending: dict) -> TaskStatusResponse:
+    """A rebuilt model whose complex components Meshy is generating (hybrid_parts): progress until every task ends,
+    then the model with every generated component set in, and the failed ones listed."""
+    settings = get_settings()
+    done = await hybrid_parts.poll(request, meshy, cdn, settings, pending)
+    jobs = pending["jobs"]
+    if not done:
+        running = [j for j in jobs.values() if "task" in j and not j.get("glb") and not j.get("error")]
+        progress = 40 + int(50 * (1 - len(running) / max(len(jobs), 1))) + sum(j.get("progress", 0) for j in running) // max(len(jobs), 1) // 3
+        return _status(task_id, pending, "decorative_reconstruction", status="IN_PROGRESS", progress=min(95, progress), retry_after_seconds=8)
+    glb, doc = await hybrid_parts.assemble(cdn, pending["base"], pending["doc"], jobs, settings)
+    if pending.get("keep") is not None:  # one component regenerated: the others keep their records
+        doc["pendingComponents"] = [*pending["keep"], *doc["pendingComponents"]]
+        doc["componentFailures"] = [p for p in doc["pendingComponents"] if p.get("status") == "failed"]
+    owner, object_id = pending["user_id"], pending["model_id"]
+    key = f"{owner}/{object_id}.{uuid4().hex[:8]}.glb" if pending.get("regenerated") else None  # a new file: the saved one stays valid
+    try:
+        url, doc = await hybrid_done(cdn, owner, object_id, glb, doc, pending.get("spec"), pending.get("category"), pending.get("kind"), key)
+    except CdnError as exc:
+        return _finish(request, task_id, pending, _status(task_id, pending, "failed", status="FAILED", progress=100, error=exc.message))
+    if pending.get("cache_key"):
+        await vision.cache_put(settings, request.app.state.auth_http, pending["cache_key"], "vendor_glb", "hybrid",
+                               {"glb_url": url, "model_id": object_id, "details": pending.get("details"), "components": doc}, table="model_cache")
+    return _finish(request, task_id, pending, _status(task_id, pending, "completed", status="SUCCEEDED", progress=100, glb_url=url, components=doc))
+
+
+class RegenerateComponent(BaseModel):
+    glb_url: str
+    components: dict
+    component_id: str
+    model_id: str
+
+
+@router.post("/hybrid/components/regenerate", response_model=GenerateAccepted)
+async def regenerate_component(
+    body: RegenerateComponent,
+    request: Request,
+    meshy: Annotated[MeshyService, Depends(get_meshy)],
+    cdn: Annotated[Cdn, Depends(get_cdn)],
+    settings: SettingsDep,
+    user_id: Annotated[str, Depends(current_user)],
+) -> GenerateAccepted:
+    """One complex component of a rebuilt model generated again from its cutout of the original photo; every other
+    part, id, relation and animation is kept. Poll GET /api/vendor/tasks/{task_id}; the answer is a new model file."""
+    from app.services.cdn import file_key
+
+    if not (file_key(body.glb_url, settings) or "").startswith(f"{user_id}/"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your model.")
+    parts = body.components.get("pendingComponents") or []
+    part = next((p for p in parts if p.get("id") == body.component_id), None)
+    if part is None or not part.get("imageUrl"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That component was not generated from the photo, or its cutout is gone.")
+    image, base = await hybrid_parts.fetch(cdn, part["imageUrl"], settings), await hybrid_parts.fetch(cdn, body.glb_url, settings)
+    if not image or not base:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The model or the component's cutout could not be read.")
+    remaining = await take_try(request, user_id, "meshy", settings)  # one Meshy task: one try
+    base = await run_in_threadpool(component_mesh.remove, base, part["id"])
+    doc = {**body.components, "pendingComponents": [{**part, "status": "pending"}]}
+    jobs = await hybrid_parts.start(request, meshy, cdn, settings, user_id, body.model_id, doc, {part["group"]: image}, force=True)
+    task_id = uuid4().hex
+    request.app.state.pending_cdn[task_id] = {"stage": "components", "user_id": user_id, "model_id": body.model_id, "base": base, "doc": doc,
+                                              "jobs": jobs, "keep": [p for p in parts if p.get("id") != part["id"]], "regenerated": part["id"]}
+    return GenerateAccepted(task_id=task_id, provider="meshy", remaining=remaining)
+
+
+class HybridRebuild(BaseModel):
+    """A rebuilt model made again from its stored reading (no vision call, no try): confirmed sizes, kept confirmations."""
+    model_id: str
+    source_image_url: str
+    components: dict
+    category: str = "furniture"
+    kind: str | None = None
+    width_m: float | None = Field(default=None, gt=0, le=20)
+    height_m: float | None = Field(default=None, gt=0, le=20)
+    depth_m: float | None = Field(default=None, gt=0, le=20)
+
+
+@router.post("/hybrid/rebuild")
+async def rebuild_hybrid(
+    body: HybridRebuild,
+    request: Request,
+    meshy: Annotated[MeshyService, Depends(get_meshy)],
+    cdn: Annotated[Cdn, Depends(get_cdn)],
+    settings: SettingsDep,
+    user_id: Annotated[str, Depends(current_user)],
+) -> dict:
+    """The rebuilt model at the vendor's confirmed sizes, from the reading stored with it. Part ids stay the same (they
+    follow the reading), material confirmations are kept, generated components are reused from their cache."""
+    from app.services.cdn import file_key
+
+    if not (file_key(body.source_image_url, settings) or "").startswith(f"{user_id}/"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your photo.")
+    analysis, details = body.components.get("analysis"), body.components.get("specDetails")
+    if not analysis or not details:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This model was not rebuilt from a photo reading: generate it again instead.")
+    photo = await hybrid_parts.fetch(cdn, body.source_image_url, settings)
+    if not photo:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The model's photo could not be read.")
+    spec_doc = {"details": details, "analysis": analysis}
+    glb, doc = await run_in_threadpool(hybrid.build, photo, spec_doc, body.category, body.kind, body.components.get("method") or "hybrid",
+                                       (body.width_m, body.height_m, body.depth_m))
+    if glb is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, doc.get("reason") or "It could not be rebuilt.")
+    confirmed = {c["id"]: c.get("material") for c in body.components.get("components") or [] if (c.get("material") or {}).get("confirmed")}
+    for c in doc["components"]:
+        if c["id"] in confirmed:
+            c["material"] = confirmed[c["id"]]
+    images = doc.pop("_pendingImages", {})
+    if doc.get("pendingComponents"):
+        jobs = await hybrid_parts.start(request, meshy, cdn, settings, user_id, body.model_id, doc, images)
+        if any("task" in j for j in jobs.values()):
+            task_id = uuid4().hex
+            request.app.state.pending_cdn[task_id] = {"stage": "components", "user_id": user_id, "model_id": body.model_id, "base": glb, "doc": doc,
+                                                      "jobs": jobs, "spec": spec_doc, "category": body.category, "kind": body.kind, "regenerated": "rebuild"}
+            return {"task_id": task_id, "status": "PENDING"}
+        glb, doc = await hybrid_parts.assemble(cdn, glb, doc, jobs, settings)
+    url, doc = await hybrid_done(cdn, user_id, body.model_id, glb, doc, spec_doc, body.category, body.kind, f"{user_id}/{body.model_id}.{uuid4().hex[:8]}.glb")
+    return {"status": "SUCCEEDED", "glb_url": url, "components": doc}
+
+
+class HybridRepair(BaseModel):
+    glb_url: str
+    components: dict
+    component_id: str
+    model_id: str
+
+
+@router.post("/hybrid/components/repair")
+async def repair_component(
+    body: HybridRepair,
+    cdn: Annotated[Cdn, Depends(get_cdn)],
+    settings: SettingsDep,
+    user_id: Annotated[str, Depends(current_user)],
+) -> dict:
+    """The safe repairs (normals, texture coordinates, material, flatness of a plain board) on ONE part; every other part
+    is left exactly as it is. A new file when something was repaired."""
+    from app.services.cdn import file_key
+
+    if not (file_key(body.glb_url, settings) or "").startswith(f"{user_id}/"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your model.")
+    glb = await hybrid_parts.fetch(cdn, body.glb_url, settings)
+    if not glb:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The model could not be read.")
+    fixed, doc = await run_in_threadpool(model_validation.validate_and_repair, glb, dict(body.components), {body.component_id})
+    repairs = [r for r in doc["validation"]["repairs"]]
+    url = body.glb_url
+    if repairs:
+        url = await run_in_threadpool(cdn.upload, f"{user_id}/{body.model_id}.{uuid4().hex[:8]}.glb", fixed, "model/gltf-binary")
+    return {"glb_url": url, "components": doc, "repairs": repairs}
 
 
 TEXTURE_PROMPT_TIMEOUT = 120.0  # seconds for the vision model to describe the photo
@@ -1155,6 +1368,8 @@ async def get_task(
             return pending["result"]
         if pending.get("stage") == "approval":
             return _awaiting(task_id, pending)
+        if pending.get("stage") == "components":
+            return await components_task(request, meshy, cdn, task_id, pending)
         if pending.get("stage") in ("image", "validation"):
             return await conditioned_image(request, meshy, cdn, task_id, pending)
         return await _mesh_task(task_id, request, meshy, cdn, user_id, background, pending, registered)
