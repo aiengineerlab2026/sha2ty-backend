@@ -151,8 +151,66 @@ def _hex(value: str | None) -> list[float] | None:
     return [int(v[i:i + 2], 16) / 255 for i in (0, 2, 4)] if len(v) == 6 else None
 
 
+NEUTRAL = 8.0  # a reading colour within this chroma (Lab a*b*, 8-bit scale ≈ CIE) is a neutral finish (grey, white, black)
+TINT = 24.0  # a sample within this chroma can be a neutral surface tinted by the room's light
+
+
+def trim_core(valid: np.ndarray, kind: str | None) -> np.ndarray:
+    """A trim against the floor or the ceiling (a plinth, a crown) is sampled away from that edge: its corners in a
+    photo are seldom exact to the pixel, and the floor or ceiling beside it is never its finish."""
+    if kind not in ("plinth", "crown_trim") or valid.shape[0] < 3:
+        return valid
+    out, h = valid.copy(), valid.shape[0]
+    if kind == "plinth":
+        out[int(np.ceil(0.6 * h)):] = 0
+    else:
+        out[: int(0.4 * h)] = 0
+    return out
+
+
+def scene_cast(rgb: np.ndarray) -> np.ndarray:
+    """The photo's overall colour cast (median a*, b*): the room's light. Used only to tell a tinted neutral surface
+    from a coloured one, never applied to the photo as a global white balance."""
+    small = cv2.resize(rgb, (96, 96), interpolation=cv2.INTER_AREA) if max(rgb.shape[:2]) > 96 else rgb
+    return np.median(_lab(small.reshape(-1, 3)), axis=0)[1:] - 128.0
+
+
+def fuse(lab: np.ndarray, said: list[float] | None, cast: np.ndarray | None) -> tuple[np.ndarray, str | None]:
+    """The measured colour (8-bit Lab) and the reading's colour together. When the reading says the finish is neutral,
+    the sample is only slightly tinted and its tint leans the way the room's light does, the sample's tint is the
+    light's: its lightness is kept (measured), its hue and chroma are the reading's. A coloured finish (the reading
+    says so) keeps its measured colour: intentionally warm furniture stays warm."""
+    if said is None or cast is None or np.hypot(*cast) < 3:
+        return lab, None
+    ref = _lab(np.uint8([[int(round(v * 255)) for v in said]]))[0]
+    ra, rb, ma, mb = ref[1] - 128, ref[2] - 128, lab[1] - 128, lab[2] - 128
+    if np.hypot(ra, rb) <= NEUTRAL and np.hypot(ma, mb) <= TINT and (ma - ra) * cast[0] + (mb - rb) * cast[1] > 0 and np.hypot(ma - ra, mb - rb) > 2:
+        return np.array([lab[0], ref[1], ref[2]]), "a neutral finish under the room's coloured light: its hue from the reading, its lightness measured"
+    return lab, None
+
+
+def _dominant(lab: np.ndarray, said: list[float] | None) -> np.ndarray:
+    """The surface's own pixels when two clearly different colours share its region (a thin trim and the floor under
+    it, a frame and what shows through it): the cluster nearest the reading's colour, else the larger one."""
+    if len(lab) < 12:
+        return lab
+    cv2.setRNGSeed(0)
+    _, lbl, ctr = cv2.kmeans(lab.astype(np.float32), 2, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5), 3, cv2.KMEANS_PP_CENTERS)
+    lbl = lbl.ravel()
+    shares = [(lbl == k).mean() for k in (0, 1)]
+    if np.linalg.norm(ctr[0] - ctr[1]) < 25 or min(shares) < 0.2:
+        return lab
+    pick = int(np.argmax(shares))
+    if said is not None:  # by hue: the reading's lightness is the least reliable part of its colour
+        ref = _lab(np.uint8([[int(round(v * 255)) for v in said]]))[0]
+        d = [np.hypot(*(c[1:] - ref[1:])) for c in ctr]
+        if abs(d[0] - d[1]) > 5:
+            pick = int(np.argmin(d))
+    return lab[lbl == pick]
+
+
 def extract(rgb: np.ndarray, component: dict[str, Any] | None, analysis: dict[str, Any], silhouette: np.ndarray | None, finish_rough: float,
-            obj_box: list[float] | None = None) -> dict[str, Any]:
+            obj_box: list[float] | None = None, default: list[float] | None = None, cast: np.ndarray | None = None) -> dict[str, Any]:
     """{color, texture (JPEG bytes or None), metallic, roughness, alpha, source, confidence} for one component."""
     c = component or {}
     cls = str(c.get("materialClass") or "other")
@@ -161,13 +219,15 @@ def extract(rgb: np.ndarray, component: dict[str, Any] | None, analysis: dict[st
     if c.get("kind") == "glass" or cls == "glass":
         return {**GLASS, "texture": None, "source": "physical", "confidence": 1.0, "class": "glass"}
     metallic = 1.0 if cls == "metal" else 0.0
-    fallback = {"color": _hex(c.get("color")) or [0.72, 0.62, 0.5], "texture": None, "metallic": metallic, "roughness": finish_rough,
+    # No usable pixels: the reading's colour, else the caller's context colour (the furniture's dominant finish), else
+    # a neutral mid grey (never an invented brown).
+    fallback = {"color": _hex(c.get("color")) or default or [0.6, 0.6, 0.6], "texture": None, "metallic": metallic, "roughness": finish_rough,
                 "alpha": 1.0, "source": "reading colour", "confidence": 0.4 if c.get("color") else 0.1, "class": cls}
     quad = quad_of(c, obj_box)
     if not quad:
         return fallback
     face, valid = rectify(rgb, masks(rgb, c, analysis, silhouette, obj_box), quad)
-    valid = _moulding_lines(valid, c.get("mouldings") or [])
+    valid = trim_core(_moulding_lines(valid, c.get("mouldings") or []), c.get("kind"))
     clean = valid > 0
     share = float(clean.mean())
     small = c.get("kind") in ("handle", "knob") or str(c.get("geometry")) in ("hardware",)
@@ -177,6 +237,9 @@ def extract(rgb: np.ndarray, component: dict[str, Any] | None, analysis: dict[st
     if clean.sum() < need_px:
         return {**fallback, "reason": f"too small in the photo ({int(clean.sum())} pixels)"}
     lab = _lab(face[clean])
+    said = _hex(c.get("color"))
+    if cls not in WOOD + PATTERNED and not small:
+        lab = _dominant(lab, said)
     lo, hi = np.percentile(lab[:, 0], [10, 90])
     keep = (lab[:, 0] >= lo) & (lab[:, 0] <= hi)
     kept = lab[keep] if keep.sum() > 30 else lab
@@ -185,9 +248,10 @@ def extract(rgb: np.ndarray, component: dict[str, Any] | None, analysis: dict[st
     # Metal: the median (its highlights are reflections, not its colour); other surfaces: the well-lit quartile.
     light = np.median(kept[:, 0]) if cls == "metal" else np.percentile(kept[:, 0], 75)
     med = np.array([light, np.median(kept[:, 1]), np.median(kept[:, 2])])
-    colour = cv2.cvtColor(np.uint8([[med]]), cv2.COLOR_LAB2RGB)[0, 0] / 255.0
+    med, fused = fuse(med, said, scene_cast(rgb) if cast is None else cast) if cls != "metal" else (med, None)
+    colour = cv2.cvtColor(np.uint8([[np.clip(med, 0, 255)]]), cv2.COLOR_LAB2RGB)[0, 0] / 255.0
     out = {"color": colour.tolist(), "texture": None, "metallic": metallic, "roughness": finish_rough, "alpha": 1.0, "source": "colour sample",
-           "confidence": round(min(1.0, share * 1.2), 2), "class": cls}
+           "confidence": round(min(1.0, share * 1.2), 2), "class": cls, **({"fused": fused} if fused else {})}
     grain = _grain(face, valid)
     out["grain"] = round(grain, 3)
     if cls in WOOD + PATTERNED and grain > 0.25:

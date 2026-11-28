@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # "meshy" is the generator pipeline (the admin's choice of Meshy / GPT Astra / GPT Sol). A photo the engine cannot
     # rebuild (mostly upholstered or carved) falls back to the generator, and the model says why.
     generation_mode: Literal["hybrid", "deterministic", "meshy"] = "hybrid"
+    # After the deterministic visual correction (hybrid.build_corrected), one optional call to the admin's vision model
+    # with the photo and a render from the photo's camera, asking for structured corrections only when discrepancies
+    # remain (services/visual_review.py). Off by default: no extra paid call unless the admin turns it on.
+    hybrid_vision_review: bool = False
     generation_limit: int = 30  # Meshy calls and GPT Astra calls allowed per vendor account (each)
     meshy_api_key: SecretStr = SecretStr("")
     meshy_base_url: str = "https://api.meshy.ai/openapi/v1"

@@ -235,6 +235,16 @@ def with_vendor_size(details: dict[str, Any], width: float | None, height: float
             "vendorSize": sorted(given)}
 
 
+def details_from(analysis: dict[str, Any], size: tuple[float | None, float | None, float | None]) -> dict[str, Any] | None:
+    """The reading's details rebuilt from what a model keeps (its analysis and its confirmed sizes) when an older save
+    lost them: the object's box in the image from its front and side corners. None without all three sizes."""
+    if not all(size):
+        return None
+    pts = [p for q in [analysis.get("frontQuad")] + [c.get(k) for c in analysis.get("components") or [] for k in ("quad", "sideQuad")] if q for p in q]
+    bbox = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)] if pts else None
+    return {"width_m": size[0], "height_m": size[1], "depth_m": size[2], "dimension_source": "vendor", "bbox": bbox}
+
+
 def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, kind: str | None, mode: str = "hybrid",
           size: tuple[float | None, float | None, float | None] = (None, None, None)) -> tuple[bytes | None, dict[str, Any]]:
     """(the GLB, its part document) or (None, {"reason": why not}). `size`: the vendor's width, height and depth in
@@ -274,6 +284,8 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
                             and p["kind"] in ("side_panel", "top_panel") and (p["spec"].get("quad") or p["spec"].get("sideQuad"))), None) \
         or spec_by_id.get(carcass or "") or None
     built, decorations, fallbacks, recesses = [], [], [], []
+    cast = materials.scene_cast(rgb)
+    dominant = _hex((spec_by_id.get(carcass or "") or {}).get("color")) or _hex((visible_carcass or {}).get("color"))
     for p in plan["parts"]:
         lo, hi, spec = p["lo"], p["hi"], p.get("spec")
         source_spec = spec_by_id.get(p.get("material_from") or "") or spec
@@ -284,7 +296,7 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
         if source_spec is not None and (source_spec.get("logical") or assembly.kind_of(source_spec) == "carcass"):
             # The whole object's entry: its box is everything (mirrors, the room in them); its colour is the reading's.
             source_spec = {k: v for k, v in source_spec.items() if k not in ("box", "quad", "sideQuad")}
-        mat = materials.extract(rgb, source_spec, analysis, silhouette, rough, details.get("bbox"))
+        mat = materials.extract(rgb, source_spec, analysis, silhouette, rough, details.get("bbox"), dominant, cast)
         if p["kind"] in ("mirror", "glass"):
             mat = materials.extract(rgb, {"kind": p["kind"]}, analysis, None, rough)
         said = _hex((source_spec or {}).get("color"))
@@ -293,6 +305,9 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
             # A side seen edge-on, in its own shadow and the room's coloured light: its pixels are not its finish. The
             # reading's colour for it is used, as an estimate.
             mat = {**mat, "color": said, "source": "reading colour", "confidence": 0.5, "reason": "its visible face is in shadow in the photo"}
+        override = _hex((spec or {}).get("colorOverride"))
+        if override:  # a validated correction (the photo's own clean pixels, or a vision review checked against them)
+            mat = {**mat, "color": override, "texture": None, "source": "colour sample", "confidence": 0.7, "fused": "corrected against the photo"}
         if mat["source"] == "reading colour":
             fallbacks.append({"component": p["id"], "name": p["name"], "reason": mat.get("reason") or "no clean surface in the photo", "used": "reading colour"})
         # geometry: the part's semantic shape
@@ -345,11 +360,13 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
             "name": p["name"], "id": p["id"], "kind": p["kind"], "assembly": p.get("assembly"), "lo": lo, "hi": hi,
             "mesh": solids.mesh_arrays(solid), "solid": solid, "texture": mat.get("texture"), "colour": [float(c) for c in mat["color"]],
             "alpha": mat.get("alpha", 1.0), "metallic": mat["metallic"], "roughness": mat["roughness"], "spec": spec, "estimated": p["estimated"],
-            "material": {k: mat.get(k) for k in ("class", "source", "confidence", "grain") if mat.get(k) is not None}, "mover_of": p.get("mover_of"), "host": p.get("host"),
+            "material": {k: mat.get(k) for k in ("class", "source", "confidence", "grain", "fused", "reason") if mat.get(k) is not None}, "mover_of": p.get("mover_of"), "host": p.get("host"),
+            "evidence": p.get("evidence"), "frameless": p.get("frameless"), "said": said, "front_sample": bool((source_spec or {}).get("quad")) and mat["source"] in ("colour sample", "texture sample"),
             **({"hardware": {k: v for k, v in p["hardware"].items() if k not in ("x0", "x1", "y0", "y1")}} if p.get("hardware") else {}),
             "extras": {"partId": p["id"], "kind": p["kind"], "assembly": p.get("assembly"), "source": "inferred" if p["estimated"] else "observed",
                        "generation": "procedural", **({"specId": spec["id"]} if spec else {}), **({"estimated": True} if p["estimated"] else {})},
         })
+    material_groups(built, fallbacks)
     for r in recesses:  # finger recesses are cut into their door (the door stays one editable part)
         host = next((b for b in built if b["id"] == r.get("host")), None)
         if host is not None:
@@ -362,6 +379,8 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
         "nameAr": (b["spec"] or {}).get("nameAr") or None, "editable": True,
         "box": [[round(float(v), 4) for v in b["lo"]], [round(float(v), 4) for v in b["hi"]]],
         **({"analysisId": b["spec"]["id"]} if b["spec"] and not b["estimated"] else {}),
+        **({"frameless": True} if b.get("frameless") else {}),
+        **({"evidenceId": b["evidence"]} if b.get("evidence") and not (b["spec"] and not b["estimated"]) else {}),
         **({"estimated": True, "naming": "estimated"} if b["estimated"] else {}),
         "material": {**b["material"], "color": "#%02X%02X%02X" % tuple(int(255 * min(max(c, 0), 1)) for c in b["colour"]),
                      "fromPhoto": b["material"].get("source") in ("texture sample", "colour sample"), "confirmed": False},
@@ -397,6 +416,44 @@ def build(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, k
 
 
 HARDWARE_KINDS = ("handle", "knob")
+TRIM_KINDS = ("plinth", "crown_trim")  # a trim often has its own finish: never folded into a panel's group
+GROUP_AB, GROUP_L = 8.0, 12.0  # reading colours this close in hue (a*b*) and lightness: one physical finish (a vision colour's lightness varies ~±8 with the light; a two-tone design differs more)
+
+
+def _lab1(rgb: list[float]) -> np.ndarray:
+    import cv2
+
+    return cv2.cvtColor(np.uint8([[[int(round(v * 255)) for v in rgb]]]), cv2.COLOR_RGB2LAB)[0, 0].astype(float) * [100 / 255, 1, 1] - [0, 128, 128]
+
+
+def material_groups(built: list[dict[str, Any]], fallbacks: list[dict[str, Any]]) -> None:
+    """Parts sharing one physical finish keep one colour. The reliable samples (a front face seen straight, enough
+    clean pixels: a door, a panel) anchor a group; a part whose own sample is weak (a side edge-on in shadow, a thin
+    frame ring around a mirror, a part not seen) joins the anchor whose READING colour matches its own (same class,
+    a*b* within GROUP_AB, lightness within GROUP_L: lighting changes lightness more than hue) and takes its colour.
+    Different finishes stay different: two reliable samples are never merged, trims keep their own, hardware, mirrors
+    and glass are physical. Each part keeps its own material in the editor; `group` records the shared finish."""
+    def weak(b):
+        return not b["front_sample"] or b["kind"] == "door_frame" or (b["material"].get("confidence") or 0) < 0.5
+
+    special = lambda b: b.get("hardware") or b["kind"] in HARDWARE_KINDS + TRIM_KINDS + ("mirror", "glass") or b["material"].get("class") in ("metal", "mirror", "glass")  # noqa: E731
+    anchors = [b for b in built if not special(b) and not weak(b) and b.get("said")]
+    for b in built:
+        b["material"]["group"] = b["id"]
+        if special(b) or not weak(b) or not b.get("said"):
+            continue
+        mine = _lab1(b["said"])
+        near = [(np.hypot(*(_lab1(a["said"])[1:] - mine[1:])), a) for a in anchors
+                if a["material"].get("class") == b["material"].get("class") and abs(_lab1(a["said"])[0] - mine[0]) <= GROUP_L]
+        near = [(d, a) for d, a in near if d <= GROUP_AB]
+        if not near:
+            continue
+        a = min(near, key=lambda t: t[0])[1]
+        b["colour"], b["texture"] = list(a["colour"]), a.get("texture")
+        b["material"].update(source="material group", group=a["id"], reason=f"same finish as {a['name']}")
+        for f in fallbacks:
+            if f["component"] == b["id"]:
+                f.update(used="material group", reason=f"same finish as {a['name']}")
 
 
 def measure_hardware(analysis: dict[str, Any], details: dict[str, Any], rgb: np.ndarray) -> dict[str, Any]:
@@ -663,3 +720,133 @@ def validate(doc: dict[str, Any], family: str) -> dict[str, Any]:
         warnings.append(f"Estimated, not seen in the photo: {', '.join(estimated)}.")
     return {"ok": not errors, "errors": errors, "warnings": warnings, "confidence": "measured" if doc.get("scaleKnown") else "estimated",
             "checks": ["volume", "thickness", "floating", "handle ownership", "pivots"], "furniture": family}
+
+
+# ---- the visual correction loop: build, compare with the photo, adjust the assembly, keep the best ----
+
+MAX_ROUNDS = 2  # each round is one deterministic rebuild (about a second): never a regeneration, never an AI call
+CORRECTION_OPS = ("remove", "front_extent", "plinth_height", "frame_border", "recolour")
+
+
+def apply_corrections(analysis: dict[str, Any], corrections: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A copy of the reading with structured corrections applied (visual_check.check_design, or a validated vision
+    review): measured overrides the assembly reads (frontRect, border, design), never free-form geometry. Unknown
+    operations or components are ignored and returned as rejected."""
+    import copy
+
+    out = copy.deepcopy(analysis)
+    comps = {c["id"]: c for c in out.get("components") or []}
+    design = out.setdefault("design", {})
+    applied = []
+    for c in corrections:
+        op, cid = c.get("op"), c.get("component")
+        target = comps.get(cid or "")
+        if op == "remove":
+            kind = c.get("kind") or (target or {}).get("kind")
+            if kind == "crown_trim":
+                design["topTrim"] = {"type": "none", "height": 0, "confidence": 1.0, "evidence": "visual correction: not in the photo"}
+            elif kind == "plinth":
+                design["base"] = {"type": "none", "height": 0, "confidence": 1.0, "evidence": "visual correction: not in the photo"}
+            else:
+                continue  # only invented trims are removed automatically; a listed part is the reading's to drop
+            if target is not None:
+                out["components"] = [x for x in out["components"] if x["id"] != cid]
+        elif op == "front_extent" and target is not None and len(c.get("rect") or []) == 4:
+            rect = [float(np.clip(v, -0.02, 1.02)) for v in c["rect"]]
+            target["frontRect"] = rect
+            if target.get("assembly") in comps and comps[target["assembly"]].get("logical"):
+                comps[target["assembly"]]["frontRect"] = rect  # the door assembly is what is placed
+            if c.get("full_height", True):
+                design["doors"] = {**(design.get("doors") or {}), "fullHeight": rect[1] < 0.02 and rect[3] > 0.95, "confidence": 0.6}
+        elif op == "plinth_height" and target is not None and 0 < float(c.get("height") or 0) < 0.3:
+            target["frontRect"] = [0.0, 1.0 - float(c["height"]), 1.0, 1.0]
+        elif op == "frame_border" and target is not None and float(c.get("border") if c.get("border") is not None else -1) >= 0:
+            target["border"] = float(c["border"])
+        elif op == "recolour" and target is not None and _hex(c.get("color")):
+            target["colorOverride"] = c["color"]
+        else:
+            continue
+        applied.append(c)
+    return out, applied
+
+
+def _score(vc: dict[str, Any]) -> float:
+    """How closely the model matches its photo: part overlap, the reference-view outline, fewer discrepancies."""
+    sil = (vc.get("silhouette") or {}).get("iou") or 0.0
+    return float(vc.get("meanIoU") or 0.0) + 0.5 * sil - 0.03 * len(vc.get("issues") or [])
+
+
+def _candidate(photo: bytes, spec_doc: dict[str, Any], category, kind, mode, size) -> tuple[bytes | None, dict[str, Any], dict[str, Any] | None]:
+    from app.services import model_validation, visual_check
+
+    glb, doc = build(photo, spec_doc, category, kind, mode, size)
+    if glb is None:
+        return None, doc, None
+    images = doc.pop("_pendingImages", {})
+    glb, doc = model_validation.validate_and_repair(glb, doc)
+    doc["_pendingImages"] = images
+    vc = visual_check.compare(glb, photo, doc)
+    vc.pop("_images", None)
+    return glb, doc, vc
+
+
+def _acceptable(new: dict[str, Any], old: dict[str, Any]) -> str | None:
+    """Why a corrected build may not replace the current one (None: it may): no new geometry error, every movable
+    part still moves, every part the current one had (bar a removed invented trim) kept under its id."""
+    if len((new.get("validation") or {}).get("errors") or []) > len((old.get("validation") or {}).get("errors") or []):
+        return "it introduced geometry errors"
+    enabled = lambda d: {a["component"] for a in (d.get("animation") or {}).get("animations") or [] if a.get("enabled")}  # noqa: E731
+    if not enabled(old) <= enabled(new):
+        return "a door or drawer stopped moving"
+    gone = {c["id"] for c in old["components"]} - {c["id"] for c in new["components"]}
+    if any(next(c for c in old["components"] if c["id"] == g).get("kind") not in ("crown_trim", "plinth") for g in gone):
+        return "it lost a part"
+    return None
+
+
+def refine(photo: bytes, spec_doc: dict[str, Any], category, kind, mode, size, current: tuple[bytes, dict[str, Any], dict[str, Any]],
+           corrections: list[dict[str, Any]], source: str) -> tuple[tuple[bytes, dict[str, Any], dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """One correction round: the corrections applied to the reading, the model rebuilt and compared again; kept only
+    when it matches the photo better and breaks nothing. ((glb, doc, check), spec used, round log)."""
+    analysis, applied = apply_corrections(spec_doc["analysis"], [c for c in corrections if c.get("op") in CORRECTION_OPS])
+    log: dict[str, Any] = {"source": source, "corrections": applied, "before": round(_score(current[2]), 3)}
+    if not applied:
+        return current, spec_doc, {**log, "accepted": False, "reason": "nothing applicable"}
+    trial = {**spec_doc, "analysis": analysis}
+    glb, doc, vc = _candidate(photo, trial, category, kind, mode, size)
+    if glb is None:
+        return current, spec_doc, {**log, "accepted": False, "reason": doc.get("reason") or "it could not be rebuilt"}
+    log["after"] = round(_score(vc), 3)
+    why = _acceptable(doc, current[1]) or (None if _score(vc) > _score(current[2]) + 1e-3 else "it did not match the photo better")
+    if why:
+        return current, spec_doc, {**log, "accepted": False, "reason": why}
+    return (glb, doc, vc), trial, {**log, "accepted": True}
+
+
+def build_corrected(photo: bytes, spec_doc: dict[str, Any] | None, category: str | None, kind: str | None, mode: str = "hybrid",
+                    size: tuple[float | None, float | None, float | None] = (None, None, None),
+                    rounds: int = MAX_ROUNDS) -> tuple[bytes | None, dict[str, Any]]:
+    """build(), then up to `rounds` deterministic corrections from the comparison with the photo (an invented crown
+    removed, a door's height restored, a plinth or a mirror frame resized), each kept only when it improves the match
+    without breaking geometry or movement. The best model is returned with its check and the rounds' log
+    (doc["visualCorrection"]); a discrepancy left over is recorded there as a note, never a blocker."""
+    if not spec_doc:
+        return build(photo, spec_doc, category, kind, mode, size)
+    glb, doc, vc = _candidate(photo, spec_doc, category, kind, mode, size)
+    if glb is None:
+        return None, doc
+    current, spec, log = (glb, doc, vc), spec_doc, []
+    for _ in range(rounds):
+        todo = current[2].get("corrections") or []
+        if not todo:
+            break
+        current, spec, entry = refine(photo, spec, category, kind, mode, size, current, todo, "visual check")
+        log.append(entry)
+        if not entry["accepted"]:
+            break
+    glb, doc, vc = current
+    doc["visualCheck"] = vc
+    doc["visualCorrection"] = {"rounds": log, "maxRounds": rounds, "remaining": vc.get("issues") or []}
+    if spec is not spec_doc:
+        doc["analysis"] = spec["analysis"]  # the corrected reading: a later rebuild starts from it
+    return glb, doc
