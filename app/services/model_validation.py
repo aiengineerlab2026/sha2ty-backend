@@ -336,7 +336,8 @@ def geometry_between(glb: bytes, doc_in: dict[str, Any]) -> dict[str, Any]:
     planes = {p["id"]: _planes(p["pos"], p["idx"]) for p in parts}
     for n, a in enumerate(parts):
         # a frame is a frame: its opening is really there
-        if a["kind"] == "door_frame" and solids[a["id"]] is not None:
+        # (a frameless mirror door's backing is a board on purpose: its mirror lies on its face, not in an opening)
+        if a["kind"] == "door_frame" and solids[a["id"]] is not None and not comps.get(a["id"], {}).get("frameless"):
             fill = solids[a["id"]].volume() / max(float(np.prod(a["hi"] - a["lo"])), 1e-12)
             if fill > FRAME_FILL and any((c.get("assembly") == comps.get(a["id"], {}).get("assembly")) and c.get("kind") in ("mirror", "glass") for c in comps.values()):
                 errors.append(f"{a['name']}: is a filled board, not a frame around its pane.")

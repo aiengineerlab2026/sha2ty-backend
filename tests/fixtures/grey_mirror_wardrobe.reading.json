@@ -1,0 +1,1079 @@
+{
+ "size": [
+  1.35,
+  2,
+  0.6
+ ],
+ "analysis": {
+  "bodyId": "body",
+  "movable": true,
+  "summary": "A straight-sided gray panel carcass on a low plinth carries one opaque full-height door and two narrow-framed mirrored door assemblies.",
+  "viewYaw": 15,
+  "interior": {
+   "items": [
+    {
+     "kind": "shelf",
+     "count": 1,
+     "behind": []
+    },
+    {
+     "kind": "rail",
+     "count": 1,
+     "behind": []
+    }
+   ],
+   "confidence": 0.25,
+   "hasInterior": true
+  },
+  "frontQuad": [
+   [
+    0.196,
+    0.231
+   ],
+   [
+    0.662,
+    0.191
+   ],
+   [
+    0.662,
+    0.88
+   ],
+   [
+    0.196,
+    0.831
+   ]
+  ],
+  "components": [
+   {
+    "id": "body",
+    "box": [
+     0,
+     0,
+     1,
+     1
+    ],
+    "kind": "carcass",
+    "name": "Main carcass assembly",
+    "quad": null,
+    "role": "structural",
+    "color": "#99998F",
+    "shape": "Rectangular cabinet carcass",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Stationary carcass assembly.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.99,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0645\u062c\u0645\u0648\u0639\u0629 \u0627\u0644\u0647\u064a\u0643\u0644 \u0627\u0644\u0631\u0626\u064a\u0633\u064a",
+    "logical": true,
+    "opening": "none",
+    "texture": "Smooth, no clearly resolved grain",
+    "assembly": null,
+    "geometry": "frame",
+    "material": "Gray-finished wood-based panels",
+    "position": "main structure",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [],
+    "complexity": "regular",
+    "confidence": 0.94,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 1,
+     "width": 1,
+     "height": 1
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": false,
+    "materialClass": "other"
+   },
+   {
+    "id": "side_right",
+    "box": [
+     0.86,
+     0.006,
+     0.992,
+     0.994
+    ],
+    "kind": "side_panel",
+    "name": "Right side panel",
+    "quad": null,
+    "role": "structural",
+    "color": "#96968B",
+    "shape": "Tall rectangular panel",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed carcass side.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.99,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0644\u0648\u062d \u0627\u0644\u062c\u0627\u0646\u0628\u064a \u0627\u0644\u0623\u064a\u0645\u0646",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Gray-finished wood-based panel",
+    "position": "right side",
+    "sideQuad": [
+     [
+      0.662,
+      0.191
+     ],
+     [
+      0.729,
+      0.218
+     ],
+     [
+      0.729,
+      0.84
+     ],
+     [
+      0.662,
+      0.88
+     ]
+    ],
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.94,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 1,
+     "width": 0.015,
+     "height": 1
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "side_left",
+    "box": null,
+    "kind": "side_panel",
+    "name": "Left side panel",
+    "quad": null,
+    "role": "structural",
+    "color": "#99998F",
+    "shape": "Tall rectangular panel",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Structural enclosure side inferred behind the front.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.97,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0644\u0648\u062d \u0627\u0644\u062c\u0627\u0646\u0628\u064a \u0627\u0644\u0623\u064a\u0633\u0631",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth, inferred",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Wood-based panel; finish inferred from the visible carcass",
+    "position": "left side behind the door",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.75,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 1,
+     "width": 0.015,
+     "height": 1
+    },
+    "visibility": "inferred",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "top_panel",
+    "box": [
+     0.008,
+     0,
+     0.992,
+     0.073
+    ],
+    "kind": "top_panel",
+    "name": "Top panel",
+    "quad": null,
+    "role": "structural",
+    "color": "#99998F",
+    "shape": "Flat rectangular panel",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed upper enclosure; only its narrow edge is resolved.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.98,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0644\u0648\u062d \u0627\u0644\u0639\u0644\u0648\u064a",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Gray-finished wood-based panel",
+    "position": "top of carcass",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.72,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 1,
+     "width": 1,
+     "height": 0.01
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "base_panel",
+    "box": null,
+    "kind": "base_panel",
+    "name": "Bottom panel",
+    "quad": null,
+    "role": "structural",
+    "color": null,
+    "shape": "Flat rectangular panel",
+    "finish": "unknown",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed lower enclosure inferred from the cabinet construction.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.97,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0644\u0648\u062d \u0627\u0644\u0633\u0641\u0644\u064a",
+    "logical": false,
+    "opening": "none",
+    "texture": "Not visible",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Wood-based panel, inferred",
+    "position": "inside bottom above the plinth",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     },
+     {
+      "type": "above",
+      "target": "plinth"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.72,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.95,
+     "width": 0.97,
+     "height": 0.01
+    },
+    "visibility": "inferred",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "back_panel",
+    "box": null,
+    "kind": "back_panel",
+    "name": "Back panel",
+    "quad": null,
+    "role": "structural",
+    "color": null,
+    "shape": "Rectangular backing panel",
+    "finish": "unknown",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Rear enclosure inferred; its construction is hidden.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.95,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0644\u0648\u062d \u0627\u0644\u062e\u0644\u0641\u064a",
+    "logical": false,
+    "opening": "none",
+    "texture": "Not visible",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Backing board, exact material unknown",
+    "position": "rear",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.66,
+    "decoration": "none",
+    "dimensions": {
+     "depth": null,
+     "width": 0.98,
+     "height": 0.96
+    },
+    "visibility": "inferred",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "plinth",
+    "box": [
+     0.008,
+     0.879,
+     0.868,
+     0.994
+    ],
+    "kind": "plinth",
+    "name": "Front plinth",
+    "quad": [
+     [
+      0.196,
+      0.8
+     ],
+     [
+      0.662,
+      0.858
+     ],
+     [
+      0.662,
+      0.88
+     ],
+     [
+      0.196,
+      0.831
+     ]
+    ],
+    "role": "structural",
+    "color": "#8D8D83",
+    "shape": "Low rectangular strip",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Continuous stationary bottom strip.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.99,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0623\u0645\u0627\u0645\u064a\u0629",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "body",
+    "geometry": "panel",
+    "material": "Gray-finished wood-based panel",
+    "position": "bottom front",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.86,
+    "decoration": "none",
+    "dimensions": {
+     "depth": null,
+     "width": 1,
+     "height": 0.035
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "door_left",
+    "box": [
+     0.008,
+     0.038,
+     0.279,
+     0.915
+    ],
+    "kind": "door",
+    "name": "Left opaque door",
+    "quad": [
+     [
+      0.196,
+      0.236
+     ],
+     [
+      0.342,
+      0.218
+     ],
+     [
+      0.342,
+      0.822
+     ],
+     [
+      0.196,
+      0.804
+     ]
+    ],
+    "role": "functional",
+    "color": "#A2A59D",
+    "shape": "Plain tall rectangular slab",
+    "finish": "matte",
+    "motion": {
+     "type": "rotate",
+     "hinge": "left",
+     "limit": null,
+     "reason": "A vertical pull is visible near the right edge, suggesting a left hinge, but no hinge or track is visible.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.35,
+     "revealsInterior": true
+    },
+    "nameAr": "\u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u064a\u0633\u0631 \u0627\u0644\u0645\u0635\u0645\u062a",
+    "logical": false,
+    "opening": "handle",
+    "texture": "Smooth plain surface",
+    "assembly": null,
+    "geometry": "panel",
+    "material": "Gray-finished wood-based panel",
+    "position": "front left",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.94,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.03,
+     "width": 0.32,
+     "height": 0.95
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "handle_left",
+    "box": [
+     0.238,
+     0.447,
+     0.266,
+     0.586
+    ],
+    "kind": "handle",
+    "name": "Left door vertical handle",
+    "quad": [
+     [
+      0.32274582982063293,
+      0.5021118521690369
+     ],
+     [
+      0.3323349356651306,
+      0.5020412802696228
+     ],
+     [
+      0.3323349356651306,
+      0.6950974464416504
+     ],
+     [
+      0.32274582982063293,
+      0.6944092512130737
+     ]
+    ],
+    "role": "functional",
+    "color": "#55564F",
+    "shape": "Slender vertical bar",
+    "finish": "satin",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed pull that moves only with its parent door.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.97,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0627\u0644\u0645\u0642\u0628\u0636 \u0627\u0644\u0631\u0623\u0633\u064a \u0644\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u064a\u0633\u0631",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "door_left",
+    "geometry": "profile",
+    "material": "Dark metal, apparent",
+    "measured": {
+     "owner": "door_left",
+     "aspect": 21.5,
+     "colour": [
+      0.4117647058823529,
+      0.403921568627451,
+      0.3843137254901961
+     ],
+     "pixels": 51,
+     "shortPx": 2,
+     "confidence": 0.7,
+     "orientation": "vertical"
+    },
+    "position": "near the right edge of the left door",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "door_left"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.79,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.035,
+     "width": 0.012,
+     "height": 0.11
+    },
+    "visibility": "visible",
+    "hardwareType": "vertical_bar",
+    "separateMesh": true,
+    "materialClass": "metal"
+   },
+   {
+    "id": "door_center",
+    "box": [
+     0.287,
+     0.025,
+     0.553,
+     0.949
+    ],
+    "kind": "door",
+    "name": "Center mirrored door assembly",
+    "quad": [
+     [
+      0.347,
+      0.218
+     ],
+     [
+      0.489,
+      0.204
+     ],
+     [
+      0.489,
+      0.849
+     ],
+     [
+      0.347,
+      0.827
+     ]
+    ],
+    "role": "functional",
+    "color": "#99998F",
+    "shape": "Tall rectangular framed mirror",
+    "finish": "polished",
+    "motion": {
+     "type": "rotate",
+     "hinge": "left",
+     "limit": null,
+     "reason": "An independent front division is visible, but hinges, tracks and the pull are unresolved; rotation and hinge side are provisional.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.23,
+     "revealsInterior": true
+    },
+    "nameAr": "\u0645\u062c\u0645\u0648\u0639\u0629 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u0648\u0633\u0637 \u0630\u064a \u0627\u0644\u0645\u0631\u0622\u0629",
+    "logical": true,
+    "opening": "none",
+    "texture": "Reflective center with smooth border",
+    "assembly": null,
+    "geometry": "frame",
+    "material": "Mirror glass with narrow gray frame",
+    "position": "front center",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.85,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.035,
+     "width": 0.32,
+     "height": 0.95
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": false,
+    "materialClass": "mirror"
+   },
+   {
+    "id": "frame_center",
+    "box": [
+     0.287,
+     0.025,
+     0.553,
+     0.949
+    ],
+    "kind": "door_frame",
+    "name": "Center door frame",
+    "quad": [
+     [
+      0.347,
+      0.218
+     ],
+     [
+      0.489,
+      0.204
+     ],
+     [
+      0.489,
+      0.849
+     ],
+     [
+      0.347,
+      0.827
+     ]
+    ],
+    "role": "structural",
+    "color": "#8F9085",
+    "shape": "Narrow rectangular border",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed within the door assembly; inherits its motion.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.98,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0625\u0637\u0627\u0631 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u0648\u0633\u0637",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "door_center",
+    "geometry": "frame",
+    "material": "Gray frame, exact substrate unresolved",
+    "position": "around the center mirror",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "door_center"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.77,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.035,
+     "width": 0.32,
+     "height": 0.95
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "mirror_center",
+    "box": [
+     0.295,
+     0.038,
+     0.537,
+     0.934
+    ],
+    "kind": "mirror",
+    "name": "Center door mirror",
+    "quad": [
+     [
+      0.351,
+      0.224
+     ],
+     [
+      0.482,
+      0.211
+     ],
+     [
+      0.482,
+      0.838
+     ],
+     [
+      0.351,
+      0.817
+     ]
+    ],
+    "role": "functional",
+    "color": "#C4C7C4",
+    "shape": "Tall rectangular mirror pane",
+    "finish": "polished",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Mirror is fixed within its door assembly.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.99,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0645\u0631\u0622\u0629 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u0648\u0633\u0637",
+    "logical": false,
+    "opening": "none",
+    "texture": "Reflective",
+    "assembly": "door_center",
+    "geometry": "pane",
+    "material": "Mirror glass",
+    "position": "inside the center door frame",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "frame_center"
+     },
+     {
+      "type": "inside",
+      "target": "door_center"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.94,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.008,
+     "width": 0.3,
+     "height": 0.925
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "mirror"
+   },
+   {
+    "id": "door_right",
+    "box": [
+     0.561,
+     0.006,
+     0.86,
+     0.967
+    ],
+    "kind": "door",
+    "name": "Right mirrored door assembly",
+    "quad": [
+     [
+      0.496,
+      0.204
+     ],
+     [
+      0.658,
+      0.191
+     ],
+     [
+      0.658,
+      0.862
+     ],
+     [
+      0.496,
+      0.849
+     ]
+    ],
+    "role": "functional",
+    "color": "#99998F",
+    "shape": "Tall rectangular framed mirror",
+    "finish": "polished",
+    "motion": {
+     "type": "rotate",
+     "hinge": "right",
+     "limit": null,
+     "reason": "A separate door boundary is visible, but no hinge or track is resolved; rotation and hinge side are provisional.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.23,
+     "revealsInterior": true
+    },
+    "nameAr": "\u0645\u062c\u0645\u0648\u0639\u0629 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u064a\u0645\u0646 \u0630\u064a \u0627\u0644\u0645\u0631\u0622\u0629",
+    "logical": true,
+    "opening": "none",
+    "texture": "Reflective center with smooth border",
+    "assembly": null,
+    "geometry": "frame",
+    "material": "Mirror glass with narrow gray frame",
+    "position": "front right",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "body"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.88,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.035,
+     "width": 0.35,
+     "height": 0.95
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": false,
+    "materialClass": "mirror"
+   },
+   {
+    "id": "frame_right",
+    "box": [
+     0.561,
+     0.006,
+     0.86,
+     0.967
+    ],
+    "kind": "door_frame",
+    "name": "Right door frame",
+    "quad": [
+     [
+      0.496,
+      0.204
+     ],
+     [
+      0.658,
+      0.191
+     ],
+     [
+      0.658,
+      0.862
+     ],
+     [
+      0.496,
+      0.849
+     ]
+    ],
+    "role": "structural",
+    "color": "#8F9085",
+    "shape": "Narrow rectangular border",
+    "finish": "matte",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Fixed within the door assembly; inherits its motion.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.98,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0625\u0637\u0627\u0631 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u064a\u0645\u0646",
+    "logical": false,
+    "opening": "none",
+    "texture": "Smooth",
+    "assembly": "door_right",
+    "geometry": "frame",
+    "material": "Gray frame, exact substrate unresolved",
+    "position": "around the right mirror",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "door_right"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.81,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.035,
+     "width": 0.35,
+     "height": 0.95
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "other"
+   },
+   {
+    "id": "mirror_right",
+    "box": [
+     0.57,
+     0.019,
+     0.845,
+     0.953
+    ],
+    "kind": "mirror",
+    "name": "Right door mirror",
+    "quad": [
+     [
+      0.5,
+      0.211
+     ],
+     [
+      0.651,
+      0.2
+     ],
+     [
+      0.651,
+      0.851
+     ],
+     [
+      0.5,
+      0.84
+     ]
+    ],
+    "role": "functional",
+    "color": "#C4C7C4",
+    "shape": "Tall rectangular mirror pane",
+    "finish": "polished",
+    "motion": {
+     "type": "none",
+     "hinge": null,
+     "limit": null,
+     "reason": "Mirror is fixed within its door assembly.",
+     "travel": null,
+     "direction": null,
+     "confidence": 0.99,
+     "revealsInterior": false
+    },
+    "nameAr": "\u0645\u0631\u0622\u0629 \u0627\u0644\u0628\u0627\u0628 \u0627\u0644\u0623\u064a\u0645\u0646",
+    "logical": false,
+    "opening": "none",
+    "texture": "Reflective",
+    "assembly": "door_right",
+    "geometry": "pane",
+    "material": "Mirror glass",
+    "position": "inside the right door frame",
+    "sideQuad": null,
+    "mouldings": [],
+    "relations": [
+     {
+      "type": "attached_to",
+      "target": "frame_right"
+     },
+     {
+      "type": "inside",
+      "target": "door_right"
+     }
+    ],
+    "complexity": "regular",
+    "confidence": 0.97,
+    "decoration": "none",
+    "dimensions": {
+     "depth": 0.008,
+     "width": 0.33,
+     "height": 0.925
+    },
+    "visibility": "visible",
+    "hardwareType": "none",
+    "separateMesh": true,
+    "materialClass": "mirror"
+   }
+  ],
+  "exclusions": [
+   {
+    "kind": "reflection",
+    "quad": [
+     [
+      0.351,
+      0.224
+     ],
+     [
+      0.482,
+      0.211
+     ],
+     [
+      0.482,
+      0.838
+     ],
+     [
+      0.351,
+      0.817
+     ]
+    ]
+   },
+   {
+    "kind": "reflection",
+    "quad": [
+     [
+      0.5,
+      0.211
+     ],
+     [
+      0.651,
+      0.2
+     ],
+     [
+      0.651,
+      0.851
+     ],
+     [
+      0.5,
+      0.84
+     ]
+    ]
+   }
+  ],
+  "objectType": "wardrobe"
+ }
+}

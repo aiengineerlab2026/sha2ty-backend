@@ -40,7 +40,7 @@ from app.services.cdn import Cdn, CdnError
 from app.schemas.vendor import GenerationOptions
 from app.services import animation, component_grouping, geometry_quality, mesh_analysis
 from app.services.meshy_service import MeshyError, MeshyService, image_to_3d_payload, nearest_aspect_ratio, quality_options, texture_conditioning
-from app.services import component_mesh, generator_setting, hybrid, model_validation, visual_check
+from app.services import component_mesh, generator_setting, hybrid, model_validation, visual_check, visual_review
 from app.api import hybrid_parts
 from app.services.texture_prompt import TexturePromptError, read_texture_prompt
 from app.services.quota import generation_usage, use_generation
@@ -736,8 +736,10 @@ async def generate_model(
         remaining = await take_try(request, user_id, provider, settings)
         spec = prespec or await read_spec(request, settings, raw, mime, category, title, kind, lang)
         spec_doc = spec.model_dump(mode="json") if spec else None
-        glb, doc = await run_in_threadpool(hybrid.build, raw, spec_doc, category, kind or None, mode, (width_m, height_m, depth_m)) if spec_doc \
+        glb, doc = await run_in_threadpool(hybrid.build_corrected, raw, spec_doc, category, kind or None, mode, (width_m, height_m, depth_m)) if spec_doc \
             else (None, {"reason": "The photo could not be read."})
+        if glb is not None:
+            glb, doc = await visual_review.maybe_review(request, settings, raw, mime, spec_doc, category, kind or None, mode, (width_m, height_m, depth_m), glb, doc)
         if glb is None:
             # Not rebuilt here: the try goes back, and the generator below takes its own and says why it was used.
             await bus.publish(GenerationFailed(user_id, provider), request.app.state)
@@ -747,7 +749,8 @@ async def generate_model(
         else:
             details = spec.details if spec else preread
             images = doc.pop("_pendingImages", {})
-            doc["cost"] = {"visionCalls": "at most 1 (the photo's spec, cached per photo)", "meshGeneratorCalls": 0}
+            doc["cost"] = {"visionCalls": "at most 1 (the photo's spec, cached per photo)" + (" + 1 visual review" if doc.get("visionReview", {}).get("called") else ""),
+                           "meshGeneratorCalls": 0, "visualCorrectionRebuilds": len((doc.get("visualCorrection") or {}).get("rounds") or [])}
             doc["structureSpec"] = {"category": category, "kind": kind or None}
             try:
                 if doc.get("pendingComponents"):
@@ -979,14 +982,14 @@ async def hybrid_done(cdn: Cdn, user_id: str, object_id: str, glb: bytes, doc: d
     """A rebuilt model finished: checked and repaired (model_validation), sized, its structural model beside it,
     uploaded. `key`: the file's storage key (a regenerated component writes a new version)."""
     glb, doc = await run_in_threadpool(model_validation.validate_and_repair, glb, doc)
-    if photo is not None:  # the model against the photo it was rebuilt from (deterministic, no AI call)
+    glb, _, doc = await sized(glb, None, doc)
+    if photo is not None:  # the FINAL file (after repair and sizing) against the photo (deterministic, no AI call)
         seen = await run_in_threadpool(visual_check.compare, glb, photo, doc)
         seen.pop("_images", None)
         doc["visualCheck"] = seen
-        if seen.get("issues"):
+        if seen.get("issues"):  # what the correction loop could not settle: notes, never blockers
             doc["validation"] = {**doc["validation"], "warnings": [*doc["validation"].get("warnings", []), *seen["issues"]]}
             doc["validation"] = model_validation.verdict(doc)
-    glb, _, doc = await sized(glb, None, doc)
     if "carpenter" not in doc and spec_doc:
         built = await run_in_threadpool(structural_model, spec_doc, category, kind, cdn, f"{user_id}/{object_id}.carpenter.glb")
         doc = with_structural(doc, built, spec_doc)
@@ -1088,13 +1091,15 @@ async def rebuild_hybrid(
     if not (file_key(body.source_image_url, settings) or "").startswith(f"{user_id}/"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your photo.")
     analysis, details = body.components.get("analysis"), body.components.get("specDetails")
+    if analysis and not details:  # an older editor save dropped the reading's details: the stored reading and sizes suffice
+        details = hybrid.details_from(analysis, (body.width_m, body.height_m, body.depth_m))
     if not analysis or not details:
         raise HTTPException(status.HTTP_409_CONFLICT, "This model was not rebuilt from a photo reading: generate it again instead.")
     photo = await hybrid_parts.fetch(cdn, body.source_image_url, settings)
     if not photo:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The model's photo could not be read.")
     spec_doc = {"details": details, "analysis": analysis}
-    glb, doc = await run_in_threadpool(hybrid.build, photo, spec_doc, body.category, body.kind, body.components.get("method") or "hybrid",
+    glb, doc = await run_in_threadpool(hybrid.build_corrected, photo, spec_doc, body.category, body.kind, body.components.get("method") or "hybrid",
                                        (body.width_m, body.height_m, body.depth_m))
     if glb is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, doc.get("reason") or "It could not be rebuilt.")

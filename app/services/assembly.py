@@ -32,7 +32,14 @@ SLIDING = 0.02
 PANE = 0.004
 TRACK_GAP = 0.006  # between two sliding tracks
 OVERLAP = 0.04  # sliding doors overlap this much
-SNAP = 0.05  # an edge this close (share of the size) to the opening or a neighbour meets it
+SNAP = 0.05  # two fronts this close (share of the width) are neighbours meeting at one seam
+# Construction fallbacks, used only where the photo gives no measurement (never imposed on what it shows):
+SNAP_EDGE = 0.02  # a front's edge this close (share of the size) to the opening meets it; wider gaps are the design's
+SNAP_FULL = 0.08  # ... when the reading says the doors are full height
+MIN_FRAME = 0.006  # a frame border narrower than this is not buildable: the mirror is mounted frameless
+PLINTH_MIN = 0.012  # a thin bottom edge
+PLINTH_SETBACK = 0.03  # a recessed plinth stands this far behind the front
+EVIDENCE = 0.5  # a design measurement below this confidence is not used
 HANDLE_PROUD = 0.025
 
 FRONT_KINDS = {"door", "sliding_door", "drawer_front", "fixed_panel"}
@@ -89,24 +96,55 @@ def to_front(H: np.ndarray, pts) -> np.ndarray:
     return p[:, :2] / p[:, 2:3]
 
 
+def valid_quad(q: Any, min_area: float = 1e-4) -> bool:
+    """Four image corners, top-left → top-right → bottom-right → bottom-left: convex, in that order (clockwise on the
+    image), not degenerate, and no edge more than 4× its opposite one (a homography from it is stable)."""
+    try:
+        p = np.asarray(q, float)
+    except (TypeError, ValueError):
+        return False
+    if p.shape != (4, 2) or not np.isfinite(p).all():
+        return False
+    e = [p[(i + 1) % 4] - p[i] for i in range(4)]
+    if not all(e[i][0] * e[(i + 1) % 4][1] - e[i][1] * e[(i + 1) % 4][0] > 0 for i in range(4)):
+        return False
+    area = 0.5 * abs(sum(p[i, 0] * p[(i + 1) % 4, 1] - p[(i + 1) % 4, 0] * p[i, 1] for i in range(4)))
+    n = [np.linalg.norm(v) for v in e]
+    return area >= min_area and all(max(n[i], n[i + 2]) <= 4 * max(min(n[i], n[i + 2]), 1e-9) for i in (0, 1))
+
+
+def box_quad(box: list[float], obj_box: list[float]) -> list[list[float]]:
+    """A part's box (fractions of the object's box, as photographed) as its corners in the image."""
+    o = obj_box
+    x0, y0 = o[0] + box[0] * (o[2] - o[0]), o[1] + box[1] * (o[3] - o[1])
+    x1, y1 = o[0] + box[2] * (o[2] - o[0]), o[1] + box[3] * (o[3] - o[1])
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
 def front_rect(c: dict[str, Any], H: np.ndarray | None, obj_box: list[float] | None) -> list[float] | None:
-    """[u0, v0, u1, v1] of the part's front face on the front plane (0..1), from its corners when given (perspective
-    corrected), else from its box in the object's box (as photographed)."""
-    if H is not None and c.get("quad"):
-        q = to_front(H, c["quad"])
-        u0, u1 = (q[0, 0] + q[3, 0]) / 2, (q[1, 0] + q[2, 0]) / 2
-        v0, v1 = (q[0, 1] + q[1, 1]) / 2, (q[3, 1] + q[2, 1]) / 2
-        return [float(min(u0, u1)), float(min(v0, v1)), float(max(u0, u1)), float(max(v0, v1))]
+    """[u0, v0, u1, v1] of the part's front face on the front plane (0..1). One coordinate pipeline for every part:
+    image corners → the front-plane homography. A part read with only a box has its box turned into image corners
+    first (through the object's box in the image), never taken as already corrected. With no homography, the box."""
+    if c.get("frontRect"):  # a measured override (a visual correction): already on the front plane
+        return list(c["frontRect"])
+    if H is not None:
+        quad = c["quad"] if valid_quad(c.get("quad")) else box_quad(c["box"], obj_box) if c.get("box") and obj_box else None
+        if quad:
+            q = to_front(H, quad)
+            u0, u1 = (q[0, 0] + q[3, 0]) / 2, (q[1, 0] + q[2, 0]) / 2
+            v0, v1 = (q[0, 1] + q[1, 1]) / 2, (q[3, 1] + q[2, 1]) / 2
+            return [float(min(u0, u1)), float(min(v0, v1)), float(max(u0, u1)), float(max(v0, v1))]
     if c.get("box"):
         return list(c["box"])
     return None
 
 
 def front_quad(analysis: dict[str, Any], details: dict[str, Any]) -> list[list[float]] | None:
-    """The object's front face in the image: the reading's, else the bounding box of its parts' front faces."""
-    if analysis.get("frontQuad"):
+    """The object's front face in the image: the reading's when it is a valid quad, else the bounding box of its parts'
+    front faces (no perspective correction: the conservative assumption)."""
+    if valid_quad(analysis.get("frontQuad"), 0.01):
         return analysis["frontQuad"]
-    quads = [p for c in analysis.get("components") or [] if c.get("quad") and c.get("kind") in FRONT_KINDS | CARCASS_KINDS for p in c["quad"]]
+    quads = [p for c in analysis.get("components") or [] if valid_quad(c.get("quad")) and c.get("kind") in FRONT_KINDS for p in c["quad"]]
     if len(quads) >= 4:
         xs, ys = [p[0] for p in quads], [p[1] for p in quads]
         return [[min(xs), min(ys)], [max(xs), min(ys)], [max(xs), max(ys)], [min(xs), max(ys)]]
@@ -120,6 +158,23 @@ def _part(c: dict[str, Any] | None, pid: str, name: str, kind: str, lo, hi, **ex
     return {"id": pid, "name": name, "kind": kind, "lo": np.asarray(lo, float), "hi": np.asarray(hi, float), "spec": c,
             "assembly": (c or {}).get("assembly") or extra.pop("assembly", None), "geometry": extra.pop("geometry", "panel"),
             "estimated": extra.pop("estimated", False), **extra}
+
+
+def _conf(m: dict[str, Any]) -> float:
+    try:
+        return float(m.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def trim(design: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """A design measurement from the reading ({type, height, width}, fractions of the front), or None when it is
+    missing or below EVIDENCE confidence: then the construction fallback applies."""
+    m = design.get(key) if isinstance(design, dict) else None
+    if not isinstance(m, dict) or _conf(m) < EVIDENCE:
+        return None
+    num = lambda k: float(np.clip(float(m.get(k) or 0), 0, 0.5)) if isinstance(m.get(k), (int, float)) else 0.0  # noqa: E731
+    return {"type": str(m.get("type") or ""), "height": num("height"), "width": num("width"), "confidence": _conf(m)}
 
 
 def _snap(value: float, targets: list[float], tol: float) -> float:
@@ -169,12 +224,39 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
         kinds.setdefault(c.get("kind") or "other", []).append(c)
 
     # ---- carcass: one structure, each board at its role's place ----
+    design = analysis.get("design") or {}
     plinth = (kinds.get("plinth") or [None])[0]
     crown = (kinds.get("crown_trim") or [None])[0]
-    top_seen = next((c for c in kinds.get("top_panel", []) if c.get("visibility") != "inferred" and rect(c)), None)
-    crown = crown or top_seen  # a visible top trim band is the crown's face
-    plinth_h = float(np.clip((rect(plinth)[3] - rect(plinth)[1]) * H, 0.03, 0.2 * H)) if plinth and rect(plinth) else 0.0
-    crown_h = float(np.clip((rect(crown)[3] - rect(crown)[1]) * H, BOARD, 0.15 * H)) if crown and rect(crown) else BOARD
+    # A crown is a part of its own, only on evidence: a crown component, or the reading's measured top trim. A top
+    # panel seen from above is the carcass's top board: its photographed depth is never a trim's height.
+    top_trim, base_m = trim(design, "topTrim"), trim(design, "base")
+    if crown and not valid_quad(crown.get("quad")) and top_trim and top_trim["type"] in ("none", "thin_edge", "overhang", "recessed"):
+        notes.append(f"{crown.get('name') or 'Crown'}: not built (the front shows {top_trim['type'].replace('_', ' ')} at the top).")
+        crown = None
+    if crown is None and not (top_trim and top_trim["type"] in ("none", "thin_edge", "overhang", "recessed")):
+        # A top panel whose corners lie ON the front face (below its top edge), thicker than a board: a band across the
+        # top front (a header or trim the photo shows). One whose corners map above the front is its top surface seen
+        # from above: never a trim, whatever its photographed depth.
+        crown = next((c for c in kinds.get("top_panel", []) if valid_quad(c.get("quad")) and rect(c) and rect(c)[1] >= -0.01
+                      and (rect(c)[3] - rect(c)[1]) * H > BOARD), None)
+    crown_h = BOARD
+    if crown and rect(crown):
+        crown_h = (rect(crown)[3] - rect(crown)[1]) * H
+    elif top_trim and top_trim["type"] in ("crown", "header_panel") and top_trim["height"]:
+        crown = {"id": "crown_trim", "name": "Crown trim", "kind": "crown_trim"}
+        crown_h = top_trim["height"] * H
+    crown_h = float(np.clip(crown_h, BOARD, 0.15 * H))
+    plinth_h = (rect(plinth)[3] - rect(plinth)[1]) * H if plinth and rect(plinth) else 0.0
+    if base_m and base_m["height"] and not (plinth and valid_quad(plinth.get("quad"))):
+        plinth_h = base_m["height"] * H  # measured on the straightened front
+    if base_m and base_m["type"] in ("none", "legs") and not (plinth and valid_quad(plinth.get("quad"))):
+        plinth_h = 0.0
+    plinth_h = float(np.clip(plinth_h, PLINTH_MIN, 0.2 * H)) if plinth_h else 0.0
+    if plinth_h and plinth is None:
+        plinth = {"id": "plinth", "name": "Plinth", "kind": "plinth", "color": None}
+    setback = PLINTH_SETBACK if base_m and base_m["type"] == "recessed_plinth" else 0.0
+    doors_m = design.get("doors") if isinstance(design.get("doors"), dict) else {}
+    full_height = bool(doors_m.get("fullHeight")) and _conf(doors_m) >= EVIDENCE
     front_z = D / 2
     # The front zone: the depth the fronts occupy at the front of the carcass. Top, base, back and shelves stop behind it
     # so no door ever runs through them; the sides frame it, the crown and plinth close it above and below.
@@ -201,17 +283,21 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
     parts.append(_part(top, top["id"] if top else "top_panel", (top or {}).get("name") or "Top panel", "top_panel",
                        [-W / 2 + BOARD, H - BOARD, -D / 2], [W / 2 - BOARD, H, inner_front],
                        estimated=top is None or top.get("visibility") == "inferred", assembly="carcass"))
-    if crown_h > BOARD:  # the visible trim band across the top front
-        parts.append(_part(crown if crown is not top else None, (crown["id"] if crown is not top else "crown_trim"), "Crown trim", "crown_trim",
+    if crown is not None and crown_h > BOARD:  # the visible trim band across the top front (on evidence only)
+        band = crown.get("kind") == "top_panel"  # the top board's front band: its own trim part, the band's finish
+        located = bool(crown.get("box") or crown.get("quad"))
+        parts.append(_part(crown if located and not band else None, "crown_trim" if band else crown["id"], "Crown trim" if band else crown.get("name") or "Crown trim", "crown_trim",
                            [-W / 2 + BOARD, H - crown_h, front_z - BOARD], [W / 2 - BOARD, H - (BOARD if crown_h > 2 * BOARD else 0), front_z], assembly="carcass",
-                           material_from=crown["id"] if crown else None))
+                           material_from=crown["id"] if located else None, estimated=not located, evidence=crown["id"] if located else None))
     base = (kinds.get("base_panel") or [None])[0]
     base_y = plinth_h
     parts.append(_part(base, base["id"] if base else "base_panel", (base or {}).get("name") or "Base panel", "base_panel",
                        [-W / 2 + BOARD, base_y, -D / 2], [W / 2 - BOARD, base_y + BOARD, inner_front],
                        estimated=base is None or base.get("visibility") == "inferred", assembly="carcass"))
     if plinth_h:
-        parts.append(_part(plinth, plinth["id"], plinth.get("name") or "Plinth", "plinth", [-W / 2 + BOARD, 0, front_z - BOARD], [W / 2 - BOARD, base_y, front_z], assembly="carcass"))
+        parts.append(_part(plinth if plinth.get("box") or plinth.get("quad") else None, plinth["id"], plinth.get("name") or "Plinth", "plinth",
+                           [-W / 2 + BOARD, 0, front_z - BOARD - setback], [W / 2 - BOARD, base_y, front_z - setback], assembly="carcass",
+                           estimated=not (plinth.get("quad") or plinth.get("box"))))
     back = (kinds.get("back_panel") or [None])[0]
     parts.append(_part(back, back["id"] if back else "back_panel", (back or {}).get("name") or "Back panel", "back_panel",
                        [-W / 2 + BOARD, base_y + BOARD, -D / 2], [W / 2 - BOARD, H - BOARD, -D / 2 + BACK],
@@ -250,10 +336,13 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
     for c, r in fronts:
         if c["id"] in placed:
             continue
-        x0 = seams.get((c["id"], "left"), _snap(x_of(r[0]), xs_targets, SNAP * W))
-        x1 = seams.get((c["id"], "right"), _snap(x_of(r[2]), xs_targets, SNAP * W))
-        y1 = _snap(y_of(r[1]), [oy1], SNAP * H)
-        y0 = _snap(y_of(r[3]), [oy0], SNAP * H)
+        # Edges meet the opening only when the photo puts them there (within SNAP_EDGE); an intentional gap, a shorter
+        # door or an unequal width stays as measured. Full-height doors (measured) meet the top and bottom.
+        tol_y = SNAP_FULL if full_height and c.get("kind") in ("door", "sliding_door") else SNAP_EDGE
+        x0 = seams.get((c["id"], "left"), _snap(x_of(r[0]), xs_targets, SNAP_EDGE * W))
+        x1 = seams.get((c["id"], "right"), _snap(x_of(r[2]), xs_targets, SNAP_EDGE * W))
+        y1 = _snap(y_of(r[1]), [oy1], tol_y * H)
+        y0 = _snap(y_of(r[3]), [oy0], tol_y * H)
         x0, x1 = max(min(x0, x1), ox0), min(max(x0, x1), ox1)
         y0, y1 = max(min(y0, y1), oy0), min(max(y0, y1), oy1)
         placed[c["id"]] = (np.array([x0 + 0.001, y0 + 0.001, front_z - DOOR]), np.array([x1 - 0.001, y1 - 0.001, front_z]))
@@ -265,13 +354,28 @@ def assemble(analysis: dict[str, Any], details: dict[str, Any], size: tuple[floa
             frame = next((k for k in children if k.get("kind") == "door_frame" or k.get("geometry") == "frame"), None)
             panes = [k for k in children if k.get("kind") in ("mirror", "glass") or k.get("geometry") == "pane"]
             opening = None
+            frameless = False
             if panes and rect(panes[0]):
                 pr, fr = rect(panes[0]), r
                 fx = lambda u: lo[0] + (u - fr[0]) / max(fr[2] - fr[0], 1e-6) * (hi[0] - lo[0])  # noqa: E731
                 fy = lambda v: hi[1] - (v - fr[1]) / max(fr[3] - fr[1], 1e-6) * (hi[1] - lo[1])  # noqa: E731
-                border = 0.02
-                opening = [max(fx(pr[0]), lo[0] + border), max(fy(pr[3]), lo[1] + border), min(fx(pr[2]), hi[0] - border), min(fy(pr[1]), hi[1] - border)]
+                # The frame's four borders as the photo shows them (the pane's corners inside the door's), each at
+                # least what can be built; a measured border (a correction, the reading's design) wins.
+                measured = [fx(pr[0]) - lo[0], fy(pr[3]) - lo[1], hi[0] - fx(pr[2]), hi[1] - fy(pr[1])]
+                fb = trim(design, "frameBorder")
+                said = (frame or {}).get("border") or (fb["width"] * (hi[0] - lo[0]) if fb and fb.get("width") else None)
+                if said:
+                    measured = [said] * 4
+                frameless = (fb is not None and fb["type"] in ("none", "frameless")) or max(measured) < MIN_FRAME
+                b = [max(m, MIN_FRAME) for m in measured]
+                opening = [lo[0] + b[0], lo[1] + b[1], hi[0] - b[2], hi[1] - b[3]]
             frame_spec = frame or c
+            if frameless:  # the mirror reaches the door's edge: a backing panel behind it carries it, no visible frame
+                parts.append(_part(frame_spec, frame["id"] if frame else f"{c['id']}_frame", (frame or {}).get("name") or f"{c.get('name') or c['id']} backing",
+                                   "door_frame", lo, [hi[0], hi[1], hi[2] - PANE], geometry="panel", assembly=c["id"], mover_of=c["id"], frameless=True))
+                parts.append(_part(panes[0], panes[0]["id"], panes[0].get("name") or "Mirror", panes[0].get("kind") or "mirror",
+                                   [lo[0] + 0.001, lo[1] + 0.001, hi[2] - PANE + 0.0005], [hi[0] - 0.001, hi[1] - 0.001, hi[2]], geometry="pane", assembly=c["id"]))
+                continue
             parts.append(_part(frame_spec, frame["id"] if frame else f"{c['id']}_frame", (frame or {}).get("name") or f"{c.get('name') or c['id']} frame",
                                "door_frame", lo, hi, geometry="frame" if opening else "panel", opening=opening, assembly=c["id"],
                                mouldings=(frame or {}).get("mouldings") or [], mover_of=c["id"]))

@@ -93,6 +93,13 @@ def compare(glb: bytes, photo: bytes, doc: dict[str, Any]) -> dict[str, Any]:
             entry["mirrorIoU"] = round(float((in_photo & own).sum() / max((in_photo | own).sum(), 1)), 3)
         else:
             clean_photo = in_photo & ~excluded
+            if comp.get("kind") in ("plinth", "crown_trim"):  # the same trim core as its sample (materials.trim_core)
+                ys = np.nonzero(in_photo.any(1))[0]
+                if len(ys) >= 3:
+                    cut = ys[0] + int(np.ceil(0.6 * (ys[-1] - ys[0] + 1))) if comp["kind"] == "plinth" else ys[0] + int(0.4 * (ys[-1] - ys[0] + 1))
+                    clean_photo[cut:] = False if comp["kind"] == "plinth" else clean_photo[cut:]
+                    if comp["kind"] == "crown_trim":
+                        clean_photo[:cut] = False
             for other in doc.get("components") or []:  # smaller parts lying on it (handles, panes) are not its colour
                 o = spec_by_id.get(other.get("analysisId") or "")
                 oq = quad_of(o, details.get("bbox")) if o else None
@@ -111,12 +118,19 @@ def compare(glb: bytes, photo: bytes, doc: dict[str, Any]) -> dict[str, Any]:
         parts.append(entry)
     hardware = check_hardware(doc, analysis, details, size_m)
     issues += hardware["issues"]
+    design = check_design(doc, analysis, details, size_m, ids, part_ids, photo_mask)
+    issues += design["issues"]
+    try:
+        silhouette = reference_silhouette(glb, analysis, details, size_m, rgb.shape[:2])
+    except Exception as exc:  # a metric, never a failure of the check
+        silhouette = {"judged": False, "reason": str(exc)[:120]}
     movers = len([a for a in (doc.get("animation") or {}).get("animations") or [] if a.get("enabled")])
     fronts = len([c for c in analysis.get("components") or [] if c.get("kind") in FRONT_KINDS])
     if fronts and movers != fronts:
         issues.append(f"The photo shows {fronts} doors / drawers; the model moves {movers}.")
     return {"checked": True, "view": "front (straightened photo vs orthographic render)", "parts": parts, "issues": issues,
-            "meanIoU": round(float(np.mean([p["iou"] for p in parts if "iou" in p])), 3) if any("iou" in p for p in parts) else None, "hardware": hardware["parts"], "_images": (flat, img)}
+            "meanIoU": round(float(np.mean([p["iou"] for p in parts if "iou" in p])), 3) if any("iou" in p for p in parts) else None, "hardware": hardware["parts"],
+            "design": design["metrics"], "corrections": design["corrections"], "silhouette": silhouette, "_images": (flat, img)}
 
 
 DETAIL_PX = 20  # fewer of the handle's own pixels than this in the photo: too little detail to call a mismatch
@@ -165,3 +179,181 @@ def check_hardware(doc: dict[str, Any], analysis: dict[str, Any], details: dict[
         if hw.get("type") == "bar" and photo_orientation != hw.get("orientation"):
             issues.append(f"{comp['name']}: its orientation differs from the photo.")
     return {"parts": out, "issues": issues}
+
+
+EDGE_TOL = 0.03  # a front's edge this far (share of the height / width) from where the photo puts it is a mismatch
+UNEXPECTED = 0.3  # a part with no photo evidence covering this share of its front where the photo shows other parts
+
+
+def check_design(doc: dict[str, Any], analysis: dict[str, Any], details: dict[str, Any], size_m: dict[str, Any], ids: np.ndarray,
+                 part_ids: list[str], photo_mask) -> dict[str, Any]:
+    """The whole visible design against the straightened photo, in both directions, by normalized edges and relative
+    sizes (robust to a low-resolution photo, where pixel overlap is not):
+      fronts      each door / drawer: top and bottom edge, height and width as shares of the front, against its corners
+      unexpected  a part the photo gives no evidence for (no corners of its own) whose front covers what the photo
+                  shows as other parts: geometry the reconstruction introduced (an invented crown over the doors)
+      plinth      its height against the photo's
+      mirrors     each pane's share of its door and the frame border, against the photo's
+      materials   parts of one finish (material group) in one colour; a neutral reading built tinted
+    Only measurements with evidence (the photo's own corners) are judged. `corrections`: structured, deterministic
+    adjustments the assembly can apply (hybrid.build_corrected), never a regeneration."""
+    from app.services.assembly import FRONT_KINDS, front_quad, front_rect, homography, valid_quad
+
+    W, H = float(size_m["width"]), float(size_m["height"])
+    quad = front_quad(analysis, details)
+    Hm = homography(quad) if quad else None
+    spec_by_id = {c["id"]: c for c in analysis.get("components") or []}
+    comps = doc.get("components") or []
+    metrics: dict[str, Any] = {"fronts": [], "unexpected": [], "mirrors": []}
+    issues: list[str] = []
+    corrections: list[dict[str, Any]] = []
+
+    def photo_rect(spec):
+        return front_rect(spec, Hm, details.get("bbox")) if spec and Hm is not None and valid_quad(spec.get("quad")) else None
+
+    def model_rect(c):  # the part's front as [u0, v0, u1, v1] shares of the front (v down)
+        (x0, y0, _), (x1, y1, _) = c["box"]
+        return [(x0 + W / 2) / W, (H - y1) / H, (x1 + W / 2) / W, (H - y0) / H]
+
+    fronts = [c for c in comps if c.get("kind") in FRONT_KINDS | {"door_frame"}]
+    for c in fronts:
+        spec = spec_by_id.get(c.get("analysisId") or "")
+        pr = photo_rect(spec)
+        if pr is None:
+            continue
+        mr = model_rect(c)
+        m = {"component": c["id"], "top": round(mr[1] - pr[1], 3), "bottom": round(mr[3] - pr[3], 3),
+             "heightRatio": round((mr[3] - mr[1]) / max(pr[3] - pr[1], 1e-6), 3), "widthRatio": round((mr[2] - mr[0]) / max(pr[2] - pr[0], 1e-6), 3)}
+        metrics["fronts"].append(m)
+        if abs(m["top"]) > EDGE_TOL or abs(m["bottom"]) > EDGE_TOL:
+            issues.append(f"{c['name']}: {'shorter' if m['heightRatio'] < 1 else 'taller'} than the photo shows (top {m['top'] * H * 100:+.0f} cm, bottom {m['bottom'] * H * 100:+.0f} cm).")
+            corrections.append({"op": "front_extent", "component": spec["id"], "rect": [round(v, 4) for v in pr]})
+    tops = [m["top"] for m in metrics["fronts"]]
+    metrics["topsAligned"] = bool(not tops or max(tops) - min(tops) <= 0.01)
+
+    # Geometry the photo gives no evidence for, lying over what the photo shows as other parts.
+    shown = {}
+    for c in comps:
+        spec = spec_by_id.get(c.get("analysisId") or c.get("evidenceId") or "")
+        if spec is not None and valid_quad(spec.get("quad")) and c.get("kind") not in ("side_panel", "back_panel", "top_panel", "base_panel"):
+            shown[c["id"]] = photo_mask(spec["quad"])
+    index = {pid: i for i, pid in enumerate(part_ids)}
+    for c in comps:
+        if c["id"] in shown or c["id"] not in index or c.get("hardware") or c.get("kind") in ("side_panel", "back_panel", "top_panel", "base_panel"):
+            continue
+        mine = ids == index[c["id"]]
+        if mine.sum() < 20:
+            continue
+        others = np.zeros_like(mine)
+        for oid, m in shown.items():
+            if oid != c["id"]:
+                others |= m
+        share = float((mine & others).sum() / mine.sum())
+        if share >= UNEXPECTED:
+            metrics["unexpected"].append({"component": c["id"], "kind": c.get("kind"), "coversShown": round(share, 2)})
+            issues.append(f"{c['name']}: the photo does not show it; it covers {share:.0%} of its area where the photo shows other parts.")
+            corrections.append({"op": "remove", "component": c["id"], "kind": c.get("kind")})
+
+    plinth = next((c for c in comps if c.get("kind") == "plinth"), None)
+    pspec = spec_by_id.get((plinth or {}).get("analysisId") or "")
+    pr = photo_rect(pspec)
+    if plinth and pr:
+        model_h, photo_h = (plinth["box"][1][1] - plinth["box"][0][1]), (pr[3] - pr[1]) * H
+        metrics["plinth"] = {"modelM": round(model_h, 3), "photoM": round(photo_h, 3)}
+        if abs(model_h - photo_h) > max(0.015, 0.4 * photo_h):
+            issues.append(f"{plinth['name']}: {model_h * 100:.0f} cm high, the photo shows about {photo_h * 100:.0f} cm.")
+            corrections.append({"op": "plinth_height", "component": pspec["id"], "height": round(pr[3] - pr[1], 4)})
+
+    for pane in (c for c in comps if c.get("kind") in ("mirror", "glass")):
+        door = next((c for c in comps if c.get("assembly") == pane.get("assembly") and c.get("kind") == "door_frame"), None)
+        ps, ds = spec_by_id.get(pane.get("analysisId") or ""), spec_by_id.get((door or {}).get("analysisId") or "")
+        ppr, dpr = photo_rect(ps), photo_rect(ds)
+        if not door or not ppr or not dpr:
+            continue
+        pm, dm = model_rect(pane), model_rect(door)
+        area = lambda r: max(r[2] - r[0], 0) * max(r[3] - r[1], 0)  # noqa: E731
+        border = lambda p, d: min(p[0] - d[0], d[2] - p[2]) * W  # noqa: E731  the side borders, metres
+        m = {"component": pane["id"], "areaShare": round(area(pm) / max(area(dm), 1e-9), 3), "photoAreaShare": round(area(ppr) / max(area(dpr), 1e-9), 3),
+             "borderM": round(border(pm, dm), 3), "photoBorderM": round(max(border(ppr, dpr), 0), 3)}
+        metrics["mirrors"].append(m)
+        if m["borderM"] > m["photoBorderM"] + 0.015 and m["photoAreaShare"] - m["areaShare"] > 0.03:
+            issues.append(f"{door['name']}: its border is {m['borderM'] * 100:.1f} cm, the photo shows about {m['photoBorderM'] * 100:.1f} cm.")
+            corrections.append({"op": "frame_border", "component": ds["id"], "border": round(max(m["photoBorderM"], 0.0), 4)})
+
+    groups: dict[str, list[str]] = {}
+    for c in comps:
+        g = (c.get("material") or {}).get("group")
+        if g and g != c["id"]:
+            groups.setdefault(g, [g]).append(c["id"])
+    by = {c["id"]: c for c in comps}
+    metrics["materialGroups"] = {g: sorted(set(m)) for g, m in groups.items()}
+    for g, members in groups.items():
+        cols = {(by.get(m) or {}).get("material", {}).get("color") for m in members if m in by}
+        if len(cols) > 1:
+            issues.append(f"Parts of one finish ({', '.join(by[m]['name'] for m in members if m in by)}) have different colours.")
+    return {"metrics": metrics, "issues": issues, "corrections": corrections}
+
+
+def camera_of(analysis: dict[str, Any], size_m: dict[str, Any]) -> dict[str, float]:
+    """The photo's camera, estimated from its corners: yaw from how wide the side face looks against the front (its
+    real depth against the real width), else the reading's viewYaw; pitch from the front's keystone (its top edge
+    against its bottom edge). Degrees; used to render the model as the photo saw it, never to change the model."""
+    W, D = float(size_m["width"]), float(size_m["depth"])
+    q = analysis.get("frontQuad")
+    yaw = float(analysis.get("viewYaw") or 0.0)
+    side = next((c.get("sideQuad") for c in analysis.get("components") or [] if c.get("sideQuad")), None)
+    pitch = 5.0
+    if q:
+        q = np.asarray(q, float)
+        front_w = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2
+        if side:
+            s_ = np.asarray(side, float)
+            side_w = (np.linalg.norm(s_[1] - s_[0]) + np.linalg.norm(s_[2] - s_[3])) / 2
+            est = float(np.degrees(np.arctan2(side_w * W, max(front_w * D, 1e-6))))
+            yaw = est if (s_[:, 0].mean() > q[:, 0].mean()) else -est  # the right side seen: positive
+        top, bottom = np.linalg.norm(q[1] - q[0]), np.linalg.norm(q[2] - q[3])
+        pitch = float(np.clip(5.0 + 60.0 * (bottom - top) / max(top + bottom, 1e-6), -20, 30))
+    return {"yaw": round(float(np.clip(yaw, -70, 70)), 1), "pitch": round(pitch, 1)}
+
+
+def reference_silhouette(glb: bytes, analysis: dict[str, Any], details: dict[str, Any], size_m: dict[str, Any], shape) -> dict[str, Any]:
+    """The model's outline rendered from the photo's estimated camera against the photo's (its front and side corners),
+    both cropped to their own box and compared at one size (IoU). Judged only when the photo gives a side face or is
+    nearly straight on (else its outline is the front alone and the comparison would mislead)."""
+    from app.services import render
+
+    cam = camera_of(analysis, size_m)
+    q = analysis.get("frontQuad")
+    side = [c["sideQuad"] for c in analysis.get("components") or [] if c.get("sideQuad")]
+    if not q or (not side and abs(cam["yaw"]) > 5):
+        return {"judged": False, "camera": cam, "reason": "the photo shows no side face to outline"}
+    ih, iw = shape
+    pts = np.array([[p[0] * iw, p[1] * ih] for quad in [q, *side] for p in quad], np.float32)
+    photo = np.zeros((ih, iw), np.uint8)
+    cv2.fillConvexPoly(photo, cv2.convexHull(pts).astype(np.int32), 255)
+    _, ids, _, _ = render.render(glb, cam["yaw"], cam["pitch"], size=240, shaded=False)
+
+    def crop(m):
+        ys, xs = np.nonzero(m)
+        c = m[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.uint8)
+        return cv2.resize(c, (120, 120), interpolation=cv2.INTER_NEAREST) > 0, (xs.max() - xs.min() + 1) / (ys.max() - ys.min() + 1)
+
+    a, ra = crop(photo > 0)
+    b, rb = crop(ids >= 0)
+    iou = float((a & b).sum() / max((a | b).sum(), 1))
+    return {"judged": True, "camera": cam, "iou": round(iou, 3), "aspectPhoto": round(float(ra), 3), "aspectModel": round(float(rb), 3)}
+
+
+def views(glb: bytes, analysis: dict[str, Any], size_m: dict[str, Any], size: int = 320):
+    """The comparison renders (PIL images): straight orthographic front, the photo's estimated camera, a three-quarter
+    view and the side."""
+    from PIL import Image
+
+    from app.services import render
+
+    W, H = float(size_m["width"]), float(size_m["height"])
+    span = max(W, H) / 2
+    cam = camera_of(analysis, size_m)
+    front = render.render(glb, ortho=(-span, H / 2 - span, span, H / 2 + span), size=size)[0]
+    return {"front": Image.fromarray(front), "reference": Image.fromarray(render.render(glb, cam["yaw"], cam["pitch"], size)[0]),
+            "threeQuarter": Image.fromarray(render.render(glb, 35, 10, size)[0]), "side": Image.fromarray(render.render(glb, 90, 5, size)[0])}

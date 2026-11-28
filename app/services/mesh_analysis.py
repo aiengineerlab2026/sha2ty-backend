@@ -260,6 +260,31 @@ class Exclusion(BaseModel):
         return q
 
 
+_MEASURE = {"type": "object", "properties": {
+    "type": {"type": "string"},
+    "height": {"type": "number", "description": "As a fraction of the front face's height (0 when none)"},
+    "confidence": {"type": "number", "description": "0..1"},
+    "evidence": {"type": "string", "description": "What in the photo shows it"}}, "required": ["type", "confidence"]}
+
+DESIGN_SCHEMA = {
+    "type": "object",
+    "description": "The visible design's proportions, measured on the perspective-corrected FRONT face (fractions of its width / height)",
+    "properties": {
+        "topTrim": {**_MEASURE, "properties": {**_MEASURE["properties"], "type": {"type": "string", "enum": ["none", "thin_edge", "crown", "overhang", "header_panel", "recessed"]}}},
+        "base": {**_MEASURE, "properties": {**_MEASURE["properties"], "type": {"type": "string", "enum": ["none", "thin_edge", "recessed_plinth", "decorative_base", "platform", "legs"]}}},
+        "doors": {"type": "object", "properties": {
+            "fullHeight": {"type": "boolean", "description": "The doors run from the base to the top edge with no band above them"},
+            "mounting": {"type": "string", "enum": ["overlay", "inset", "unknown"]},
+            "gap": {"type": "number", "description": "The gap between neighbouring doors, a fraction of the front's width"},
+            "confidence": {"type": "number"}}, "required": ["fullHeight", "confidence"]},
+        "frameBorder": {"type": "object", "properties": {
+            "type": {"type": "string", "enum": ["none", "frameless", "thin", "wide"]},
+            "width": {"type": "number", "description": "A mirror / glass door's frame border, a fraction of the door's width"},
+            "confidence": {"type": "number"}}, "required": ["type", "confidence"]},
+    },
+}
+
+
 class MeshAnalysis(BaseModel):
     objectType: str = Field(min_length=1, max_length=80)
     # The object's whole front face in the image (four corners, image fractions) and the camera's side angle in
@@ -267,6 +292,9 @@ class MeshAnalysis(BaseModel):
     frontQuad: list[list[float]] | None = None
     viewYaw: float = 0.0
     exclusions: list[Exclusion] = []
+    # The visible design's measured proportions (spec v5): the top trim / crown, the base / plinth, full-height doors,
+    # mirror frame borders. Evidence for the assembly before any construction default (see DESIGN_SCHEMA).
+    design: dict[str, Any] = {}
     summary: str = ""
     components: list[Component] = Field(min_length=1)
     movable: bool = False  # the object has parts a person opens, slides or folds
@@ -277,6 +305,11 @@ class MeshAnalysis(BaseModel):
     @classmethod
     def _front(cls, v: Any) -> list[list[float]] | None:
         return _quad(v) if v else None
+
+    @field_validator("design", mode="before")
+    @classmethod
+    def _design(cls, v: Any) -> dict[str, Any]:
+        return {k: e for k, e in v.items() if k in DESIGN_SCHEMA["properties"] and isinstance(e, dict)} if isinstance(v, dict) else {}
 
     @field_validator("viewYaw", mode="before")
     @classmethod
@@ -389,6 +422,7 @@ SCHEMA = {
         "frontQuad": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}},
                       "description": "The whole object's FRONT face corners in the image (fractions): top-left, top-right, bottom-right, bottom-left"},
         "viewYaw": {"type": "number", "description": "Camera angle in degrees: 0 straight on, positive when the object's right side is visible"},
+        "design": DESIGN_SCHEMA,
         "exclusions": {"type": "array", "items": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["reflection", "shadow", "background", "object", "highlight"]},
             "quad": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}}, "required": ["kind", "quad"]},
@@ -437,6 +471,10 @@ Rules:
 - hardware: list every visible handle or knob as its own component (kind handle / knob) with its quad around just
   the hardware, hardwareType, and assembly = the door or drawer it is on. A door with no visible handle: opening
   "handleless" or "push"; never invent a handle.
+- design: measure what the photo shows on the straightened front. topTrim: "crown" only for a real decorative band
+  or cornice across the top front; a plain top edge is "thin_edge" (the top surface seen from above is NOT a crown).
+  base: the bottom band (plinth, legs…) and its height. doors.fullHeight: the doors run from the base to the top
+  edge. frameBorder: a mirror or glass door's frame width ("frameless" when the mirror reaches the door's edge).
 - revealsInterior: true only when opening it shows a hollow inside (a cupboard, a drawer), not a decorative panel.
 - interior: only for storage pieces whose inside is hidden. List simple, typical items (shelves, a hanging rail,
   dividers, drawer boxes) with a count, and only what such a piece usually has; hasInterior false otherwise.

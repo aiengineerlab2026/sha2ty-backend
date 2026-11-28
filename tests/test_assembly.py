@@ -116,7 +116,8 @@ def test_materials_are_clean_samples_never_photo_crops(model):
     assert dark.max() < 120  # the dark brown trim
     for c in doc["components"]:
         # a side seen edge-on in shadow takes the reading's colour for it (recorded as an estimate); the rest is sampled
-        allowed = ("colour sample", "texture sample", "physical") + (("reading colour",) if c["kind"] in ("side_panel", "back_panel", "top_panel", "base_panel") else ())
+        # ... or the finish of the reliable part its reading colour matches (a material group)
+        allowed = ("colour sample", "texture sample", "physical") + (("reading colour", "material group") if c["kind"] in ("side_panel", "back_panel", "top_panel", "base_panel") else ("material group",) if c["kind"] == "door_frame" else ())
         assert c["material"]["source"] in allowed, c
 
 

@@ -37,7 +37,7 @@ from app.services.product_details import LISTING, Lang, clean
 
 logger = logging.getLogger(__name__)
 
-SPEC_VERSION = "furniture-spec-v4"  # bump with PROMPT or the schema: invalidates the cache
+SPEC_VERSION = "furniture-spec-v5"  # bump with PROMPT or the schema: invalidates the cache
 
 PROMPT = """You are a furniture modeller preparing a vendor's product photo for two 3D models: a visual one that must
 look exactly like the photo, and a structural one a carpenter can build from. The vendor says it is {what}.
